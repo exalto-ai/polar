@@ -12,6 +12,8 @@
 
 mod tools;
 
+use polard::sync;
+
 use polard::discovery;
 
 use axum::http::{Request, StatusCode};
@@ -44,8 +46,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let expected = token.clone();
+    let sync_state = sync::SyncState::new(workspace.clone());
     let app = axum::Router::new()
         .nest_service("/mcp", service)
+        // The editor connects here and speaks the same protocol the relay will
+        // (M2.1): one protocol, two transports.
+        .route("/sync", axum::routing::any(sync::handler))
+        .with_state(sync_state)
         .layer(middleware::from_fn(
             move |req: Request<axum::body::Body>, next: Next| {
                 let expected = expected.clone();

@@ -433,6 +433,37 @@ impl Workspace {
         self.replace_block(doc_id, block_id, &updated, version, actor)
     }
 
+    /// Everything this replica has that the holder of `state_vector` lacks.
+    /// The `SUBSCRIBE` half of the sync protocol (§5).
+    pub fn sync_since(&self, doc_id: &str, state_vector: &[u8]) -> Result<Vec<u8>, WorkspaceError> {
+        self.with(|inner| Ok(inner.doc(doc_id)?.diff_since(state_vector)))
+    }
+
+    /// Apply an update frame from a peer — the editor window, or later the
+    /// relay.
+    ///
+    /// Returns `None` when the update changed nothing, so callers can skip
+    /// broadcasting and logging a no-op. Yjs updates are idempotent, and a
+    /// reconnecting peer resends what it already sent.
+    pub fn apply_peer_update(
+        &self,
+        doc_id: &str,
+        update: &[u8],
+        actor: &ActorRef,
+    ) -> Result<Option<String>, WorkspaceError> {
+        self.with(|inner| {
+            inner.register(actor)?;
+            let doc = inner.doc(doc_id)?;
+            let before = doc.state_vector();
+            doc.apply_update(update)
+                .map_err(|e| WorkspaceError::NotFound(format!("bad update: {e}")))?;
+            if doc.state_vector() == before {
+                return Ok(None);
+            }
+            Ok(Some(inner.commit(doc_id, &before, actor)?))
+        })
+    }
+
     /// Attribution for the whole log — the activity feed and per-run revert.
     pub fn attribution(
         &self,
