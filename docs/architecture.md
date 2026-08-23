@@ -487,6 +487,48 @@ This is more work than one line of an ADR makes it sound, and it should be sized
 The property test in M1.0 is the guard: a node that cannot survive `parse(serialize(x))`
 does not ship.
 
+### Built 2026-08-23 — `crates/polar-schema`, `crates/polar-markdown`
+
+Green over 40,000 generated documents. **Every defect below was found by the property
+test, not by reading the code** — which is the argument for writing it before the schema
+rather than after:
+
+| Defect | Why it bites |
+| --- | --- |
+| Code fences | Serializer appended a terminating newline only when absent; parser always stripped one. Any block ending in a blank line lost it. |
+| Tight lists | `pulldown-cmark` emits `Item -> Text` with no `Paragraph`, putting inline content directly in a `listItem` the schema says holds blocks. |
+| `---` rules | Doubles as a setext underline, and `- ---` re-parses as a rule at the *outer* level. Emit `***`, which is neither. |
+| Adjacent lists | Two sibling lists sharing a bullet merge into one. CommonMark starts a new list when the marker changes, so alternate between siblings. |
+| ATX headings | A trailing `#` run is read as a closing sequence and stripped. |
+
+**The one irreducible limitation.** A marked span fused to adjacent word characters cannot
+round-trip when punctuation sits against the delimiter — from the span's own text, or from
+a nested mark's delimiter, since every delimiter is punctuation. Escaping cannot help: the
+backslash is punctuation too. CommonMark's flanking rules make this symmetric, so it
+applies on both the opening and closing side. Whitespace separation resolves every variant,
+which is why it is rare in practice — emphasis nearly always follows a space.
+
+It is pinned by `intraword_emphasis_gap_is_pinned` rather than papered over, so a
+`pulldown-cmark` upgrade that moves the boundary is noticed.
+
+**Empty paragraphs are also unrepresentable**, and that independently justifies AD-5: an
+agent that round-tripped a whole document through markdown would silently delete every
+empty block. Surgical block edits never see the whole tree, so the loss cannot propagate
+back into the document. The ban on whole-document replacement is load-bearing, not
+stylistic.
+
+**Gap this surfaced:** nothing validates content expressions. The generator happily built
+`listItem` nodes without the leading `paragraph` the schema requires, and the serializer
+took the blame. Either M1 validates against the content expressions in `schema.json`, or it
+should stop claiming to.
+
+**Correction to M1.2's mechanics.** TipTap builds its schema from Extensions and cannot
+load a raw ProseMirror schema spec, so "TipTap loads schema.json" is not implementable as
+written. The workable direction is the reverse: TS remains the definition, a build step
+exports `getSchema(extensions).spec` to JSON, Rust consumes that, and CI fails if the
+committed JSON drifts from what the extensions produce. One source of truth either way —
+but the arrow points the other direction.
+
 ## M1.6 — MCP surface
 
 HTTP on localhost. The port and a token live in

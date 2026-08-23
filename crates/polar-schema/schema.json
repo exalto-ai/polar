@@ -1,0 +1,31 @@
+{
+  "_comment": "Single source of truth for the document shape (AD/M1.2). Rust reads it here; the editor must derive its ProseMirror schema from the same file rather than hand-writing a second one. Node names and attrs are ProseMirror's; the `md` key is Polar's markdown mapping (AD-12: CommonMark + GFM).",
+  "nodes": {
+    "doc": { "content": "block+" },
+    "paragraph": { "group": "block", "content": "inline*", "md": "paragraph" },
+    "heading": {
+      "group": "block", "content": "inline*", "md": "heading",
+      "attrs": { "level": { "default": 1 } }
+    },
+    "blockquote": { "group": "block", "content": "block+", "md": "blockquote" },
+    "codeBlock": {
+      "group": "block", "content": "text*", "code": true, "md": "code_block",
+      "attrs": { "language": { "default": null } }
+    },
+    "bulletList": { "group": "block", "content": "listItem+", "md": "bullet_list" },
+    "orderedList": {
+      "group": "block", "content": "listItem+", "md": "ordered_list",
+      "attrs": { "start": { "default": 1 } }
+    },
+    "listItem": { "content": "paragraph block*", "md": "list_item" },
+    "horizontalRule": { "group": "block", "md": "hr" },
+    "text": { "group": "inline" }
+  },
+  "marks": {
+    "strong": { "md": "**" },
+    "em": { "md": "*" },
+    "strike": { "md": "~~" },
+    "code": { "md": "`" },
+    "link": { "md": "link", "attrs": { "href": {}, "title": { "default": null } } }
+  }
+}
