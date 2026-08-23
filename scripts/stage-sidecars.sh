@@ -15,16 +15,21 @@ echo "staging sidecars for $TARGET"
 mkdir -p "$DEST"
 
 if [[ "$TARGET" == universal-apple-darwin ]]; then
-  # A universal binary is built per-arch and stitched together with lipo;
-  # cargo cannot emit one directly.
+  # Tauri builds a universal app by compiling each architecture separately and
+  # lipo-ing the result, and during each of those passes it looks for a sidecar
+  # named for *that* architecture — not the universal one. So stage all three:
+  # both per-arch binaries, and the lipo'd universal for the bundling step.
   for arch in aarch64-apple-darwin x86_64-apple-darwin; do
     rustup target add "$arch" >/dev/null
     cargo build --release --target "$arch" -p polard
+    for name in polard polar-mcp-stdio; do
+      cp "$ROOT/target/$arch/release/$name" "$DEST/$name-$arch"
+    done
   done
   for name in polard polar-mcp-stdio; do
     lipo -create -output "$DEST/$name-$TARGET" \
-      "$ROOT/target/aarch64-apple-darwin/release/$name" \
-      "$ROOT/target/x86_64-apple-darwin/release/$name"
+      "$DEST/$name-aarch64-apple-darwin" \
+      "$DEST/$name-x86_64-apple-darwin"
   done
 else
   rustup target add "$TARGET" >/dev/null 2>&1 || true
