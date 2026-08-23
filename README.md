@@ -3,8 +3,12 @@
 A local-first macOS writing app. Individual documents, real-time collaboration between
 humans *and* agents, fully functional offline, syncing through a self-hostable relay.
 
-**M1 is complete**: a Rust daemon serves documents to agents over MCP, with no editor
-anywhere. `cargo test --workspace` is green and CI gates every push.
+**M2 is complete**: the daemon, the window, and any number of agents edit one document at
+once. An agent writing over MCP appears live in an open editor, and a rail in the left
+margin says who wrote each block. `cargo test --workspace` is green and CI gates every push.
+
+One thing is still owed from M2: the manual IME pass (AD-8), which needs a person at a
+keyboard rather than a test. M3 — sharing through a relay — is planned but not built.
 
 - **[docs/architecture.md](docs/architecture.md)** — 17 decisions, each with its cost
   stated. Written to be argued with.
@@ -12,7 +16,7 @@ anywhere. `cargo test --workspace` is green and CI gates every push.
   defined in.
 - **[prototypes/editor-probe](prototypes/editor-probe)** — throwaway probe answering
   whether WKWebView can host a collaborative ProseMirror (AD-8). It can: identical to
-  Chromium on all five automated checks. One manual IME pass is still outstanding.
+  Chromium on all five automated checks.
 
 ## Crates
 
@@ -45,6 +49,10 @@ To watch an agent edit a document you have open, from another terminal:
 scripts/agent watch 2
 ```
 
+Rails appear in the left margin as it writes — dashed for an agent, solid for a person.
+Hover one to see who wrote the block and when. A document only you have written shows
+none, which is the point.
+
 The daemon can also be run on its own, which is the whole point — agents do not need a
 window:
 
@@ -64,3 +72,7 @@ agent editing a document with no window open is the normal path rather than a sp
 
 Documents are a ProseMirror tree in a Yjs `XmlFragment`. Markdown is a projection used for
 agent I/O, export, and search — never the storage format.
+
+Attribution lives in the SQLite op log rather than the CRDT, because Yjs cannot carry it.
+That log is what makes *who wrote this block* answerable at all, and it is never compacted
+away.

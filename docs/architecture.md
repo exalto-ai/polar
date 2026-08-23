@@ -799,6 +799,15 @@ The rail's label says "You · 4m ago, drafted by research" for exactly that case
 The rails are also where AD-11's "Revert this run" belongs when it is built — `session_id`
 is already on the row.
 
+## M2 — complete, 2026-08-23
+
+All six acceptance criteria pass. The last of them — authorship distinguishable per actor —
+closed when the rails landed in M2.8; the other five have been gated in CI since the window
+was attached.
+
+What remains is the manual IME pass (AD-8). It needs a person at a keyboard, so it is listed
+below rather than counted here.
+
 ## M2.9 — Open
 
 The manual IME pass (AD-8), which needs a person. Everything else in M2.0 passes in CI.
