@@ -96,8 +96,9 @@ export class Mcp {
     return JSON.parse(result.content[0].text);
   }
 
-  async listDocuments(limit = 50) {
-    return (await this.call("list_documents", { limit })).documents as DocumentSummary[];
+  async listDocuments(limit = 50, trashed = false) {
+    return (await this.call("list_documents", { limit, trashed }))
+      .documents as DocumentSummary[];
   }
 
   async search(query: string, limit = 20) {

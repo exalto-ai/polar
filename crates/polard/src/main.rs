@@ -14,7 +14,7 @@ mod tools;
 
 use polard::sync;
 
-use polard::discovery;
+use polard::{discovery, logging};
 
 use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
@@ -34,6 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    // Held for the process's lifetime; dropping it discards buffered lines.
+    let _logs = logging::init(&discovery::home());
+    tracing::info!(store = %db_path.display(), "starting");
 
     let workspace = Arc::new(Workspace::open(&db_path)?);
     let token = discovery::random_token()?;
@@ -145,9 +149,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = listener.local_addr()?.port();
 
     let discovery_path = discovery::write(port, &token, &db_path)?;
+    // The readiness line stays on stderr verbatim: the app and the test harness
+    // both wait for it, and a logger's prefixes would change what they match.
     eprintln!("polard listening on http://127.0.0.1:{port}/mcp");
-    eprintln!("discovery: {}", discovery_path.display());
-    eprintln!("store: {}", db_path.display());
+    tracing::info!(
+        port,
+        discovery = %discovery_path.display(),
+        "listening"
+    );
 
     // Remove the discovery file on the way out: a stale one points clients at a
     // port that is either dead or, worse, someone else's.
@@ -157,6 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await;
+    tracing::info!("shutting down");
     let _ = std::fs::remove_file(&cleanup);
     result?;
     Ok(())

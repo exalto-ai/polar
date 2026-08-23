@@ -220,7 +220,7 @@ fn search_finds_documents_by_body() {
     assert_eq!(hits[0].0, "doc-4");
 
     // reindex refreshes the denormalized title used by list views.
-    let listed = store.list_documents().unwrap();
+    let listed = store.list_documents(false).unwrap();
     assert!(
         listed
             .iter()

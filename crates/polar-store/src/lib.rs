@@ -314,11 +314,21 @@ impl Store {
         Ok(rows)
     }
 
-    pub fn list_documents(&self) -> Result<Vec<DocumentRow>, SqlError> {
-        let mut stmt = self.conn.prepare(
+    /// Documents, most recently updated first.
+    ///
+    /// `trashed` selects which side of the tombstone to look at. Deleting is
+    /// soft (AD-14), so the rows never leave — but without this there was no way
+    /// back to a document once deleted, which makes "soft" a claim rather than a
+    /// feature.
+    pub fn list_documents(&self, trashed: bool) -> Result<Vec<DocumentRow>, SqlError> {
+        let sql = if trashed {
             "SELECT id, title, updated_at, deleted_at FROM documents
-             WHERE deleted_at IS NULL ORDER BY updated_at DESC",
-        )?;
+             WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"
+        } else {
+            "SELECT id, title, updated_at, deleted_at FROM documents
+             WHERE deleted_at IS NULL ORDER BY updated_at DESC"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(DocumentRow {

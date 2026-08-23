@@ -1,5 +1,6 @@
 /**
- * The window. Opens one document at a time; ⌘K switches.
+ * The window. Opens one document at a time; the switcher opens with the
+ * platform accelerator and K.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow as tauriWindow } from "@tauri-apps/api/window";
@@ -31,6 +32,9 @@ const els = {
   peers: document.getElementById("peers")!,
   agents: document.getElementById("agents")!,
   stdioCommand: document.getElementById("stdio-command")!,
+  toast: document.getElementById("toast")!,
+  switcher: document.querySelector(".switcher") as HTMLElement,
+  hint: document.getElementById("switcher-hint")!,
   input: document.getElementById("switcher-input") as HTMLInputElement,
   results: document.getElementById("switcher-results")!,
 };
@@ -45,6 +49,33 @@ let open: {
   rails: Rails;
 } | null = null;
 let openDocId = "";
+
+/**
+ * Say something went wrong, where the person is already looking.
+ *
+ * Failures used to have nowhere to go. `refreshProvenance` swallowed its
+ * errors, `boot` only wrote into the title, and everything else surfaced as
+ * nothing at all — a green status dot above a window that was quietly wrong.
+ */
+let toastTimer: number | null = null;
+
+function notify(message: string, kind: "info" | "error" = "info") {
+  els.toast.textContent = message;
+  els.toast.dataset.kind = kind;
+  els.toast.hidden = false;
+  if (toastTimer !== null) clearTimeout(toastTimer);
+  // Errors linger; confirmations do not.
+  toastTimer = window.setTimeout(
+    () => (els.toast.hidden = true),
+    kind === "error" ? 6000 : 2600,
+  );
+}
+
+/** Whatever an unknown throw carries, said in one line. */
+function reason(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.length > 160 ? `${text.slice(0, 157)}…` : text;
+}
 
 /**
  * Agents that have written recently.
@@ -266,9 +297,10 @@ async function refreshProvenance() {
     const blocks = await mcp.blockProvenance(docId);
     // The switcher may have moved on while this was in flight.
     if (open && openDocId === docId) open.rails.setProvenance(blocks);
-  } catch {
-    // A daemon we cannot reach is already reported by the status dot. Rails
-    // simply keep saying whatever they last knew.
+  } catch (error) {
+    // The rails keep saying whatever they last knew, but silence here is how a
+    // stale margin looks exactly like an accurate one.
+    notify(`Could not load authorship: ${reason(error)}`, "error");
   }
 }
 
@@ -385,6 +417,16 @@ document.getElementById("copy-command")!.addEventListener("click", async (e) => 
 
 let results: DocumentSummary[] = [];
 let selected = 0;
+/** The switcher shows either live documents or the trash. */
+let trashMode = false;
+
+function renderHint() {
+  els.hint.innerHTML = trashMode
+    ? `<kbd>↵</kbd> open · <kbd>${ACCEL_LABEL}⌫</kbd> restore · <kbd>${ACCEL_LABEL}⇧⌫</kbd> back · <kbd>esc</kbd> close`
+    : `<kbd>↵</kbd> open · <kbd>${ACCEL_LABEL}↵</kbd> new · <kbd>${ACCEL_LABEL}⌫</kbd> trash · <kbd>${ACCEL_LABEL}⇧⌫</kbd> view trash · <kbd>esc</kbd> close`;
+  els.switcher.dataset.mode = trashMode ? "trash" : "live";
+  els.input.placeholder = trashMode ? "Search the trash…" : "Search documents…";
+}
 
 function renderResults() {
   els.results.replaceChildren(
@@ -402,15 +444,28 @@ function renderResults() {
   if (results.length === 0) {
     const empty = document.createElement("li");
     empty.className = "empty";
-    empty.textContent = els.input.value
-      ? `No matches — ${ACCEL_LABEL}↵ to create`
-      : `No documents yet — ${ACCEL_LABEL}↵ to create`;
+    empty.textContent = trashMode
+      ? "The trash is empty"
+      : els.input.value
+        ? `No matches — ${ACCEL_LABEL}↵ to create`
+        : `No documents yet — ${ACCEL_LABEL}↵ to create`;
     els.results.replaceChildren(empty);
   }
 }
 
 async function refreshResults() {
   const query = els.input.value.trim();
+  if (trashMode) {
+    // Search runs over live documents only, so the trash filters by title.
+    const all = await mcp.listDocuments(200, true);
+    const needle = query.toLowerCase();
+    results = needle
+      ? all.filter((d) => d.title.toLowerCase().includes(needle))
+      : all;
+    selected = 0;
+    renderResults();
+    return;
+  }
   if (query) {
     const hits = await mcp.search(query);
     results = hits.map((h) => ({ doc_id: h.doc_id, title: h.title, updated_at: 0 }));
@@ -422,6 +477,8 @@ async function refreshResults() {
 }
 
 function openSwitcher() {
+  trashMode = false;
+  renderHint();
   els.scrim.hidden = false;
   els.input.value = "";
   els.input.focus();
@@ -440,6 +497,14 @@ function choose(index: number) {
   void openDocument(row.doc_id);
 }
 
+async function toggleTrashMode() {
+  trashMode = !trashMode;
+  renderHint();
+  els.input.value = "";
+  els.input.focus();
+  await refreshResults();
+}
+
 /**
  * Trash the highlighted document. Soft: the document and its history remain,
  * and the tombstone replicates, so this is undoable by anyone with the id.
@@ -447,8 +512,27 @@ function choose(index: number) {
 async function trashSelected() {
   const row = results[selected];
   if (!row) return;
+
+  // In the trash the same key means the opposite thing: put it back.
+  if (trashMode) {
+    try {
+      await mcp.setDocumentDeleted(row.doc_id, false);
+      notify(`Restored "${row.title || "Untitled"}"`);
+      await refreshResults();
+    } catch (error) {
+      notify(`Could not restore: ${reason(error)}`, "error");
+    }
+    return;
+  }
+
   const wasOpen = row.doc_id === openDocId;
-  await mcp.setDocumentDeleted(row.doc_id, true);
+  try {
+    await mcp.setDocumentDeleted(row.doc_id, true);
+    notify(`Moved "${row.title || "Untitled"}" to the trash · ${ACCEL_LABEL}⇧⌫ to find it`);
+  } catch (error) {
+    notify(`Could not trash: ${reason(error)}`, "error");
+    return;
+  }
   await refreshResults();
 
   // Do not leave the window staring at something that is no longer listed.
@@ -486,6 +570,9 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     event.preventDefault();
     closeSwitcher();
+  } else if (event.key === "Backspace" && accel(event) && event.shiftKey) {
+    event.preventDefault();
+    void toggleTrashMode();
   } else if (event.key === "Backspace" && accel(event)) {
     event.preventDefault();
     void trashSelected();
@@ -546,5 +633,6 @@ function getCurrentWindow() {
 
 boot().catch((error) => {
   document.title = "Could not reach the daemon";
+  notify(`Could not reach the daemon: ${reason(error)}`, "error");
   console.error(error);
 });
