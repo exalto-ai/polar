@@ -354,3 +354,178 @@ agent; gating solo local editing is friction with no beneficiary.
 
 Folders and hierarchy · accounts and authentication · end-to-end encryption · mobile ·
 plugins · version-history UI · `.md` file mirroring on disk.
+
+---
+
+# Part II — M1: the daemon
+
+Part I is decisions. This is the first thing we actually build.
+
+**No UI.** The editor is well-trodden ground and the probe already cleared it. The part
+with no precedent to copy is a Rust daemon serving CRDT documents to agents over MCP with
+stable anchors, so that is where the unknowns are and that is what goes first.
+
+## M1.0 — Acceptance
+
+M1 is done when, with no window open anywhere:
+
+1. An agent creates a document, reads it as markdown with block anchors, calls
+   `replace_block`, and reads back its own edit.
+2. The op log attributes every change to the right actor, and survives a daemon restart.
+3. `parse(serialize(doc)) == doc` holds as a property test over documents generated from
+   the schema.
+4. Two agents editing concurrently converge, and both edits are individually attributable.
+
+All four are scriptable. None of them need a webview, which is the point.
+
+## M1.1 — Crate layout
+
+```
+polar/
+  crates/
+    polar-schema/    # the schema as data; node/mark types; validation
+    polar-core/      # yrs documents, block identity, anchors, markdown projection
+    polar-store/     # SQLite: op log, snapshots, actors, FTS
+    polar-mcp/       # tool surface + HTTP transport
+    polard/          # binary: wiring, config, lifecycle
+    polar-mcp-stdio/ # shim binary: stdio -> HTTP, spawns polard if absent
+```
+
+The split is not ceremony — it is what makes the acceptance criteria testable in
+isolation. `polar-core` must round-trip markdown with no SQLite anywhere near it, and
+`polar-store` must be exercisable without standing up an MCP server.
+
+## M1.2 — The schema is data, defined once
+
+The sleeper integration risk: TipTap defines the ProseMirror schema in TypeScript, and the
+daemon needs the same schema to serialize, parse, and validate. Drift between them means
+agents produce documents the editor rejects — a failure that surfaces late and looks like
+a CRDT bug.
+
+ProseMirror schemas *are* data: a plain spec object. So `polar-schema/schema.json` is the
+single source of truth. TipTap loads it at construction; Rust deserializes it into a
+`Schema` used by the serializer, parser, and validator. Neither side hand-writes a schema.
+
+v0 nodes: `doc`, `paragraph`, `heading` (1–3), `blockquote`, `bulletList`, `orderedList`,
+`listItem`, `codeBlock`, `horizontalRule`, `table`/`tableRow`/`tableCell`, `text`.
+v0 marks: `strong`, `em`, `code`, `strike`, `link`.
+
+Anything that cannot round-trip through CommonMark + GFM does not enter the schema (AD-12).
+
+## M1.3 — Block identity
+
+The ADR asserted that agents address blocks by ID without saying what mints them.
+ProseMirror nodes have no stable identity, and an explicit `block_id` attribute is itself
+CRDT state that can conflict on merge.
+
+**Decision: use the intrinsic Yjs identity.** Every `Y.XmlElement` already carries a Yjs
+ID — `(client_id, clock)` — that is globally unique without coordination, stable across
+edits to the block's contents, and free. `block_id` is its string form, `"{client}:{clock}"`.
+
+Consequences, including the unpleasant one:
+
+* Splitting a block mints a new ID for the new half, so a `block_id` an agent read a moment
+  ago can cease to exist. That is honest rather than convenient, and it is exactly what the
+  `RelativePosition` anchors exist to absorb. `replace_block` against a vanished ID returns
+  a "block moved" result carrying the current anchors, not an error.
+* The daemon is authoritative for IDs. The webview needs them only to map decorations, and
+  gets them from the daemon rather than deriving its own.
+
+**Verified 2026-08-22** against `yrs` 0.27.4 (`prototypes/yrs-check`). The API is not
+`element.id()` — that does not exist. It is `Branch::id()`, reached through
+`AsRef<Branch>`, returning `BranchID::Nested(ID)` for nested elements and
+`BranchID::Root(name)` for roots. Measured:
+
+```
+id at create    = 8691074583632113:0
+id after edit   = 8691074583632113:0   stable across content edits
+id on replica B = 8691074583632113:0   identical after sync
+```
+
+That third line is the one that matters and is easy to assume without checking: the same
+block carries the same `block_id` on every replica, so an agent on one machine can hand a
+`block_id` to an agent on another. Had it been replica-local, the whole anchor design would
+have been quietly wrong.
+
+**Toolchain note, also from that check:** `yrs` 0.27.4 uses `if let` guards and does not
+build on Rust 1.94.1 (the current default here). It builds on 1.95.0. `polard` should pin a
+`rust-toolchain.toml` at >= 1.95 so this surfaces at setup rather than mid-build.
+
+## M1.4 — SQLite access patterns
+
+WAL mode, `synchronous = NORMAL`. Writes go through a single writer task — no contention to
+design around, because the daemon owns the document anyway. Reads for list and search use a
+small read pool.
+
+**Append (hot path).** One `INSERT` into `updates`. Not one transaction per operation: an
+agent turn's operations batch into a single write, which is the same coalescing AD-16
+requires at the IPC boundary.
+
+**Cold start.** Load the newest snapshot for the document, then replay
+`SELECT payload FROM updates WHERE doc_id = ? AND seq > ? ORDER BY seq`. Documents are
+loaded lazily on first access and held in an LRU, not all loaded at boot.
+
+**Snapshot.** Every 200 updates or 30s idle, whichever comes first; keep the last two.
+Snapshots serve load performance only — **compaction never deletes from `updates`**, because
+the log is what the activity feed and per-run revert read (AD-13).
+
+**Search.** FTS5 over the markdown projection, rewritten on snapshot rather than per update.
+Agents need search or they resort to reading every document.
+
+## M1.5 — Markdown projection
+
+Lives in Rust, not JS. AD-2 says agents work with no window open, which means the daemon
+serves markdown without a webview, which puts both directions of the projection on the
+critical path:
+
+* **Serialize:** walk the yrs `XmlFragment` against the schema, emitting CommonMark + GFM
+  and a block map — `[{block_id, type, line_start, line_end}]` — alongside it. Agents get
+  the markdown they are good at; anchors travel beside the text rather than polluting it.
+* **Parse:** `pulldown-cmark` into a ProseMirror tree, validated against the schema.
+
+This is more work than one line of an ADR makes it sound, and it should be sized as such.
+The property test in M1.0 is the guard: a node that cannot survive `parse(serialize(x))`
+does not ship.
+
+## M1.6 — MCP surface
+
+HTTP on localhost. The port and a token live in
+`~/Library/Application Support/ai.exalto.polar/daemon.json`, mode `0600` — any local
+process can reach a localhost port, and documents are the user's private writing.
+`polar-mcp-stdio` reads that file, proxies stdio to HTTP, and spawns `polard` if it is not
+already running (AD-10).
+
+```
+list_documents(query?, limit?)   -> [{doc_id, title, updated_at, word_count}]
+read_document(doc_id)            -> {markdown, version, blocks:[{block_id,type,line_start,line_end}]}
+search(query, limit?)            -> [{doc_id, block_id, title, snippet}]
+
+create_document(title?)          -> {doc_id, version}
+replace_block(doc_id, block_id, markdown, version)
+insert_blocks(doc_id, after, markdown, version)   # after = block_id | "start" | "end"
+delete_block(doc_id, block_id, version)
+replace_text(doc_id, block_id, find, replace, occurrence?, version)
+```
+
+`version` is the state vector from the last read. **A stale version warns and proceeds** —
+the CRDT merges correctly regardless, so the risk is semantic rather than structural, and
+failing the call punishes the agent for something that is not a conflict. The response
+carries what moved.
+
+Every call is attributed to an `actor_id` derived from the MCP session, and operations
+within one turn share a `session_id` so per-run revert has something to key on (AD-11).
+
+## M1.7 — Deliberately not in M1
+
+No relay, no Tauri, no editor, no suggestion layer, no awareness. Suggestion mode is
+skipped on purpose: M1 documents are local and unshared, and AD-15 already says those take
+direct writes.
+
+## M1.8 — Open, in order of how much they would hurt
+
+1. ~~Does `yrs` expose branch IDs publicly?~~ **Resolved** — see M1.3. IDs are stable across
+   edits and identical across replicas.
+2. **Does the actor identity survive an MCP session cleanly?** An agent reconnecting should
+   be the same actor, or attribution fragments into one actor per connection.
+3. **Table round-tripping.** GFM tables are the most likely node to fail the property test.
+   If they do, they leave the v0 schema (AD-12) rather than getting a special case.
