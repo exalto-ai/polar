@@ -620,3 +620,94 @@ direct writes.
    always the header (GFM has no headerless table). Neither is a real restriction —
    ProseMirror tables are rectangular by construction. The initial failure was a generator
    emitting ragged tables that no editor could produce.
+
+---
+
+# Part III — M2: the bridge
+
+M1 proved the daemon is complete without a UI. M2 attaches one, and in doing so builds the
+two mitigations the probe and the source audit turned up: update coalescing (AD-16) and the
+IME composition guard (AD-17).
+
+**Shape decided 2026-08-23:** single window with a ⌘K switcher, no sidebar. Agent carets and
+authorship colors visible. Full v0 schema including table editing. System sans throughout,
+light and dark.
+
+## M2.0 — Acceptance
+
+1. Typing in the editor reaches SQLite and survives a restart of both app and daemon.
+2. An agent editing over MCP appears **live** in an open editor, without a reload.
+3. A human's typing appears in the agent's next `read_document`.
+4. An agent's caret is visible while it edits, and authorship is distinguishable per actor.
+5. Remote updates arriving mid-composition do not disturb an active IME composition.
+6. A 200-op agent burst applies as coalesced transactions, not 200 separate ones.
+
+(5) and (6) are testable without a human: composition can be *simulated* by holding the
+guard open programmatically, even though a faithful IME test cannot be.
+
+## M2.1 — The UI is a peer, not a special case
+
+The editor needs Yjs update frames and awareness, not MCP tool calls. So `polard` grows a
+second endpoint — **and it speaks the relay protocol from §5, not a bespoke one.**
+
+```
+   Tauri webview  ──WebSocket──►  polard  ──WebSocket──►  relay (M3)
+      Yjs replica                 yrs authority            store-and-forward
+```
+
+The window is a peer that happens to be local. One protocol, two transports, and M3 gets to
+reuse rather than add. If the UI had its own private channel, every future sync feature
+would have to be built twice and could drift.
+
+Messages are §5's: `SUBSCRIBE`, `SYNC`, `UPDATE`, `ACK`, `BROADCAST`, `AWARENESS`. Awareness
+is never persisted — it is presence, not content.
+
+## M2.2 — The schema, exported not authored twice
+
+Correcting M1.2's direction, which was unimplementable as written: TipTap builds its schema
+from Extensions and cannot load a raw ProseMirror spec.
+
+TypeScript remains the definition. A build step writes `getSchema(extensions).spec` to
+`crates/polar-schema/schema.json`, Rust consumes that, and **CI fails if the committed JSON
+drifts from what the extensions produce.** Otherwise the two halves diverge and agents start
+producing documents the editor rejects — a failure that surfaces late and looks like a CRDT
+bug.
+
+## M2.3 — Coalescing (AD-16)
+
+Found by the probe: applying Yjs updates one at a time, each as its own ProseMirror
+transaction, saturates the main thread under agent load — updates arrived 20s behind a 120ms
+link. Agents emit exactly that traffic shape.
+
+The provider buffers inbound updates and flushes once per animation frame as a single
+transaction. Attribution stays per-op in the log; only *application* batches.
+
+## M2.4 — The composition guard (AD-17)
+
+`y-prosemirror` has no reference to `view.composing`, so remote updates are applied to the
+view while an input method has live marked text in the node being redrawn.
+
+The provider holds inbound updates while `view.composing` is true and flushes on
+`compositionend` — the same buffer as M2.3, with one more condition on the flush. That
+adjacency is why both belong to the same milestone.
+
+## M2.5 — The window
+
+Single window, no sidebar. ⌘K opens a switcher backed by the daemon's FTS index — the same
+`search` the agents use, so there is one search implementation rather than two.
+
+System sans throughout, sized and spaced for long-form writing. Light and dark follow the
+system, with the palette defined once as tokens. Markdown input rules give Bear's typing
+feel (`## ` → heading) without markdown storage (AD-3).
+
+## M2.6 — Agents made visible
+
+Agent carets ride the awareness protocol, labelled with the actor's display name and colored
+from the palette assigned in M1. Authorship tint comes from the op log rather than the CRDT,
+since Yjs cannot carry it (AD-1) — which is what AD-6's insistence on identity-from-day-one
+was for.
+
+## M2.7 — Not in M2
+
+No relay, no sharing, no suggestion layer, no activity feed, no per-run revert UI. Those
+need M3's sharing story or are milestones of their own.
