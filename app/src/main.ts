@@ -205,12 +205,19 @@ async function openDocument(docId: string) {
     color: colorFor(doc.clientID),
     id: doc.clientID,
   };
-  const editor = createEditor(els.editor, doc, awareness, provider, user);
+  const editor = createEditor(document.body, els.editor, doc, awareness, provider, user);
   awareness.setLocalStateField("user", user);
 
   provider.connect();
   open = { doc, awareness, provider, editor };
   openDocId = docId;
+
+  // Exposed in development so the editor can be driven directly. Synthetic
+  // key events do not reach ProseMirror's input handling reliably, which makes
+  // anything keyboard-driven hard to check any other way.
+  if (import.meta.env?.DEV) {
+    (window as unknown as { __polar?: unknown }).__polar = { editor, doc, provider };
+  }
 
   editor.on("update", () => refreshTitle(editor));
   awareness.on("change", renderPeers);
