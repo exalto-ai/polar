@@ -51,12 +51,12 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app"
 version = "0.1.0"
 dependencies = [
- "polard",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "thoughtd",
  "ureq",
 ]
 
@@ -2862,72 +2862,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "polar-core"
-version = "0.1.0"
-dependencies = [
- "polar-schema",
- "serde_json",
- "yrs",
-]
-
-[[package]]
-name = "polar-markdown"
-version = "0.1.0"
-dependencies = [
- "polar-schema",
- "pulldown-cmark",
- "serde_json",
-]
-
-[[package]]
-name = "polar-mcp"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "polar-core",
- "polar-markdown",
- "polar-schema",
- "polar-store",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "polar-schema"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "polar-store"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
-]
-
-[[package]]
-name = "polard"
-version = "0.1.0"
-dependencies = [
- "axum",
- "futures",
- "polar-core",
- "polar-mcp",
- "rmcp",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "ureq",
-]
-
-[[package]]
 name = "polling"
 version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4337,6 +4271,72 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "thought-core"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thought-schema",
+ "yrs",
+]
+
+[[package]]
+name = "thought-markdown"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+ "serde_json",
+ "thought-schema",
+]
+
+[[package]]
+name = "thought-mcp"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "thought-core",
+ "thought-markdown",
+ "thought-schema",
+ "thought-store",
+ "uuid",
+]
+
+[[package]]
+name = "thought-schema"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "thought-store"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+]
+
+[[package]]
+name = "thoughtd"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures",
+ "rmcp",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "thought-core",
+ "thought-mcp",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]

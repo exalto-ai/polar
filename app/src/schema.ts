@@ -3,7 +3,7 @@
  *
  * TipTap builds its schema from Extensions and cannot load a raw ProseMirror
  * spec, so this file defines the shape and `scripts/export-schema.ts` writes
- * the structural half to `crates/polar-schema/schema.json` for Rust to read.
+ * the structural half to `crates/thought-schema/schema.json` for Rust to read.
  * CI fails if the committed JSON drifts from what these extensions produce.
  *
  * Drift is worth that much ceremony because of how it fails: agents start

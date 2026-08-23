@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/polar-schema", "crates/polar-markdown", "crates/polar-testkit", "crates/polar-core", "crates/polar-store", "crates/polar-mcp", "crates/polard"]
+members = ["crates/thought-schema", "crates/thought-markdown", "crates/thought-testkit", "crates/thought-core", "crates/thought-store", "crates/thought-mcp", "crates/thoughtd"]
 # Throwaway risk probes, deliberately outside the workspace: they pin their own
 # deps and must not gate the build.
 exclude = ["prototypes/yrs-check", "prototypes/editor-probe/src-tauri", "app/src-tauri"]
@@ -11,11 +11,11 @@ rust-version = "1.95"
 license = "MIT"
 
 [workspace.dependencies]
-polar-schema = { path = "crates/polar-schema" }
-polar-testkit = { path = "crates/polar-testkit" }
-polar-core = { path = "crates/polar-core" }
-polar-markdown = { path = "crates/polar-markdown" }
-polar-store = { path = "crates/polar-store" }
-polar-mcp = { path = "crates/polar-mcp" }
+thought-schema = { path = "crates/thought-schema" }
+thought-testkit = { path = "crates/thought-testkit" }
+thought-core = { path = "crates/thought-core" }
+thought-markdown = { path = "crates/thought-markdown" }
+thought-store = { path = "crates/thought-store" }
+thought-mcp = { path = "crates/thought-mcp" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

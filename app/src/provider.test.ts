@@ -91,8 +91,8 @@ describe("connecting", () => {
     // The browser WebSocket API cannot set headers; a token in the URL would
     // reach logs and history.
     expect(socket.url).not.toContain("tok");
-    expect(socket.protocols).toContain("polar.token.tok");
-    expect(socket.protocols).toContain("polar.v1");
+    expect(socket.protocols).toContain("thought.token.tok");
+    expect(socket.protocols).toContain("thought.v1");
   });
 
   it("announces what it already has, so the daemon sends only the difference", () => {

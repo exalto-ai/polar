@@ -1,5 +1,5 @@
 /**
- * Polar editor probe — exists to answer one question (AD-8):
+ * Proof of Thought editor probe — exists to answer one question (AD-8):
  * can WKWebView host a collaborative ProseMirror well enough to build on?
  *
  * Two Y.Docs, a fake link with adjustable latency and an offline queue, and an

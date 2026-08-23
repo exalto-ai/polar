@@ -145,13 +145,13 @@ jobs:
           # The failure a release is most likely to have: a window with no
           # daemon beside it.
           app="app/src-tauri/target/$TARGET/release/bundle/macos/Proof of Thought.app"
-          for binary in polard polar-mcp-stdio; do
+          for binary in thoughtd thought-mcp-stdio; do
             test -x "$app/Contents/MacOS/$binary" || {
               echo "::error::$binary is missing from the bundle"
               exit 1
             }
           done
-          lipo -archs "$app/Contents/MacOS/polard"
+          lipo -archs "$app/Contents/MacOS/thoughtd"
 
           if [ "$SIGN" = "true" ]; then
             # What a downloading user's machine will conclude.

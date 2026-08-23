@@ -1,0 +1,22 @@
+[package]
+name = "thought-mcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thought-core = { workspace = true }
+thought-markdown = { workspace = true }
+thought-schema = { workspace = true }
+thought-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+tempfile = "3"
+# Only to wipe the derived provenance table in a test, standing in for a
+# document written before that table existed.
+rusqlite = { version = "0.37", features = ["bundled"] }
