@@ -5,6 +5,9 @@
  * The switcher searches through the daemon's `search` tool, the same one agents
  * use, so there is one search implementation rather than two that disagree.
  */
+/** The daemon restarted and no longer knows our session. */
+class StaleSession extends Error {}
+
 export class Mcp {
   private session: string | null = null;
   private id = 0;
@@ -14,7 +17,26 @@ export class Mcp {
     private readonly token: string,
   ) {}
 
+  /**
+   * One call, re-establishing the session if the daemon has forgotten it.
+   *
+   * A restarted daemon does not know our session id and answers 404 forever
+   * after. Without this the window keeps a dead session for its whole lifetime
+   * and every later call fails silently — the switcher simply stops listing
+   * anything.
+   */
   private async rpc(method: string, params: unknown): Promise<any> {
+    try {
+      return await this.send(method, params);
+    } catch (error) {
+      if (!(error instanceof StaleSession)) throw error;
+      this.session = null;
+      await this.handshake();
+      return this.send(method, params);
+    }
+  }
+
+  private async send(method: string, params: unknown): Promise<any> {
     const notification = method.startsWith("notifications/");
     const body: Record<string, unknown> = { jsonrpc: "2.0", method, params };
     if (!notification) body.id = ++this.id;
@@ -31,6 +53,8 @@ export class Mcp {
       headers,
       body: JSON.stringify(body),
     });
+    // 404 means the daemon has no such session — it restarted under us.
+    if (response.status === 404 && this.session) throw new StaleSession();
     const sessionId = response.headers.get("mcp-session-id");
     if (sessionId && !this.session) this.session = sessionId;
 
@@ -45,12 +69,16 @@ export class Mcp {
   }
 
   async connect() {
-    await this.rpc("initialize", {
+    await this.handshake();
+  }
+
+  private async handshake() {
+    await this.send("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
       clientInfo: { name: "polar", version: "0.1.0" },
     });
-    await this.rpc("notifications/initialized", {});
+    await this.send("notifications/initialized", {});
   }
 
   private async call(name: string, args: unknown) {
