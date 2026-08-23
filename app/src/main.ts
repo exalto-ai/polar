@@ -390,6 +390,27 @@ function choose(index: number) {
   void openDocument(row.doc_id);
 }
 
+/**
+ * Trash the highlighted document. Soft: the document and its history remain,
+ * and the tombstone replicates, so this is undoable by anyone with the id.
+ */
+async function trashSelected() {
+  const row = results[selected];
+  if (!row) return;
+  const wasOpen = row.doc_id === openDocId;
+  await mcp.setDocumentDeleted(row.doc_id, true);
+  await refreshResults();
+
+  // Do not leave the window staring at something that is no longer listed.
+  if (wasOpen) {
+    const next = results[0] ?? (await mcp.listDocuments())[0];
+    if (next) {
+      closeSwitcher();
+      await openDocument(next.doc_id);
+    }
+  }
+}
+
 async function createFromQuery() {
   const title = els.input.value.trim() || "Untitled";
   const created = await mcp.createDocument(title);
@@ -415,6 +436,9 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     event.preventDefault();
     closeSwitcher();
+  } else if (event.key === "Backspace" && event.metaKey) {
+    event.preventDefault();
+    void trashSelected();
   } else if (event.key === "Enter" && event.metaKey) {
     event.preventDefault();
     void createFromQuery();
