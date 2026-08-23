@@ -578,7 +578,10 @@ HTTP on localhost. The port and a token live in
 `~/Library/Application Support/ai.exalto.polar/daemon.json`, mode `0600` — any local
 process can reach a localhost port, and documents are the user's private writing.
 `polar-mcp-stdio` reads that file, proxies stdio to HTTP, and spawns `polard` if it is not
-already running (AD-10).
+already running (AD-10). **Built.** Its liveness probe treats an HTTP *error status* as
+proof of life — rejecting an uninitialized `ping` is what a healthy MCP server should do, so
+only a transport failure means absent. Reading a status code as death made the shim start a
+second daemon on every invocation, which is the exact failure AD-10 exists to prevent.
 
 ```
 list_documents(query?, limit?)   -> [{doc_id, title, updated_at, word_count}]
@@ -599,6 +602,12 @@ carries what moved.
 
 Every call is attributed to an `actor_id` derived from the MCP session, and operations
 within one turn share a `session_id` so per-run revert has something to key on (AD-11).
+
+## M1 — complete, 2026-08-23
+
+All four acceptance criteria pass in CI, plus the transport: `polard` over loopback HTTP and
+`polar-mcp-stdio` for stdio clients. What remains open is the manual IME pass (AD-8), which
+needs a person and is now expected to be a bridge bug rather than a stack problem (AD-17).
 
 ## M1.7 — Deliberately not in M1
 

@@ -34,6 +34,29 @@ pub fn random_token() -> io::Result<String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// What a client needs to reach a running daemon.
+#[derive(Debug, Clone)]
+pub struct Daemon {
+    pub url: String,
+    pub token: String,
+    pub pid: u32,
+}
+
+/// Read the published daemon, if one has published itself.
+///
+/// Presence of the file is not proof of life: a daemon killed with SIGKILL
+/// leaves it behind, and its port may since have been reused by an unrelated
+/// process. The liveness check is the caller's job.
+pub fn read() -> Option<Daemon> {
+    let body = std::fs::read_to_string(discovery_path()).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    Some(Daemon {
+        url: json.get("url")?.as_str()?.to_string(),
+        token: json.get("token")?.as_str()?.to_string(),
+        pid: json.get("pid")?.as_u64()? as u32,
+    })
+}
+
 /// Publish the port and token, readable only by the user.
 pub fn write(port: u16, token: &str, db_path: &Path) -> io::Result<PathBuf> {
     let path = discovery_path();

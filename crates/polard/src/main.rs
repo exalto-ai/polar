@@ -10,8 +10,9 @@
 //! corruption bug waiting to happen. Clients find the port and token in
 //! `daemon.json`; a shim binary bridges stdio clients to it.
 
-mod discovery;
 mod tools;
+
+use polard::discovery;
 
 use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};

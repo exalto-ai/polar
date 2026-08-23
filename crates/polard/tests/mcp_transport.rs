@@ -221,3 +221,79 @@ fn the_endpoint_refuses_an_unauthenticated_client() {
         other => panic!("expected 401, got {other:?}"),
     }
 }
+
+/// The shim is what an MCP client actually spawns (AD-10). Its job is to make
+/// "spawn a server on stdio" mean "reach the one daemon", so the case worth
+/// testing is the one where no daemon is running yet.
+#[test]
+fn the_stdio_shim_starts_a_daemon_and_proxies_to_it() {
+    let home = tempfile::tempdir().expect("temp dir");
+    assert!(
+        !home.path().join("daemon.json").exists(),
+        "test must begin with no daemon published"
+    );
+
+    let mut shim = Command::new(env!("CARGO_BIN_EXE_polar-mcp-stdio"))
+        .env("POLAR_HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn shim");
+
+    let mut stdin = shim.stdin.take().expect("piped stdin");
+    let mut stdout = BufReader::new(shim.stdout.take().expect("piped stdout"));
+
+    let mut send = |body: serde_json::Value| {
+        use std::io::Write;
+        writeln!(stdin, "{body}").expect("write to shim");
+        stdin.flush().expect("flush");
+    };
+
+    send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "shim-test", "version": "1"}}
+    }));
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("shim replied");
+    let response: serde_json::Value = serde_json::from_str(&line).expect("json-rpc line");
+    assert_eq!(response["id"], 1);
+    assert!(
+        response["result"]["capabilities"].get("tools").is_some(),
+        "expected a tools capability, got {response}"
+    );
+
+    // Notifications must not produce a reply, or the client desynchronises.
+    send(serde_json::json!({
+        "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
+    }));
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+
+    line.clear();
+    stdout.read_line(&mut line).expect("shim replied");
+    let response: serde_json::Value = serde_json::from_str(&line).expect("json-rpc line");
+    assert_eq!(response["id"], 2, "a notification leaked a response line");
+    let tools: Vec<String> = response["result"]["tools"]
+        .as_array()
+        .expect("tool list")
+        .iter()
+        .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(tools.contains(&"read_document".to_string()));
+
+    // The shim started a daemon that published itself under POLAR_HOME.
+    let published = home.path().join("daemon.json");
+    assert!(published.exists(), "shim did not start a daemon");
+
+    let _ = shim.kill();
+    let _ = shim.wait();
+    if let Ok(body) = std::fs::read_to_string(&published)
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+        && let Some(pid) = json["pid"].as_u64()
+    {
+        // The shim's daemon outlives the shim by design; clean it up.
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+}

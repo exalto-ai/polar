@@ -5,6 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "polard"
+path = "src/main.rs"
+
+[[bin]]
+name = "polar-mcp-stdio"
+path = "src/bin/polar-mcp-stdio.rs"
+
 [dependencies]
 polar-core = { workspace = true }
 polar-mcp = { workspace = true }
@@ -14,6 +22,7 @@ rmcp = { version = "3", features = ["server", "transport-streamable-http-server"
 schemars = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 axum = "0.8"
+ureq = { version = "3", features = ["json"] }
 
 [dev-dependencies]
 ureq = { version = "3", features = ["json"] }
