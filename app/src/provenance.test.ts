@@ -1,6 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as Y from "yjs";
-import { alignBlocks, blockIdOf, labelFor, runsOf } from "./provenance";
+import {
+  alignBlocks,
+  blockIdOf,
+  installProvenanceRails,
+  labelFor,
+  runsOf,
+} from "./provenance";
 import type { BlockAttribution } from "./mcp";
 
 function attribution(over: Partial<BlockAttribution> = {}): BlockAttribution {
@@ -142,5 +148,78 @@ describe("labels", () => {
 
   it("does not claim a draft credit when one actor did both", () => {
     expect(labelFor(attribution(), "human:editor")).not.toContain("drafted by");
+  });
+});
+
+/**
+ * A real Y.Doc, so `blockIdOf` is exercised rather than mocked, plus the
+ * smallest editor the rails actually touch: a DOM child per block and a way to
+ * enumerate node kinds.
+ */
+function harness(kinds: string[]) {
+  const ydoc = new Y.Doc();
+  const fragment = ydoc.getXmlFragment("content");
+  ydoc.transact(() => {
+    for (const kind of kinds) fragment.push([new Y.XmlElement(kind)]);
+  });
+
+  const container = document.createElement("div");
+  const dom = document.createElement("div");
+  container.append(dom);
+  for (const _ of kinds) dom.append(document.createElement("p"));
+
+  const editor = {
+    view: { dom },
+    state: {
+      doc: {
+        forEach: (visit: (node: { type: { name: string } }) => void) =>
+          kinds.forEach((kind) => visit({ type: { name: kind } })),
+      },
+    },
+    on() {},
+    off() {},
+  } as never;
+
+  const ids = fragment.toArray().map((node) => blockIdOf(node)!);
+  return { editor, ydoc, container, ids };
+}
+
+describe("redrawing when nothing is painted", () => {
+  it("draws even though requestAnimationFrame never fires", async () => {
+    // A hidden window paints no frames. A frame-only schedule leaves the margin
+    // crediting whoever wrote a block last week while an agent rewrites it, and
+    // corrects itself only when someone looks at the window.
+    const raf = vi.spyOn(globalThis, "requestAnimationFrame").mockImplementation(() => 1);
+    try {
+      const { editor, ydoc, container, ids } = harness(["paragraph", "paragraph"]);
+      const rails = installProvenanceRails(editor, ydoc, container, "human:me");
+
+      rails.setProvenance([
+        attribution({ block_id: ids[0], touched_by: "human:me", kind: "human" }),
+        attribution({ block_id: ids[1], touched_by: "agent:opus" }),
+      ]);
+
+      expect(container.querySelectorAll(".rail")).toHaveLength(0);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      expect(container.querySelectorAll(".rail").length).toBeGreaterThan(0);
+
+      rails.destroy();
+    } finally {
+      raf.mockRestore();
+    }
+  });
+
+  it("draws nothing for a document only this window has written", async () => {
+    const { editor, ydoc, container, ids } = harness(["paragraph"]);
+    const rails = installProvenanceRails(editor, ydoc, container, "human:me");
+
+    rails.setProvenance([
+      attribution({ block_id: ids[0], touched_by: "human:me", kind: "human" }),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    // Striping a solo document tells the writer something they already know.
+    expect(container.querySelectorAll(".rail")).toHaveLength(0);
+    rails.destroy();
   });
 });

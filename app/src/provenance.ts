@@ -128,6 +128,9 @@ export type Rails = {
   destroy(): void;
 };
 
+/** Backstop for when the window is hidden and no frames are painted. */
+const HIDDEN_REDRAW_MS = 50;
+
 export function installProvenanceRails(
   editor: Editor,
   ydoc: Y.Doc,
@@ -146,6 +149,7 @@ export function installProvenanceRails(
 
   let attribution = new Map<string, BlockAttribution>();
   let frame: number | null = null;
+  let timer: number | null = null;
 
   /** Blocks in document order, straight from the CRDT. */
   function yBlocks(): YBlock[] {
@@ -221,8 +225,26 @@ export function installProvenanceRails(
    * Coalesced into a frame: every keystroke reflows the blocks below it, and
    * measuring on each one would put a layout read in the typing path.
    */
+  /**
+   * Redraw on the next frame, or on a timer — whichever comes first.
+   *
+   * `requestAnimationFrame` does not fire in a hidden window, so a frame-only
+   * schedule leaves the rails stale for as long as Polar sits behind something
+   * else: an agent rewrites three paragraphs, and the margin still credits
+   * whoever wrote them last week until the window is looked at again. Same
+   * failure the sync provider had, and the same fix.
+   */
   function schedule() {
-    if (frame === null) frame = requestAnimationFrame(draw);
+    if (frame !== null || timer !== null) return;
+    const run = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      if (timer !== null) clearTimeout(timer);
+      frame = null;
+      timer = null;
+      draw();
+    };
+    frame = requestAnimationFrame(run);
+    timer = window.setTimeout(run, HIDDEN_REDRAW_MS);
   }
 
   editor.on("update", schedule);
@@ -244,6 +266,7 @@ export function installProvenanceRails(
     },
     destroy() {
       if (frame !== null) cancelAnimationFrame(frame);
+      if (timer !== null) clearTimeout(timer);
       editor.off("update", schedule);
       window.removeEventListener("resize", schedule);
       layer.remove();

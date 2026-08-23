@@ -94,17 +94,32 @@ fn ensure_daemon() -> Result<Daemon, String> {
     Err("polard did not become reachable".into())
 }
 
-/// Binaries ship beside the app in a build; during `tauri dev` the app lives in
-/// app/src-tauri/target while the workspace binaries are in the workspace target.
+/// Find `polard` or `polar-mcp-stdio`.
+///
+/// In a bundle they sit beside the app executable as Tauri sidecars. In
+/// development they sit there too — Tauri copies the staged sidecar into the
+/// dev target — but that copy is only as fresh as the last `stage-sidecars.sh`
+/// run, while the workspace build is whatever `cargo` last produced. Preferring
+/// the sidecar in dev means running a daemon from whenever sidecars were last
+/// staged, which presents as features silently missing from a binary you just
+/// rebuilt.
+///
+/// So: workspace first in debug builds, sidecar first in release.
 fn find_binary(name: &str) -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    [
-        exe.with_file_name(name),
-        exe.with_file_name(format!("../../../../target/debug/{name}")),
-    ]
-    .into_iter()
-    .find(|p| p.exists())
-    .map(|p| p.canonicalize().unwrap_or(p))
+    let bundled = exe.with_file_name(name);
+    let workspace = exe.with_file_name(format!("../../../../target/debug/{name}"));
+
+    let candidates = if cfg!(debug_assertions) {
+        [workspace, bundled]
+    } else {
+        [bundled, workspace]
+    };
+
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .map(|p| p.canonicalize().unwrap_or(p))
 }
 
 /// An HTTP error status is still an answer. Only a transport failure means
