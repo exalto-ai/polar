@@ -301,10 +301,35 @@ Undoing a collaborator's edit is the classic violation and agents get no excepti
 edits are discrete batches keyed by `session_id`, so per-run revert is a separate affordance
 on the attribution chip.
 
-### AD-12 — Markdown dialect: CommonMark + GFM tables, strikethrough, task lists
-Nothing else in v0. It is the dialect models emit most reliably without prompting.
-**`parse(serialize(doc)) == doc` is a property test from day one.** A node that cannot
-round-trip does not enter the schema.
+### AD-12 — Markdown dialect, and the limits of what round-tripping may decide
+CommonMark + GFM (tables, strikethrough, task lists). Nothing else in v0 — it is the
+dialect models emit most reliably without prompting. **`parse(serialize(doc)) == doc` is a
+property test from day one.**
+
+**Corrected 2026-08-23.** This decision originally read "a node that cannot round-trip does
+not enter the schema," which is wrong and contradicts AD-3. The entire argument for a
+structured tree was the content ceiling — tables, embeds, toggles, mentions. Letting the
+markdown projection veto the schema reinstates exactly the ceiling the tree exists to
+escape. The projection serves the product; it does not define it.
+
+The round-trip property constrains **which agent operations are safe**, not what the
+product may contain. Nodes fall into two tiers:
+
+* **Round-trippable** — survives `parse(serialize(x)) == x`. Agents read it as markdown and
+  may rewrite it with markdown. Everything in v0 is this tier, tables included, verified
+  over 20,000 generated documents.
+* **Projection-only** — the product wants it, markdown cannot carry it. The node still
+  exists in the schema and the editor. The projection emits a stable placeholder carrying
+  the `block_id`, and `replace_block` with a *markdown* payload is refused for that block;
+  editing it requires a structured payload. Agents can see it and address it, but cannot
+  silently flatten it.
+
+Nothing in v0 is projection-only, so that mechanism is not built. It is written down so
+that the answer to "we want embeds" is a tier assignment rather than "drop the feature."
+
+Where markdown is lossy even for round-trippable content — the intra-word emphasis gap,
+empty paragraphs — the loss is bounded by AD-5, which keeps agents from ever writing back
+a whole document.
 
 ### AD-13 — Snapshot every 200 updates or 30s idle, keep the last two
 Correcting a conflation in the first draft: snapshots serve *load performance*, the op log
@@ -410,7 +435,8 @@ v0 nodes: `doc`, `paragraph`, `heading` (1–3), `blockquote`, `bulletList`, `or
 `listItem`, `codeBlock`, `horizontalRule`, `table`/`tableRow`/`tableCell`, `text`.
 v0 marks: `strong`, `em`, `code`, `strike`, `link`.
 
-Anything that cannot round-trip through CommonMark + GFM does not enter the schema (AD-12).
+Whether a node round-trips determines which agent operations are safe on it, not whether it
+may exist (AD-12). Everything in v0 round-trips.
 
 ## M1.3 — Block identity
 
