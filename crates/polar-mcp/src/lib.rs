@@ -7,6 +7,6 @@
 mod workspace;
 
 pub use workspace::{
-    ActorRef, ActorSummary, BlockSpan, DocumentSummary, DocumentView, EditOutcome, SearchHit, TextEdit,
-    Workspace, WorkspaceError,
+    ActorRef, ActorSummary, BlockSpan, DocumentSummary, DocumentView, EditOutcome, SearchHit,
+    TextEdit, Workspace, WorkspaceError,
 };
