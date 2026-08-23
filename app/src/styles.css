@@ -19,11 +19,14 @@
   --display: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
 
-  /* The editor's line length. 34rem ran to roughly 64 characters, which is
-     classic for print and cramped on a screen this size. 42rem lands near 78 —
-     still short of the ~85 where line length starts measurably costing reading
-     speed, because the eye loses its place on the return sweep. */
-  --measure: 42rem;
+  /* The editor's line length, measured rather than guessed: at 17px this font
+     fits ~70 characters at 34rem, ~88 at 42rem, and ~100 at 48rem.
+
+     100 is wide. Classic typographic guidance is 45–75, and Notion sits near
+     90, because past that the eye starts missing the start of the next line on
+     the return sweep. It is deliberate here: this is a working document with
+     tables and code in it, not a book, and those want the room. */
+  --measure: 48rem;
   --chrome-height: 44px;
 }
 
