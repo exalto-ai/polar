@@ -53,7 +53,7 @@ export class SyncProvider {
     // The browser WebSocket API cannot set headers, so the token rides as a
     // subprotocol. It is header-borne and never part of the URL, which would
     // otherwise put a bearer credential into logs and history.
-    const socket = new WebSocket(this.url, ["polar.v1", `polar.token.${this.token}`]);
+    const socket = new WebSocket(this.url, ["thought.v1", `thought.token.${this.token}`]);
     socket.binaryType = "arraybuffer";
     this.socket = socket;
 
@@ -146,7 +146,7 @@ export class SyncProvider {
    * Flush on the next frame, or on a timer — whichever comes first.
    *
    * `requestAnimationFrame` does not fire at all in a hidden window, so a
-   * frame-only schedule stalls the buffer indefinitely whenever Polar is
+   * frame-only schedule stalls the buffer indefinitely whenever the window is
    * behind another window, minimised, or on another Space. The document would
    * silently stop updating and then lurch forward when refocused. `setTimeout`
    * is throttled in the background but still fires, so it is the backstop.

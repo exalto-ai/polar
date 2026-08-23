@@ -1,11 +1,11 @@
 //! The window process.
 //!
-//! Starts `polard` if it is not already running and hands the webview its
+//! Starts `thoughtd` if it is not already running and hands the webview its
 //! connection details. The daemon is a child now and a launchd agent later
 //! (AD-10) — the same standalone binary either way, so the switch costs no
 //! code here.
 
-use polard::discovery::{self, Daemon};
+use thoughtd::discovery::{self, Daemon};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -34,10 +34,10 @@ fn connection(state: tauri::State<'_, Daemon>) -> Connection {
             .replace("/mcp", "/sync"),
         mcp_url: state.url.clone(),
         token: state.token.clone(),
-        stdio_command: find_binary("polar-mcp-stdio")
+        stdio_command: find_binary("thought-mcp-stdio")
             .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "polar-mcp-stdio".into()),
-        actor_id: polard::EDITOR_ACTOR_ID.to_string(),
+            .unwrap_or_else(|| "thought-mcp-stdio".into()),
+        actor_id: thoughtd::EDITOR_ACTOR_ID.to_string(),
     }
 }
 
@@ -80,15 +80,15 @@ fn ensure_daemon() -> Result<Daemon, String> {
         return Ok(daemon);
     }
 
-    let polard =
-        find_binary("polard").ok_or_else(|| "could not find the polard binary".to_string())?;
+    let thoughtd =
+        find_binary("thoughtd").ok_or_else(|| "could not find the thoughtd binary".to_string())?;
 
-    Command::new(&polard)
+    Command::new(&thoughtd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("could not start polard: {e}"))?;
+        .map_err(|e| format!("could not start thoughtd: {e}"))?;
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -99,10 +99,10 @@ fn ensure_daemon() -> Result<Daemon, String> {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    Err("polard did not become reachable".into())
+    Err("thoughtd did not become reachable".into())
 }
 
-/// Find `polard` or `polar-mcp-stdio`.
+/// Find `thoughtd` or `thought-mcp-stdio`.
 ///
 /// In a bundle they sit beside the app executable as Tauri sidecars. In
 /// development they sit there too — Tauri copies the staged sidecar into the
@@ -142,7 +142,7 @@ fn reachable(daemon: &Daemon) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let daemon = ensure_daemon().expect("polar daemon");
+    let daemon = ensure_daemon().expect("thought daemon");
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(daemon)

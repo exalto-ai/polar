@@ -1,10 +1,10 @@
 /**
  * Writes the structural schema to Rust, or checks it has not drifted.
  *
- *   npm run schema         # regenerate crates/polar-schema/schema.json
+ *   npm run schema         # regenerate crates/thought-schema/schema.json
  *   npm run schema:check   # fail if the committed file is stale (CI)
  *
- * Only the *structure* comes from TipTap. The `md` mapping is Polar's own and
+ * Only the *structure* comes from TipTap. The `md` mapping is Proof of Thought's own and
  * is preserved from the existing file, because ProseMirror has no opinion on
  * how a node becomes markdown.
  */
@@ -13,7 +13,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { extensions } from "../src/schema.js";
 
-const TARGET = resolve(import.meta.dirname, "../../crates/polar-schema/schema.json");
+const TARGET = resolve(import.meta.dirname, "../../crates/thought-schema/schema.json");
 
 type AttrOut = Record<string, { default?: unknown }>;
 

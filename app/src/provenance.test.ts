@@ -27,7 +27,7 @@ function attribution(over: Partial<BlockAttribution> = {}): BlockAttribution {
 
 describe("block ids", () => {
   /**
-   * The format is `polar_core::block::block_id`'s, and the two must agree or
+   * The format is `thought_core::block::block_id`'s, and the two must agree or
    * every rail silently misses. Pinned here because the Rust side is pinned by
    * its own tests and nothing else compares them.
    */

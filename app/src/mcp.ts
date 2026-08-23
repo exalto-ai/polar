@@ -86,7 +86,7 @@ export class Mcp {
     await this.send("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
-      clientInfo: { name: "polar", version: "0.1.0" },
+      clientInfo: { name: "thought", version: "0.1.0" },
     });
     await this.send("notifications/initialized", {});
   }

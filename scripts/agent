@@ -14,19 +14,19 @@ Point it at a document you have open in the window and watch the edits land.
 import json, os, sys, time, urllib.request
 
 def default_home():
-    # Mirrors `support_dir` in crates/polard/src/discovery.rs.
+    # Mirrors `support_dir` in crates/thoughtd/src/discovery.rs.
     if sys.platform == "darwin":
-        return os.path.expanduser("~/Library/Application Support/ai.exalto.polar")
+        return os.path.expanduser("~/Library/Application Support/ai.exalto.thought")
     xdg = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    return os.path.join(xdg, "polar")
+    return os.path.join(xdg, "thought")
 
 
-HOME = os.environ.get("POLAR_HOME", default_home())
+HOME = os.environ.get("THOUGHT_HOME", default_home())
 
 try:
     CONFIG = json.load(open(os.path.join(HOME, "daemon.json")))
 except FileNotFoundError:
-    sys.exit("No daemon is running. Start the app, or run: cargo run -p polard")
+    sys.exit("No daemon is running. Start the app, or run: cargo run -p thoughtd")
 
 _session = None
 _id = 0
@@ -74,7 +74,7 @@ CALLER = {"agent": "terminal", "model": None, "session": f"cli-{int(time.time())
 rpc("initialize", {
     "protocolVersion": "2025-06-18",
     "capabilities": {},
-    "clientInfo": {"name": "polar-cli", "version": "1"},
+    "clientInfo": {"name": "thought-cli", "version": "1"},
 })
 rpc("notifications/initialized", {}, notify=True)
 

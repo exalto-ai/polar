@@ -21,20 +21,20 @@ if [[ "$TARGET" == universal-apple-darwin ]]; then
   # both per-arch binaries, and the lipo'd universal for the bundling step.
   for arch in aarch64-apple-darwin x86_64-apple-darwin; do
     rustup target add "$arch" >/dev/null
-    cargo build --release --target "$arch" -p polard
-    for name in polard polar-mcp-stdio; do
+    cargo build --release --target "$arch" -p thoughtd
+    for name in thoughtd thought-mcp-stdio; do
       cp "$ROOT/target/$arch/release/$name" "$DEST/$name-$arch"
     done
   done
-  for name in polard polar-mcp-stdio; do
+  for name in thoughtd thought-mcp-stdio; do
     lipo -create -output "$DEST/$name-$TARGET" \
       "$DEST/$name-aarch64-apple-darwin" \
       "$DEST/$name-x86_64-apple-darwin"
   done
 else
   rustup target add "$TARGET" >/dev/null 2>&1 || true
-  cargo build --release --target "$TARGET" -p polard
-  for name in polard polar-mcp-stdio; do
+  cargo build --release --target "$TARGET" -p thoughtd
+  for name in thoughtd thought-mcp-stdio; do
     cp "$ROOT/target/$TARGET/release/$name" "$DEST/$name-$TARGET"
   done
 fi
