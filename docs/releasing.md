@@ -32,10 +32,10 @@ go from your vault into GitHub without passing through anything in between:
 | --- | --- |
 | `APPLE_CERTIFICATE` | Your **Developer ID Application** `.p12`, base64-encoded |
 | `APPLE_CERTIFICATE_PASSWORD` | The password set when exporting that `.p12` |
-| `APPLE_SIGNING_IDENTITY` | e.g. `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: Exalto, Inc. (3FGNZ9DY9Y)` |
 | `APPLE_ID` | The Apple ID used for notarization |
 | `APPLE_PASSWORD` | An **app-specific password**, not your Apple ID password |
-| `APPLE_TEAM_ID` | The ten-character team id |
+| `APPLE_TEAM_ID` | `3FGNZ9DY9Y` |
 
 Getting the certificate out of Keychain Access: find *Developer ID Application*
 under **My Certificates**, right-click → Export as `.p12`, then
@@ -55,6 +55,10 @@ Repeat for each name in the table; `gh secret list` confirms what is set.
 
 An app-specific password comes from appleid.apple.com → Sign-In and Security →
 App-Specific Passwords. Notarization rejects a plain Apple ID password.
+
+The bundle identifier is `ai.exalto.polar`, matching the team the app is signed
+under and the directory the daemon already uses for its store. Changing it after
+a signed release would present the app to macOS as a different application.
 
 ## Checking a build locally
 
