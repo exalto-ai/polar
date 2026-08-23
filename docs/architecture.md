@@ -720,3 +720,101 @@ was for.
 
 No relay, no sharing, no suggestion layer, no activity feed, no per-run revert UI. Those
 need M3's sharing story or are milestones of their own.
+
+---
+
+# Part IV — M3: sharing
+
+M2 made the window a peer. M3 adds a second hop so peers on different machines
+reach each other.
+
+**Decided 2026-08-23:** relay on Fly.io, plaintext frames with server-side
+compaction, one write-capable link per document, and a recipient's agents get
+the same access the recipient has.
+
+## M3.0 — Acceptance
+
+1. Two daemons on different machines converge on a shared document.
+2. Both go offline, both edit, both reconnect — and converge.
+3. A peer joining with only a link catches up **without the origin being
+   online**. This is what makes it store-and-forward rather than a relay.
+4. Carets and presence cross machines.
+5. An agent on either machine can edit a shared document, and its edit arrives
+   attributed to it rather than to "somewhere else" (M3.3).
+6. Deleting a document propagates, and does not resurrect on the other side.
+
+## M3.1 — Extract `polar-sync`
+
+The `Frame` codec lives in `polard/src/sync.rs`, where a separate relay binary
+cannot reach it. It moves to its own crate along with the wire fixture, and both
+the daemon and the relay depend on it. The fixture gate then covers three
+implementations rather than two.
+
+## M3.2 — The relay
+
+Store-and-forward per document. It moves opaque frames and does not need to
+understand documents — except for compaction, which does need `yrs`, and which
+is the reason deferring encryption buys anything at all (AD-7).
+
+* **Auth:** the client sends `share_id = SHA256(secret)`. The secret stays in
+  the URL fragment and never reaches the server, so it can later become the
+  content key without changing how joining works.
+* **Storage:** SQLite, the same append-only shape as `polar-store` minus the
+  actor tables — the relay has no opinion about who anyone is.
+* **Fly:** one machine, one persistent volume, single region. This is stateful
+  and not horizontally scalable as designed; two replicas would each hold half
+  the story. Worth knowing before someone scales it up expecting it to work.
+
+## M3.3 — Attribution has to cross the hop
+
+**Found while planning, and it is not small.** Yjs updates carry no author
+(AD-1), which is exactly why AD-6 insisted on an op log with actor ids from the
+first commit. But that log is *local*. Nothing in the wire protocol carries an
+actor, so an update arriving from the relay would be recorded as `origin=remote`
+with no idea who wrote it — and every feature that rests on attribution (the
+activity feed, per-run revert, the connections panel, authorship colour) would
+work perfectly on one machine and go blank the moment a document is shared.
+
+So `UPDATE` grows an actor descriptor: id, kind, display name, model. The
+receiving daemon records it in its own log rather than inventing `remote`.
+
+The uncomfortable part, stated plainly: **this is self-asserted and spoofable.**
+A peer can claim any name. That is consistent with AD-6 — identity, not
+authentication — but it stops being an internal detail the moment someone else's
+name appears in your window. The UI has to distinguish "this machine saw this
+person write it" from "a peer told me this person wrote it", or it is quietly
+lying. Authentication is the answer eventually; saying so is the answer now.
+
+## M3.4 — The daemon's relay client
+
+`updates.synced_at` has existed since M1 and nothing has used it. It becomes the
+queue: everything unsynced is what we owe the relay. Reconnect with backoff, the
+same shape the window's provider already uses.
+
+## M3.5 — Sharing
+
+A `polar://join/<doc_id>#<secret>` capability URL, with the scheme registered so
+macOS hands it to the app. Sharing produces the link; opening one joins. No
+accounts, no inbox — possession of the link is the grant, so a link in a
+screenshot is a leak, and the UI should say so where the link is produced.
+
+Agents on the receiving machine get the document like any other, which follows
+from sharing with a person meaning sharing with how they work.
+
+## M3.6 — Not in M3
+
+No accounts, no read-only links, no revocation, no E2E.
+
+## The cost of deferring encryption, recorded
+
+E2E was deferred deliberately (AD-7), so the exit path should be a decision
+later rather than a surprise:
+
+* The relay compacts because it can read frames. Encrypted, it cannot, so op
+  logs grow without bound and every new joiner replays from zero.
+* The replacement is client-side snapshots: peers periodically upload an
+  encrypted snapshot the relay serves in place of the log. That is a protocol
+  addition, not a flag.
+* The share secret is already the right shape to become the content key, and
+  `share_id` already hides it from the server. Nothing in M3 forecloses this —
+  it just does not pay for it yet.
