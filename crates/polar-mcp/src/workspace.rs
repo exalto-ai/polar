@@ -84,6 +84,16 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
+/// The three parts of a find-and-replace, grouped so the call does not grow an
+/// unreadable positional tail.
+#[derive(Debug, Clone, Copy)]
+pub struct TextEdit<'a> {
+    pub find: &'a str,
+    pub replace: &'a str,
+    /// 1-based. `None` replaces every match.
+    pub occurrence: Option<usize>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EditOutcome {
     pub doc_id: String,
@@ -366,12 +376,15 @@ impl Workspace {
         &self,
         doc_id: &str,
         block_id: &str,
-        find: &str,
-        replace: &str,
-        occurrence: Option<usize>,
+        edit: &TextEdit<'_>,
         version: Option<&str>,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
+        let TextEdit {
+            find,
+            replace,
+            occurrence,
+        } = *edit;
         if find.is_empty() {
             return Err(WorkspaceError::InvalidMarkdown(vec![
                 "`find` must not be empty".into(),

@@ -3,7 +3,7 @@
 //! a UI, and this file is what proves it rather than asserting it.
 
 use polar_core::Position;
-use polar_mcp::{ActorRef, Workspace};
+use polar_mcp::{ActorRef, TextEdit, Workspace};
 
 fn agent() -> ActorRef {
     ActorRef::agent("opus", Some("claude-opus-5"), Some("run-1"))
@@ -238,9 +238,11 @@ fn replace_text_edits_within_a_block() {
     ws.replace_text(
         &created.doc_id,
         &block,
-        "Tuesday",
-        "Thursday",
-        Some(2),
+        &TextEdit {
+            find: "Tuesday",
+            replace: "Thursday",
+            occurrence: Some(2),
+        },
         None,
         &agent,
     )
@@ -252,8 +254,18 @@ fn replace_text_edits_within_a_block() {
     let block = ws.read_document(&created.doc_id).unwrap().blocks[0]
         .block_id
         .clone();
-    ws.replace_text(&created.doc_id, &block, "on", "before", None, None, &agent)
-        .unwrap();
+    ws.replace_text(
+        &created.doc_id,
+        &block,
+        &TextEdit {
+            find: "on",
+            replace: "before",
+            occurrence: None,
+        },
+        None,
+        &agent,
+    )
+    .unwrap();
     assert_eq!(
         ws.read_document(&created.doc_id).unwrap().markdown,
         "ship before Tuesday, review before Thursday"
@@ -264,16 +276,28 @@ fn replace_text_edits_within_a_block() {
     let block = ws.read_document(&created.doc_id).unwrap().blocks[0]
         .block_id
         .clone();
-    let missing = ws.replace_text(&created.doc_id, &block, "Saturday", "x", None, None, &agent);
+    let missing = ws.replace_text(
+        &created.doc_id,
+        &block,
+        &TextEdit {
+            find: "Saturday",
+            replace: "x",
+            occurrence: None,
+        },
+        None,
+        &agent,
+    );
     assert!(missing.is_err());
     assert!(format!("{}", missing.unwrap_err()).contains("does not appear"));
 
     let past_end = ws.replace_text(
         &created.doc_id,
         &block,
-        "before",
-        "x",
-        Some(9),
+        &TextEdit {
+            find: "before",
+            replace: "x",
+            occurrence: Some(9),
+        },
         None,
         &agent,
     );
