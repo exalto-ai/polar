@@ -38,15 +38,27 @@ impl Daemon {
 
         // Wait for the readiness line rather than sleeping: a fixed sleep is
         // either flaky or slow, and usually both.
+        // Then keep draining. The daemon prints three startup lines, and dropping
+        // the reader after the first closes the pipe — its next write gets EPIPE
+        // and the process dies, which surfaced much later and somewhere else as
+        // a connection refused on an unrelated request.
         let stderr = child.stderr.take().expect("piped stderr");
+        let mut reader = BufReader::new(stderr);
         let mut line = String::new();
-        BufReader::new(stderr)
+        reader
             .read_line(&mut line)
             .expect("daemon printed a startup line");
         assert!(
             line.contains("listening"),
             "unexpected startup output: {line}"
         );
+
+        std::thread::spawn(move || {
+            let mut sink = String::new();
+            while reader.read_line(&mut sink).unwrap_or(0) > 0 {
+                sink.clear();
+            }
+        });
 
         let config: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(home.path().join("daemon.json")).expect("discovery file"),
