@@ -19,7 +19,7 @@ type Connection = {
   mcp_url: string;
   token: string;
   stdio_command: string;
-  /** Who this window writes as, from `polar_mcp::EDITOR_ACTOR_ID`. */
+  /** Who this window writes as, from `thought_mcp::EDITOR_ACTOR_ID`. */
   actor_id: string;
 };
 
@@ -160,14 +160,14 @@ function renderPeers() {
  * The shared copy survives as the starting point for a brand-new window.
  */
 function rememberOpenDocument(docId: string) {
-  window.sessionStorage.setItem("polar.last", docId);
-  window.localStorage.setItem("polar.last", docId);
+  window.sessionStorage.setItem("thought.last", docId);
+  window.localStorage.setItem("thought.last", docId);
 }
 
 function lastOpenDocument(): string | null {
   return (
-    window.sessionStorage.getItem("polar.last") ??
-    window.localStorage.getItem("polar.last")
+    window.sessionStorage.getItem("thought.last") ??
+    window.localStorage.getItem("thought.last")
   );
 }
 
@@ -267,7 +267,7 @@ async function openDocument(docId: string) {
   // key events do not reach ProseMirror's input handling reliably, which makes
   // anything keyboard-driven hard to check any other way.
   if (import.meta.env?.DEV) {
-    (window as unknown as { __polar?: unknown }).__polar = { editor, doc, provider };
+    (window as unknown as { __thought?: unknown }).__thought = { editor, doc, provider };
   }
 
   editor.on("update", () => refreshTitle(editor));
@@ -602,7 +602,7 @@ async function loadConnection(): Promise<Connection> {
   if ((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
     return invoke<Connection>("connection");
   }
-  const response = await fetch("/__polar/connection");
+  const response = await fetch("/__thought/connection");
   if (!response.ok) throw new Error("no daemon is running");
   return response.json();
 }

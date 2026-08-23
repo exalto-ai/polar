@@ -1,6 +1,6 @@
 # Editor probe
 
-Exists to answer one question before any of Polar gets built: **can WKWebView host a
+Exists to answer one question before any of Proof of Thought gets built: **can WKWebView host a
 collaborative ProseMirror well enough to ship a writing app on?** (AD-8 in
 `docs/architecture.md`.) It is a risk probe, not a foundation — none of this code is
 meant to survive into the app.

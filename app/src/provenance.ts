@@ -26,7 +26,7 @@ import { colorFor, seedFrom } from "./names";
  * A block's id, as the daemon spells it.
  *
  * Block identity is the yrs `BranchID` — `client:clock` of the item that
- * created the element — and `polar_core::block::block_id` formats it exactly
+ * created the element — and `thought_core::block::block_id` formats it exactly
  * this way. Yjs exposes the same id on `_item`, which is internal enough to be
  * worth pinning in a test: if this drifts, ids stop matching and rails vanish
  * rather than landing on the wrong block, which is the failure to prefer.
@@ -229,7 +229,7 @@ export function installProvenanceRails(
    * Redraw on the next frame, or on a timer — whichever comes first.
    *
    * `requestAnimationFrame` does not fire in a hidden window, so a frame-only
-   * schedule leaves the rails stale for as long as Polar sits behind something
+   * schedule leaves the rails stale for as long as the window sits behind something
    * else: an agent rewrites three paragraphs, and the margin still credits
    * whoever wrote them last week until the window is looked at again. Same
    * failure the sync provider had, and the same fix.

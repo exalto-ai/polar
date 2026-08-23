@@ -12,7 +12,7 @@ Or run the workflow manually from the Actions tab with a tag name.
 
 ## What ships inside the bundle
 
-The window is useless without the daemon, so `polard` and `polar-mcp-stdio` are
+The window is useless without the daemon, so `thoughtd` and `thought-mcp-stdio` are
 built for both architectures, stitched with `lipo`, and declared as Tauri
 sidecars. Tauri copies them next to the app executable and strips the target
 triple, which is where the app looks for them. `scripts/stage-sidecars.sh` does
@@ -98,4 +98,4 @@ Then confirm the daemon actually shipped:
 ls app/src-tauri/target/*/release/bundle/macos/'Proof of Thought.app'/Contents/MacOS/
 ```
 
-`polard` and `polar-mcp-stdio` should both be there beside `app`.
+`thoughtd` and `thought-mcp-stdio` should both be there beside `app`.

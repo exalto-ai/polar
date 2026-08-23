@@ -24,7 +24,7 @@ is not recoverable from the CRDT. We buy that back with an append-only op log ca
 actor attribution (AD-4). If it turns out we need branch/merge or deep time-travel,
 Automerge becomes the right answer and this is an expensive reversal.
 
-### AD-2 — Daemon-first: `polard` owns the store
+### AD-2 — Daemon-first: `thoughtd` owns the store
 
 The CRDT authority lives in a Rust daemon, not in the webview. The Tauri UI is a client.
 MCP agents are clients. The relay sync client is a client. All of them speak the same
@@ -79,7 +79,7 @@ history permanently anonymous.
 
 ### AD-7 — Capability-URL sharing over a store-and-forward relay; no E2E in MVP
 
-Sharing a document produces `polar://join/<doc_id>#<secret>`. The fragment never reaches
+Sharing a document produces `thought://join/<doc_id>#<secret>`. The fragment never reaches
 the server: the client sends `share_id = SHA256(secret)` to subscribe, so possession of
 the link is the grant and the relay never learns the secret.
 
@@ -128,7 +128,7 @@ rather than fatal to the stack.
 └──────────────────┬─────────────────────────┘
                    │ IPC — Yjs update frames + awareness
 ┌──────────────────▼─────────────────────────┐
-│  polard (Rust, launchd agent)              │
+│  thoughtd (Rust, launchd agent)            │
 │    • yrs docs — the authority              │
 │    • SQLite: op log, snapshots, actors, FTS│
 │    • MCP server (stdio + localhost HTTP)   │
@@ -238,7 +238,7 @@ CREATE VIRTUAL TABLE doc_fts USING fts5(
 
 ## 4. MCP tool surface
 
-Exposed by `polard` over stdio and localhost HTTP. Available whether or not the UI is running.
+Exposed by `thoughtd` over stdio and localhost HTTP. Available whether or not the UI is running.
 
 **Read**
 
@@ -315,7 +315,7 @@ Everything custom we need is decoration-based, and TipTap exposes raw PM plugins
 `EditorView`. Reversible: TipTap docs *are* PM docs, so ejecting rewrites the shell, not the data.
 
 ### AD-10 — Daemon runs as a child process now; launchd deferred
-`polard` is a standalone binary the app happens to spawn, so the switch costs no code.
+`thoughtd` is a standalone binary the app happens to spawn, so the switch costs no code.
 **Consequence that is not deferrable:** MCP transport must be **HTTP on localhost** with the
 port in a well-known file, plus a stdio shim that proxies to it and only spawns the daemon if
 absent. A plain stdio MCP server would let each agent client spawn its own daemon — two
@@ -417,7 +417,7 @@ stable anchors, so that is where the unknowns are and that is what goes first.
 
 ## M1.0 — Acceptance — **met 2026-08-23**
 
-All four criteria pass in CI, and `polard` serves them over real MCP. What follows is the
+All four criteria pass in CI, and `thoughtd` serves them over real MCP. What follows is the
 design as built; corrections found while building it are marked inline.
 
 
@@ -435,19 +435,19 @@ All four are scriptable. None of them need a webview, which is the point.
 ## M1.1 — Crate layout
 
 ```
-polar/
+proof-of-thought/
   crates/
-    polar-schema/    # the schema as data; node/mark types; validation
-    polar-core/      # yrs documents, block identity, anchors, markdown projection
-    polar-store/     # SQLite: op log, snapshots, actors, FTS
-    polar-mcp/       # tool surface + HTTP transport
-    polard/          # binary: wiring, config, lifecycle
-    polar-mcp-stdio/ # shim binary: stdio -> HTTP, spawns polard if absent
+    thought-schema/      # the schema as data; node/mark types; validation
+    thought-core/        # yrs documents, block identity, anchors, markdown projection
+    thought-store/       # SQLite: op log, snapshots, actors, FTS
+    thought-mcp/         # tool surface + HTTP transport
+    thoughtd/            # binary: wiring, config, lifecycle
+    thought-mcp-stdio/   # shim binary: stdio -> HTTP, spawns thoughtd if absent
 ```
 
 The split is not ceremony — it is what makes the acceptance criteria testable in
-isolation. `polar-core` must round-trip markdown with no SQLite anywhere near it, and
-`polar-store` must be exercisable without standing up an MCP server.
+isolation. `thought-core` must round-trip markdown with no SQLite anywhere near it, and
+`thought-store` must be exercisable without standing up an MCP server.
 
 ## M1.2 — The schema is data, defined once
 
@@ -456,7 +456,7 @@ daemon needs the same schema to serialize, parse, and validate. Drift between th
 agents produce documents the editor rejects — a failure that surfaces late and looks like
 a CRDT bug.
 
-ProseMirror schemas *are* data: a plain spec object. So `polar-schema/schema.json` is the
+ProseMirror schemas *are* data: a plain spec object. So `thought-schema/schema.json` is the
 single source of truth. TipTap loads it at construction; Rust deserializes it into a
 `Schema` used by the serializer, parser, and validator. Neither side hand-writes a schema.
 
@@ -503,7 +503,7 @@ block carries the same `block_id` on every replica, so an agent on one machine c
 have been quietly wrong.
 
 **Toolchain note, also from that check:** `yrs` 0.27.4 uses `if let` guards and does not
-build on Rust 1.94.1 (the current default here). It builds on 1.95.0. `polard` should pin a
+build on Rust 1.94.1 (the current default here). It builds on 1.95.0. `thoughtd` should pin a
 `rust-toolchain.toml` at >= 1.95 so this surfaces at setup rather than mid-build.
 
 ## M1.4 — SQLite access patterns
@@ -542,7 +542,7 @@ This is more work than one line of an ADR makes it sound, and it should be sized
 The property test in M1.0 is the guard: a node that cannot survive `parse(serialize(x))`
 does not ship.
 
-### Built 2026-08-23 — `crates/polar-schema`, `crates/polar-markdown`
+### Built 2026-08-23 — `crates/thought-schema`, `crates/thought-markdown`
 
 Green over 40,000 generated documents. **Every defect below was found by the property
 test, not by reading the code** — which is the argument for writing it before the schema
@@ -586,23 +586,23 @@ but the arrow points the other direction.
 
 ## M1.6 — MCP surface
 
-**Built.** `polar-mcp` holds the tool surface with no transport attached, which is what lets
-M1.0 be tested with no window, no editor and no HTTP; `polard` wires it to `rmcp`'s
+**Built.** `thought-mcp` holds the tool surface with no transport attached, which is what lets
+M1.0 be tested with no window, no editor and no HTTP; `thoughtd` wires it to `rmcp`'s
 streamable-HTTP server. Corrections found while building:
 
 * **Store and document cache share one mutex.** `rusqlite::Connection` is `Send` but not
   `Sync`, so the store needs a lock regardless — and two locks would need a global ordering
   the natural call shapes disagree about (reads go cache-then-store, creates go
   store-then-cache). One lock removes the question.
-* **`POLAR_HOME`** overrides the store and discovery locations, or a test run publishes
+* **`THOUGHT_HOME`** overrides the store and discovery locations, or a test run publishes
   itself as *the* daemon and overwrites the real one's port and token.
 * **Reindex on every mutation**, not on snapshot as M1.4 said — serializing a document and
   writing two rows is cheap, and agents reading a stale index is not.
 
 HTTP on localhost. The port and a token live in
-`~/Library/Application Support/ai.exalto.polar/daemon.json`, mode `0600` — any local
+`~/Library/Application Support/ai.exalto.thought/daemon.json`, mode `0600` — any local
 process can reach a localhost port, and documents are the user's private writing.
-`polar-mcp-stdio` reads that file, proxies stdio to HTTP, and spawns `polard` if it is not
+`thought-mcp-stdio` reads that file, proxies stdio to HTTP, and spawns `thoughtd` if it is not
 already running (AD-10). **Built.** Its liveness probe treats an HTTP *error status* as
 proof of life — rejecting an uninitialized `ping` is what a healthy MCP server should do, so
 only a transport failure means absent. Reading a status code as death made the shim start a
@@ -630,8 +630,8 @@ within one turn share a `session_id` so per-run revert has something to key on (
 
 ## M1 — complete, 2026-08-23
 
-All four acceptance criteria pass in CI, plus the transport: `polard` over loopback HTTP and
-`polar-mcp-stdio` for stdio clients. What remains open is the manual IME pass (AD-8), which
+All four acceptance criteria pass in CI, plus the transport: `thoughtd` over loopback HTTP and
+`thought-mcp-stdio` for stdio clients. What remains open is the manual IME pass (AD-8), which
 needs a person and is now expected to be a bridge bug rather than a stack problem (AD-17).
 
 ## M1.7 — Deliberately not in M1
@@ -681,12 +681,12 @@ guard open programmatically, even though a faithful IME test cannot be.
 
 ## M2.1 — The UI is a peer, not a special case
 
-The editor needs Yjs update frames and awareness, not MCP tool calls. So `polard` grows a
+The editor needs Yjs update frames and awareness, not MCP tool calls. So `thoughtd` grows a
 second endpoint — **and it speaks the relay protocol from §5, not a bespoke one.**
 
 ```
-   Tauri webview  ──WebSocket──►  polard  ──WebSocket──►  relay (M3)
-      Yjs replica                 yrs authority            store-and-forward
+   Tauri webview  ──WebSocket──►  thoughtd  ──WebSocket──►  relay (M3)
+      Yjs replica                   yrs authority            store-and-forward
 ```
 
 The window is a peer that happens to be local. One protocol, two transports, and M3 gets to
@@ -702,7 +702,7 @@ Correcting M1.2's direction, which was unimplementable as written: TipTap builds
 from Extensions and cannot load a raw ProseMirror spec.
 
 TypeScript remains the definition. A build step writes `getSchema(extensions).spec` to
-`crates/polar-schema/schema.json`, Rust consumes that, and **CI fails if the committed JSON
+`crates/thought-schema/schema.json`, Rust consumes that, and **CI fails if the committed JSON
 drifts from what the extensions produce.** Otherwise the two halves diverge and agents start
 producing documents the editor rejects — a failure that surfaces late and looks like a CRDT
 bug.
@@ -834,9 +834,9 @@ the same access the recipient has.
    attributed to it rather than to "somewhere else" (M3.3).
 6. Deleting a document propagates, and does not resurrect on the other side.
 
-## M3.1 — Extract `polar-sync`
+## M3.1 — Extract `thought-sync`
 
-The `Frame` codec lives in `polard/src/sync.rs`, where a separate relay binary
+The `Frame` codec lives in `thoughtd/src/sync.rs`, where a separate relay binary
 cannot reach it. It moves to its own crate along with the wire fixture, and both
 the daemon and the relay depend on it. The fixture gate then covers three
 implementations rather than two.
@@ -850,7 +850,7 @@ is the reason deferring encryption buys anything at all (AD-7).
 * **Auth:** the client sends `share_id = SHA256(secret)`. The secret stays in
   the URL fragment and never reaches the server, so it can later become the
   content key without changing how joining works.
-* **Storage:** SQLite, the same append-only shape as `polar-store` minus the
+* **Storage:** SQLite, the same append-only shape as `thought-store` minus the
   actor tables — the relay has no opinion about who anyone is.
 * **Fly:** one machine, one persistent volume, single region. This is stateful
   and not horizontally scalable as designed; two replicas would each hold half
@@ -884,7 +884,7 @@ same shape the window's provider already uses.
 
 ## M3.5 — Sharing
 
-A `polar://join/<doc_id>#<secret>` capability URL, with the scheme registered so
+A `thought://join/<doc_id>#<secret>` capability URL, with the scheme registered so
 macOS hands it to the app. Sharing produces the link; opening one joins. No
 accounts, no inbox — possession of the link is the grant, so a link in a
 screenshot is a leak, and the UI should say so where the link is produced.

@@ -1,5 +1,5 @@
 /**
- * The sync wire format, mirroring `crates/polard/src/sync.rs`.
+ * The sync wire format, mirroring `crates/thoughtd/src/sync.rs`.
  *
  * Length-prefixed binary: Yjs updates are binary, and base64 inside JSON would
  * inflate every keystroke.

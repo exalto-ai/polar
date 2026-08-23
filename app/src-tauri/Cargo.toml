@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-polard = { path = "../../crates/polard" }
+thoughtd = { path = "../../crates/thoughtd" }
 ureq = { version = "3", features = ["json"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"

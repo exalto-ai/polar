@@ -47,7 +47,7 @@ export function createEditor(
     element,
     extensions: [
       ...extensions,
-      // The fragment name must match the daemon's root (polar_core::CONTENT).
+      // The fragment name must match the daemon's root (thought_core::CONTENT).
       Collaboration.configure({ fragment: doc.getXmlFragment("content") }),
       CollaborationCaret.configure({
         provider: { awareness } as never,

@@ -1,0 +1,144 @@
+{
+  "_comment": "Single source of truth for the document shape (AD/M1.2). Rust reads it here; the editor must derive its ProseMirror schema from the same file rather than hand-writing a second one. Node names and attrs are ProseMirror's; the `md` key is Proof of Thought's markdown mapping (AD-12: CommonMark + GFM).",
+  "nodes": {
+    "paragraph": {
+      "content": "inline*",
+      "group": "block",
+      "md": "paragraph"
+    },
+    "blockquote": {
+      "content": "block+",
+      "group": "block",
+      "md": "blockquote"
+    },
+    "bulletList": {
+      "content": "listItem+",
+      "group": "block list",
+      "md": "bullet_list"
+    },
+    "codeBlock": {
+      "content": "text*",
+      "group": "block",
+      "code": true,
+      "md": "code_block",
+      "attrs": {
+        "language": {
+          "default": null
+        }
+      }
+    },
+    "doc": {
+      "content": "block+"
+    },
+    "heading": {
+      "content": "inline*",
+      "group": "block",
+      "md": "heading",
+      "attrs": {
+        "level": {
+          "default": 1
+        }
+      }
+    },
+    "horizontalRule": {
+      "group": "block",
+      "md": "hr"
+    },
+    "listItem": {
+      "content": "paragraph block*",
+      "md": "list_item"
+    },
+    "orderedList": {
+      "content": "listItem+",
+      "group": "block list",
+      "md": "ordered_list",
+      "attrs": {
+        "start": {
+          "default": 1
+        },
+        "type": {
+          "default": null
+        }
+      }
+    },
+    "text": {
+      "group": "inline"
+    },
+    "table": {
+      "content": "tableRow+",
+      "group": "block",
+      "md": "table"
+    },
+    "tableRow": {
+      "content": "(tableCell | tableHeader)*"
+    },
+    "tableHeader": {
+      "content": "block+",
+      "attrs": {
+        "colspan": {
+          "default": 1
+        },
+        "rowspan": {
+          "default": 1
+        },
+        "colwidth": {
+          "default": null
+        },
+        "align": {
+          "default": null
+        }
+      }
+    },
+    "tableCell": {
+      "content": "block+",
+      "attrs": {
+        "colspan": {
+          "default": 1
+        },
+        "rowspan": {
+          "default": 1
+        },
+        "colwidth": {
+          "default": null
+        },
+        "align": {
+          "default": null
+        }
+      }
+    }
+  },
+  "marks": {
+    "link": {
+      "md": "link",
+      "attrs": {
+        "href": {
+          "default": null
+        },
+        "target": {
+          "default": "_blank"
+        },
+        "rel": {
+          "default": "noopener noreferrer nofollow"
+        },
+        "class": {
+          "default": null
+        },
+        "title": {
+          "default": null
+        }
+      }
+    },
+    "bold": {
+      "md": "**"
+    },
+    "code": {
+      "md": "`"
+    },
+    "italic": {
+      "md": "*"
+    },
+    "strike": {
+      "md": "~~"
+    }
+  }
+}

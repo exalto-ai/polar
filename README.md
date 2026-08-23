@@ -3,9 +3,10 @@
 A local-first macOS writing app. Individual documents, real-time collaboration between
 humans *and* agents, fully functional offline, syncing through a self-hostable relay.
 
-The engine is called **polar** — the crates, the `polard` daemon, the bundle
-identifier and the sync protocol all keep that name. *Proof of Thought* is what
-the app is called on the outside.
+*Proof of Thought* is the name on the window. Everything a machine resolves —
+the crates, the `thoughtd` daemon, `ai.exalto.thought`, `THOUGHT_HOME`, the
+`thought://` scheme — uses the short handle **thought**, which is the same split
+`Visual Studio Code.app` makes when it identifies itself as `com.microsoft.VSCode`.
 
 **M2 is complete**: the daemon, the window, and any number of agents edit one document at
 once. An agent writing over MCP appears live in an open editor, and a rail in the left
@@ -26,13 +27,13 @@ keyboard rather than a test. M3 — sharing through a relay — is planned but n
 
 | Crate | What it holds |
 | --- | --- |
-| `polar-schema` | The document model, `schema.json`, content-expression validation |
-| `polar-markdown` | The markdown projection, both directions, property-tested |
-| `polar-core` | yrs documents, block identity, block-scoped edits |
-| `polar-store` | SQLite op log, snapshots, actors, search |
-| `polar-mcp` | The agent tool surface, with no transport attached |
-| `polard` | The daemon: MCP over loopback HTTP |
-| `polar-testkit` | Document generators shared by the property tests |
+| `thought-schema` | The document model, `schema.json`, content-expression validation |
+| `thought-markdown` | The markdown projection, both directions, property-tested |
+| `thought-core` | yrs documents, block identity, block-scoped edits |
+| `thought-store` | SQLite op log, snapshots, actors, search |
+| `thought-mcp` | The agent tool surface, with no transport attached |
+| `thoughtd` | The daemon: MCP over loopback HTTP |
+| `thought-testkit` | Document generators shared by the property tests |
 
 ## Install
 
@@ -61,12 +62,12 @@ The daemon can also be run on its own, which is the whole point — agents do no
 window:
 
 ```bash
-cargo run -p polard
+cargo run -p thoughtd
 ```
 
 It prints its port and writes `daemon.json` (mode 0600) with a bearer token. MCP clients
 that speak HTTP can use the URL inside; clients that spawn a stdio server should spawn
-`polar-mcp-stdio`, which finds or starts the daemon and proxies to it.
+`thought-mcp-stdio`, which finds or starts the daemon and proxies to it.
 
 ## Shape
 

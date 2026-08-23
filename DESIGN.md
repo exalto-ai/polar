@@ -38,7 +38,7 @@ theirs across both themes.
 Orbit, coin cut: a filled disc with a ring and one radial arm knocked out of it,
 so whatever is behind shows through the mark. Polar coordinates — the document
 is the centre, and the editor, an agent over MCP and the relay are the same
-document seen from different bearings. The engine is named for them.
+document seen from different bearings.
 
 The arm sits at 45°, on the diagonal of the icon's square. Below that it reads
 as a clock hand; above it, it flattens and loses the climb.

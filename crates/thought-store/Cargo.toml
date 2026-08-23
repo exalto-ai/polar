@@ -1,0 +1,14 @@
+[package]
+name = "thought-store"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[dev-dependencies]
+thought-core = { workspace = true }
+thought-schema = { workspace = true }
+tempfile = "3.27.0"

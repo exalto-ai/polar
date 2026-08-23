@@ -19,7 +19,7 @@ type Fixture = {
 
 const fixture: Fixture = JSON.parse(
   readFileSync(
-    resolve(import.meta.dirname, "../../crates/polard/tests/fixtures/frames.json"),
+    resolve(import.meta.dirname, "../../crates/thoughtd/tests/fixtures/frames.json"),
     "utf8",
   ),
 );
