@@ -150,6 +150,18 @@ impl Polar {
         Ok(Json(serde_json::to_value(view).map_err(failed)?))
     }
 
+    #[tool(
+        description = "Who has worked on a document — humans and agents, with edit counts \
+                       and when they last wrote."
+    )]
+    fn document_actors(
+        &self,
+        Parameters(p): Parameters<DocParams>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let actors = self.workspace.document_actors(&p.doc_id).map_err(failed)?;
+        Ok(Json(serde_json::json!({ "actors": actors })))
+    }
+
     #[tool(description = "Full-text search across documents.")]
     fn search(
         &self,

@@ -95,6 +95,17 @@ pub struct TextEdit<'a> {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct ActorSummary {
+    pub actor_id: String,
+    pub kind: String,
+    pub display_name: String,
+    pub model: Option<String>,
+    pub color: String,
+    pub last_seen: i64,
+    pub edits: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct EditOutcome {
     pub doc_id: String,
     pub block_id: Option<String>,
@@ -500,6 +511,28 @@ impl Workspace {
                 return Ok(None);
             }
             Ok(Some(inner.commit(doc_id, &before, actor)?))
+        })
+    }
+
+    /// Who has worked on this document. Powers the window's connections panel,
+    /// and is the first visible use of the attribution AD-6 insisted on keeping
+    /// from the first commit.
+    pub fn document_actors(&self, doc_id: &str) -> Result<Vec<ActorSummary>, WorkspaceError> {
+        self.with(|inner| {
+            Ok(inner
+                .store
+                .actors_for_document(doc_id)?
+                .into_iter()
+                .map(|a| ActorSummary {
+                    actor_id: a.actor_id,
+                    kind: a.kind,
+                    display_name: a.display_name,
+                    model: a.model,
+                    color: a.color,
+                    last_seen: a.last_seen,
+                    edits: a.edits,
+                })
+                .collect())
         })
     }
 

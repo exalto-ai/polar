@@ -11,8 +11,26 @@
     <header class="chrome" data-tauri-drag-region>
       <span class="title" id="title">Untitled</span>
       <span class="presence" id="presence"></span>
-      <span class="status" id="status" title="offline"></span>
+      <button class="status" id="status" title="Connections" aria-haspopup="dialog"></button>
     </header>
+
+    <div class="popover" id="connections" hidden role="dialog" aria-label="Connections">
+      <section>
+        <h2>Windows</h2>
+        <ul id="peers"></ul>
+        <button class="ghost" id="new-window">Open another window <kbd>⌘N</kbd></button>
+      </section>
+      <section>
+        <h2>Agents</h2>
+        <ul id="agents"></ul>
+      </section>
+      <section>
+        <h2>Connect an agent</h2>
+        <p class="note">Point any MCP client at this command. It finds the running daemon, or starts one.</p>
+        <pre id="stdio-command"></pre>
+        <button class="ghost" id="copy-command">Copy</button>
+      </section>
+    </div>
 
     <main class="page">
       <div id="editor" class="editor"></div>
