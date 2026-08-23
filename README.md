@@ -3,13 +3,35 @@
 A local-first macOS writing app. Individual documents, real-time collaboration between
 humans *and* agents, fully functional offline, syncing through a self-hostable relay.
 
-Nothing is implemented yet. What exists is a design and one risk probe.
+**M1 is complete**: a Rust daemon serves documents to agents over MCP, with no editor
+anywhere. `cargo test --workspace` is green and CI gates every push.
 
 - **[docs/architecture.md](docs/architecture.md)** — 17 decisions, each with its cost
   stated. Written to be argued with.
 - **[prototypes/editor-probe](prototypes/editor-probe)** — throwaway probe answering
   whether WKWebView can host a collaborative ProseMirror (AD-8). It can: identical to
-  Chromium on all five automated checks.
+  Chromium on all five automated checks. One manual IME pass is still outstanding.
+
+## Crates
+
+| Crate | What it holds |
+| --- | --- |
+| `polar-schema` | The document model, `schema.json`, content-expression validation |
+| `polar-markdown` | The markdown projection, both directions, property-tested |
+| `polar-core` | yrs documents, block identity, block-scoped edits |
+| `polar-store` | SQLite op log, snapshots, actors, search |
+| `polar-mcp` | The agent tool surface, with no transport attached |
+| `polard` | The daemon: MCP over loopback HTTP |
+| `polar-testkit` | Document generators shared by the property tests |
+
+## Try it
+
+```bash
+cargo run -p polard -- /tmp/polar.db
+```
+
+It prints its port and writes `daemon.json` (mode 0600) with a bearer token. Point an MCP
+client at the URL inside.
 
 ## Shape
 
