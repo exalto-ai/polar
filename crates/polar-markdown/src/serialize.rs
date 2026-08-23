@@ -3,15 +3,33 @@
 use polar_schema::{Mark, Node};
 
 pub fn to_markdown(doc: &Node) -> String {
+    to_markdown_with_spans(doc).0
+}
+
+/// Markdown plus the 1-based inclusive line range of each top-level block.
+///
+/// Anchors travel *beside* the text rather than inside it: agents get clean
+/// markdown, and block identity is carried out of band. Embedding ids in the
+/// markdown itself would pollute every export and invite agents to edit them.
+pub fn to_markdown_with_spans(doc: &Node) -> (String, Vec<(usize, usize)>) {
     let mut out = String::new();
-    blocks(&doc.content, &mut out);
+    let mut spans = Vec::with_capacity(doc.content.len());
+    blocks_tracked(&doc.content, &mut out, Some(&mut spans));
     while out.ends_with('\n') {
         out.pop();
     }
-    out
+    (out, spans)
+}
+
+fn line_count(s: &str) -> usize {
+    s.bytes().filter(|b| *b == b'\n').count()
 }
 
 fn blocks(nodes: &[Node], out: &mut String) {
+    blocks_tracked(nodes, out, None);
+}
+
+fn blocks_tracked(nodes: &[Node], out: &mut String, mut spans: Option<&mut Vec<(usize, usize)>>) {
     // Two adjacent lists sharing a marker merge into one on re-parse, which
     // silently destroys document structure. CommonMark starts a new list when
     // the marker character changes, so alternate between siblings.
@@ -22,6 +40,7 @@ fn blocks(nodes: &[Node], out: &mut String) {
         if i > 0 {
             out.push('\n');
         }
+        let start_line = line_count(out) + 1;
         match node.kind.as_str() {
             "bulletList" => {
                 let marker = if prev_bullet == Some('-') { '*' } else { '-' };
@@ -40,6 +59,9 @@ fn blocks(nodes: &[Node], out: &mut String) {
                 prev_ordered = None;
                 block(node, out);
             }
+        }
+        if let Some(spans) = spans.as_deref_mut() {
+            spans.push((start_line, line_count(out).max(start_line)));
         }
     }
 }

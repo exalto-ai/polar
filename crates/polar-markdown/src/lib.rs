@@ -17,7 +17,7 @@ mod serialize;
 pub use polar_schema::normalize;
 
 pub use parse::from_markdown;
-pub use serialize::to_markdown;
+pub use serialize::{to_markdown, to_markdown_with_spans};
 
 /// `parse(serialize(x))`, the operation the property test exercises.
 pub fn round_trip(doc: &Node) -> Node {

@@ -1,0 +1,19 @@
+[package]
+name = "polar-mcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+polar-core = { workspace = true }
+polar-markdown = { workspace = true }
+polar-schema = { workspace = true }
+polar-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+tempfile = "3"

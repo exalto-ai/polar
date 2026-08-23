@@ -196,3 +196,47 @@ fn table_constraints_are_pinned() {
         "a literal pipe must be escaped"
     );
 }
+
+/// Line spans must actually address the block they claim to, or every agent
+/// edit lands somewhere else.
+#[test]
+fn line_spans_locate_their_blocks() {
+    let doc = Node::element(
+        "doc",
+        vec![
+            Node::element("heading", vec![Node::text("Title", vec![])])
+                .with_attr("level", 1.into()),
+            Node::element("paragraph", vec![Node::text("first para", vec![])]),
+            Node::element(
+                "bulletList",
+                vec![
+                    Node::element(
+                        "listItem",
+                        vec![Node::element("paragraph", vec![Node::text("one", vec![])])],
+                    ),
+                    Node::element(
+                        "listItem",
+                        vec![Node::element("paragraph", vec![Node::text("two", vec![])])],
+                    ),
+                ],
+            ),
+        ],
+    );
+
+    let (md, spans) = polar_markdown::to_markdown_with_spans(&doc);
+    let lines: Vec<&str> = md.lines().collect();
+
+    assert_eq!(
+        spans.len(),
+        doc.content.len(),
+        "one span per top-level block"
+    );
+    assert!(lines[spans[0].0 - 1].starts_with("# Title"));
+    assert!(lines[spans[1].0 - 1].starts_with("first para"));
+
+    // A multi-line block must span all of its lines, not just the first.
+    let (start, end) = spans[2];
+    assert_eq!(end - start, 1, "the two-item list occupies two lines");
+    assert!(lines[start - 1].contains("one"));
+    assert!(lines[end - 1].contains("two"));
+}
