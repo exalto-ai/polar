@@ -9,10 +9,16 @@ out from the centre to fix a bearing. The document is the centre; the editor,
 an agent over MCP and the relay are the same document seen from different
 angles.
 
-The coin cut inverts it: the disc is the only saturated shape, and the ring and
-arm are knocked out of it, so the tile's own gradient shows through the mark.
-A filled silhouette is what survives a Dock — outlines at 32px turn to lint,
-and there is nothing here to thin out.
+The coin cut inverts it: the mark is knocked out of a filled disc, so the tile
+shows through the ring and the arm. A filled silhouette is what survives a Dock
+— outlines at 32px turn to lint, and there is nothing here to thin out.
+
+The tile is Polar Blue and the disc is white, rather than the other way round.
+A dark tile put a blue mark on a near-black field and read as a widget; the
+brand colour belongs to the whole tile, which is the only part of the icon
+visible at a glance in a Dock. The gradient is the accent lifted at the top and
+deepened at the bottom, both derived from the one hex, so the icon cannot
+disagree with DESIGN.md.
 
 Geometry is authored on the 96x96 field the SVGs in assets/orbit use, and
 scaled up, so the two never drift. Masks are drawn at 4x and downsampled,
@@ -26,9 +32,18 @@ SIZE = 1024
 FIELD = 96  # the coordinate space assets/orbit/*.svg are drawn in
 SS = 4  # supersampling factor for the knockout mask
 
-BACKGROUND_TOP = (26, 28, 33)
-BACKGROUND_BOTTOM = (13, 15, 19)
-ACCENT = (110, 161, 255)  # #6ea1ff, the dark-ground accent: the tile is dark
+ACCENT = (47, 111, 237)  # #2f6fed, Polar Blue; see DESIGN.md
+MARK = (255, 255, 255)
+
+
+def _shade(colour: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+    """Lift towards white for positive amounts, towards black for negative."""
+    target = 255 if amount > 0 else 0
+    return tuple(round(c + (target - c) * abs(amount)) for c in colour)
+
+
+BACKGROUND_TOP = _shade(ACCENT, 0.10)
+BACKGROUND_BOTTOM = _shade(ACCENT, -0.16)
 
 # macOS rounds app icons generously; anything squarer looks foreign in the Dock.
 CORNER = 0.225
@@ -42,7 +57,7 @@ CENTRE = (48.0, 48.0)
 
 
 def _tile() -> Image.Image:
-    """The rounded, vertically graded tile the mark sits on."""
+    """The rounded, vertically graded tile the mark is cut out of."""
     column = Image.new("RGB", (1, SIZE))
     pen = ImageDraw.Draw(column)
     for y in range(SIZE):
@@ -91,7 +106,7 @@ def _coin_mask() -> Image.Image:
 
 def draw_icon() -> Image.Image:
     image = _tile()
-    image.paste(ACCENT, (0, 0), _coin_mask())
+    image.paste(MARK, (0, 0), _coin_mask())
     return image
 
 
