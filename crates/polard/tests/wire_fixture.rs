@@ -18,37 +18,61 @@ fn cases() -> Vec<(&'static str, Frame)> {
     vec![
         (
             "subscribe-empty-vector",
-            Frame::Subscribe { doc_id: "doc-1".into(), state_vector: vec![] },
+            Frame::Subscribe {
+                doc_id: "doc-1".into(),
+                state_vector: vec![],
+            },
         ),
         (
             "subscribe-with-vector",
-            Frame::Subscribe { doc_id: "doc-1".into(), state_vector: vec![0, 1, 2, 255] },
+            Frame::Subscribe {
+                doc_id: "doc-1".into(),
+                state_vector: vec![0, 1, 2, 255],
+            },
         ),
         (
             "sync",
-            Frame::Sync { doc_id: "doc-1".into(), update: vec![1, 0, 0, 0, 5] },
+            Frame::Sync {
+                doc_id: "doc-1".into(),
+                update: vec![1, 0, 0, 0, 5],
+            },
         ),
         (
             "update",
-            Frame::Update { doc_id: "01a02d26-ac02-7072".into(), update: vec![42; 8] },
+            Frame::Update {
+                doc_id: "01a02d26-ac02-7072".into(),
+                update: vec![42; 8],
+            },
         ),
         (
             "broadcast",
-            Frame::Broadcast { doc_id: "doc-2".into(), update: vec![7, 7, 7] },
+            Frame::Broadcast {
+                doc_id: "doc-2".into(),
+                update: vec![7, 7, 7],
+            },
         ),
         (
             "awareness",
-            Frame::Awareness { doc_id: "doc-2".into(), payload: b"cursor".to_vec() },
+            Frame::Awareness {
+                doc_id: "doc-2".into(),
+                payload: b"cursor".to_vec(),
+            },
         ),
         (
             "error",
-            Frame::Error { doc_id: "doc-3".into(), message: "no such document".into() },
+            Frame::Error {
+                doc_id: "doc-3".into(),
+                message: "no such document".into(),
+            },
         ),
         (
             // A non-ASCII id: the length prefix counts bytes, not characters,
             // and a decoder that slices by character position breaks here.
             "unicode-doc-id",
-            Frame::Sync { doc_id: "документ".into(), update: vec![9] },
+            Frame::Sync {
+                doc_id: "документ".into(),
+                update: vec![9],
+            },
         ),
     ]
 }
@@ -75,7 +99,10 @@ fn generate() -> String {
 
 fn describe(frame: &Frame) -> serde_json::Value {
     let (kind, doc_id, body) = match frame {
-        Frame::Subscribe { doc_id, state_vector } => ("subscribe", doc_id, state_vector.clone()),
+        Frame::Subscribe {
+            doc_id,
+            state_vector,
+        } => ("subscribe", doc_id, state_vector.clone()),
         Frame::Sync { doc_id, update } => ("sync", doc_id, update.clone()),
         Frame::Update { doc_id, update } => ("update", doc_id, update.clone()),
         Frame::Broadcast { doc_id, update } => ("broadcast", doc_id, update.clone()),
@@ -108,9 +135,13 @@ fn fixture_is_current() {
 #[test]
 fn every_fixture_frame_decodes_to_itself() {
     for (name, frame) in cases() {
-        let decoded = Frame::decode(&frame.encode())
-            .unwrap_or_else(|| panic!("`{name}` failed to decode"));
-        assert_eq!(describe(&decoded), describe(&frame), "`{name}` changed in transit");
+        let decoded =
+            Frame::decode(&frame.encode()).unwrap_or_else(|| panic!("`{name}` failed to decode"));
+        assert_eq!(
+            describe(&decoded),
+            describe(&frame),
+            "`{name}` changed in transit"
+        );
     }
 }
 
@@ -119,10 +150,19 @@ fn every_fixture_frame_decodes_to_itself() {
 #[test]
 fn malformed_frames_are_refused_rather_than_panicking() {
     assert!(Frame::decode(&[]).is_none(), "empty");
-    assert!(Frame::decode(&[0x02, 0, 0]).is_none(), "shorter than the header");
+    assert!(
+        Frame::decode(&[0x02, 0, 0]).is_none(),
+        "shorter than the header"
+    );
     // A length prefix claiming more bytes than the frame contains.
-    assert!(Frame::decode(&[0x02, 0xff, 0xff, 0xff, 0xff]).is_none(), "absurd length");
-    assert!(Frame::decode(&[0x02, 0, 0, 0, 9, b'a']).is_none(), "id longer than body");
+    assert!(
+        Frame::decode(&[0x02, 0xff, 0xff, 0xff, 0xff]).is_none(),
+        "absurd length"
+    );
+    assert!(
+        Frame::decode(&[0x02, 0, 0, 0, 9, b'a']).is_none(),
+        "id longer than body"
+    );
     // An unknown tag is not a frame we understand.
     assert!(Frame::decode(&[0x7f, 0, 0, 0, 0]).is_none(), "unknown tag");
 }

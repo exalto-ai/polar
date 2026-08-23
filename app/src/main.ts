@@ -2,11 +2,13 @@
  * The window. Opens one document at a time; ⌘K switches.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow as tauriWindow } from "@tauri-apps/api/window";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { Editor } from "@tiptap/core";
 import { createEditor } from "./editor";
 import { Mcp, type DocumentSummary } from "./mcp";
+import { colorFor, playfulName, seedFrom } from "./names";
 import { SyncProvider, type ProviderStatus } from "./provider";
 
 type Connection = {
@@ -16,10 +18,7 @@ type Connection = {
   stdio_command: string;
 };
 
-const PALETTE = ["#4c8dff", "#e0a44a", "#b98cff", "#5ac88f", "#ff7a6b"];
-
 const els = {
-  title: document.getElementById("title")!,
   status: document.getElementById("status")!,
   presence: document.getElementById("presence")!,
   editor: document.getElementById("editor")!,
@@ -43,23 +42,70 @@ function setStatus(status: ProviderStatus) {
   els.status.title = status;
 }
 
-/** The title is the first heading, matching what the daemon derives. */
+/**
+ * The document title, shown in the native window title rather than painted
+ * into the page — a heading repeated two centimetres above itself is noise.
+ *
+ * Derived exactly as the daemon derives it (first heading, else first non-empty
+ * block), because two implementations of "what is this document called" drift
+ * and then disagree in front of the user.
+ */
+function deriveTitle(editor: Editor): string {
+  const doc = editor.state.doc;
+  let title = "";
+  doc.forEach((node) => {
+    if (title) return;
+    if (node.type.name === "heading") title = node.textContent.trim();
+  });
+  if (!title) {
+    doc.forEach((node) => {
+      if (!title && node.textContent.trim()) title = node.textContent.trim();
+    });
+  }
+  return title.slice(0, 120) || "Untitled";
+}
+
 function refreshTitle(editor: Editor) {
-  const heading = editor.state.doc.content.firstChild;
-  const text = heading?.textContent?.trim();
-  els.title.textContent = text && text.length > 0 ? text : "Untitled";
+  const title = deriveTitle(editor);
+  document.title = title;
+  void getCurrentWindow?.()?.setTitle(title);
+}
+
+/** Show or hide one peer's caret label from outside the editor. */
+function pointAt(peerId: number, pointed: boolean) {
+  document
+    .querySelectorAll(`.peer-caret[data-peer="${peerId}"]`)
+    .forEach((caret) => caret.classList.toggle("is-pointed", pointed));
 }
 
 function renderPresence(awareness: Awareness, self: number) {
   const others = [...awareness.getStates().entries()].filter(([id]) => id !== self);
   els.presence.replaceChildren(
-    ...others.map(([, state]) => {
+    ...others.map(([id, state]) => {
       const user = (state as { user?: { name: string; color: string } }).user;
+      const name = user?.name ?? "Someone";
       const chip = document.createElement("span");
       chip.className = "who";
       chip.style.setProperty("--who", user?.color ?? "#888");
-      chip.textContent = (user?.name ?? "?").slice(0, 1).toUpperCase();
-      chip.title = user?.name ?? "unknown";
+      // Initials of both words, so two peers are told apart at a glance.
+      chip.textContent = name
+        .split(" ")
+        .map((word) => word[0])
+        .join("")
+        .slice(0, 2)
+        .toUpperCase();
+      chip.title = `${name} — click to find their cursor`;
+
+      // Pointing at a chip points at that peer's caret, which is otherwise a
+      // 2px line somewhere in the document.
+      chip.addEventListener("mouseenter", () => pointAt(id, true));
+      chip.addEventListener("mouseleave", () => pointAt(id, false));
+      chip.addEventListener("click", () => {
+        const caret = document.querySelector(`.peer-caret[data-peer="${id}"]`);
+        caret?.scrollIntoView({ behavior: "smooth", block: "center" });
+        pointAt(id, true);
+        setTimeout(() => pointAt(id, false), 1800);
+      });
       return chip;
     }),
   );
@@ -81,10 +127,13 @@ async function openDocument(docId: string) {
     setStatus,
   );
 
-  // Distinct per window so two windows are visibly different peers.
+  // A window has no name of its own, and "Window 72" tells you nothing. Both
+  // name and colour derive from the Yjs client id, so a peer keeps the same
+  // identity for as long as it is connected.
   const user = {
-    name: `Window ${(doc.clientID % 97).toString().padStart(2, "0")}`,
-    color: PALETTE[doc.clientID % PALETTE.length],
+    name: playfulName(doc.clientID),
+    color: colorFor(doc.clientID),
+    id: doc.clientID,
   };
   const editor = createEditor(els.editor, doc, awareness, provider, user);
   awareness.setLocalStateField("user", user);
@@ -127,6 +176,11 @@ function row(color: string, name: string, meta: string): HTMLLIElement {
   return item;
 }
 
+function agentLabel(a: { display_name: string; model: string | null; actor_id: string }) {
+  const name = a.display_name.trim() || playfulName(seedFrom(a.actor_id));
+  return a.model ? `${name} · ${a.model}` : name;
+}
+
 function empty(text: string): HTMLLIElement {
   const item = document.createElement("li");
   item.className = "none";
@@ -145,7 +199,7 @@ async function renderConnections() {
       const user = (state as { user?: { name: string; color: string } }).user;
       return row(
         user?.color ?? "#888",
-        user?.name ?? "Unknown",
+        user?.name ?? "Someone",
         id === doc.clientID ? "this window" : "connected",
       );
     }),
@@ -160,8 +214,10 @@ async function renderConnections() {
     els.agents.replaceChildren(
       ...agents.map((a) =>
         row(
-          a.color,
-          a.model ? `${a.display_name} · ${a.model}` : a.display_name,
+          // Fall back to a playful name only when a client sent none; renaming
+          // something the user named would be worse than the problem.
+          a.color || colorFor(seedFrom(a.actor_id)),
+          agentLabel(a),
           `${a.edits} edit${a.edits === 1 ? "" : "s"} · ${ago(a.last_seen)}`,
         ),
       ),
@@ -330,7 +386,14 @@ async function boot() {
   await openDocument("doc_id" in target ? target.doc_id : (target as any).doc_id);
 }
 
+/** Only under Tauri; in a dev browser there is no native window to title. */
+function getCurrentWindow() {
+  return (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+    ? tauriWindow()
+    : null;
+}
+
 boot().catch((error) => {
-  els.title.textContent = "Could not reach the daemon";
+  document.title = "Could not reach the daemon";
   console.error(error);
 });
