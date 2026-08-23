@@ -102,14 +102,15 @@ fn block() -> impl Strategy<Value = Node> {
         // schema.json says listItem content is `paragraph block*` — the first
         // child must be a paragraph. Generating a bare block here produced
         // schema-invalid documents and blamed the serializer for the result.
-        let item = (inlines(), prop::option::of(inner.clone())).prop_map(|(inl, extra)| {
-            let mut content = vec![Node::element("paragraph", inl)];
-            if let Some(block) = extra {
-                content.push(block);
-            }
-            Node::element("listItem", content)
-        })
-        .boxed();
+        let item = (inlines(), prop::option::of(inner.clone()))
+            .prop_map(|(inl, extra)| {
+                let mut content = vec![Node::element("paragraph", inl)];
+                if let Some(block) = extra {
+                    content.push(block);
+                }
+                Node::element("listItem", content)
+            })
+            .boxed();
 
         prop_oneof![
             prop::collection::vec(inner, 1..3).prop_map(|c| Node::element("blockquote", c)),
@@ -155,29 +156,45 @@ proptest! {
 #[test]
 fn known_shapes_round_trip() {
     let cases = vec![
-        Node::element("doc", vec![Node::element(
-            "paragraph",
-            vec![Node::text("plain", vec![])],
-        )]),
-        Node::element("doc", vec![Node::element(
-            "paragraph",
-            vec![Node::text("bold", vec![Mark::new("strong")])],
-        )]),
-        Node::element("doc", vec![Node::element(
-            "paragraph",
-            vec![Node::text("2 * 3 * 4", vec![])],
-        )]),
-        Node::element("doc", vec![Node::element(
-            "codeBlock",
-            vec![Node::text("let x = 1;", vec![])],
-        )]),
+        Node::element(
+            "doc",
+            vec![Node::element(
+                "paragraph",
+                vec![Node::text("plain", vec![])],
+            )],
+        ),
+        Node::element(
+            "doc",
+            vec![Node::element(
+                "paragraph",
+                vec![Node::text("bold", vec![Mark::new("strong")])],
+            )],
+        ),
+        Node::element(
+            "doc",
+            vec![Node::element(
+                "paragraph",
+                vec![Node::text("2 * 3 * 4", vec![])],
+            )],
+        ),
+        Node::element(
+            "doc",
+            vec![Node::element(
+                "codeBlock",
+                vec![Node::text("let x = 1;", vec![])],
+            )],
+        ),
     ];
     for case in cases {
         let expected = normalize(&case);
-        assert_eq!(round_trip(&expected), expected, "\nmd:\n{}", to_markdown(&expected));
+        assert_eq!(
+            round_trip(&expected),
+            expected,
+            "\nmd:\n{}",
+            to_markdown(&expected)
+        );
     }
 }
-
 
 /// Pins the exact boundary of the one shape markdown cannot represent, so a
 /// pulldown-cmark upgrade that widens or narrows it is noticed rather than
@@ -195,21 +212,42 @@ fn intraword_emphasis_gap_is_pinned() {
     // The gap: a marked span fused to adjacent word characters, where what sits
     // against the delimiter is punctuation — supplied by the text itself...
     assert!(!has(r"A**\***", "strong"), "fused, content is `*`");
-    assert!(!has(r"A**\*x**", "strong"), "fused, content starts with `*`");
+    assert!(
+        !has(r"A**\*x**", "strong"),
+        "fused, content starts with `*`"
+    );
     assert!(!has(r"A**\_**", "strong"), "fused, content is `_`");
     assert!(!has(r"A*\**", "em"), "fused em, content is `*`");
     assert!(!has(r"A**\`**", "strong"), "fused, content is a backtick");
     // ...or by a nested mark's own delimiter, which is the broader case.
-    assert!(!has(r"A**~~a~~**", "strong"), "nested mark supplies the punctuation");
-    assert!(has(r"A**~~a~~**", "strike"), "and the inner mark still survives");
+    assert!(
+        !has(r"A**~~a~~**", "strong"),
+        "nested mark supplies the punctuation"
+    );
+    assert!(
+        has(r"A**~~a~~**", "strike"),
+        "and the inner mark still survives"
+    );
     // The rule is symmetric — the closing side fails the same way.
-    assert!(!has(r"**~~A~~**0", "strong"), "closing delimiter fused to next word");
+    assert!(
+        !has(r"**~~A~~**0", "strong"),
+        "closing delimiter fused to next word"
+    );
 
     // Whitespace on the relevant side resolves every one of them.
-    assert!(has(r"A **\*** B", "strong"), "whitespace separates the delimiter");
-    assert!(has(r"A **~~a~~** B", "strong"), "whitespace fixes the nested case");
+    assert!(
+        has(r"A **\*** B", "strong"),
+        "whitespace separates the delimiter"
+    );
+    assert!(
+        has(r"A **~~a~~** B", "strong"),
+        "whitespace fixes the nested case"
+    );
     assert!(has(r"**\***", "strong"), "span stands alone");
     assert!(has(r"A**x\***", "strong"), "content merely ends with `*`");
     assert!(has(r"A**x\*x**", "strong"), "punctuation is interior");
-    assert!(has(r"A~~\~~~", "strike"), "strike opens where emphasis would not");
+    assert!(
+        has(r"A~~\~~~", "strike"),
+        "strike opens where emphasis would not"
+    );
 }

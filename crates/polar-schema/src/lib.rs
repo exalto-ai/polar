@@ -35,7 +35,13 @@ pub struct Mark {
 
 impl Node {
     pub fn element(kind: &str, content: Vec<Node>) -> Self {
-        Node { kind: kind.into(), attrs: Attrs::new(), content, text: None, marks: vec![] }
+        Node {
+            kind: kind.into(),
+            attrs: Attrs::new(),
+            content,
+            text: None,
+            marks: vec![],
+        }
     }
 
     pub fn text(text: impl Into<String>, marks: Vec<Mark>) -> Self {
@@ -68,7 +74,10 @@ impl Node {
 
 impl Mark {
     pub fn new(kind: &str) -> Self {
-        Mark { kind: kind.into(), attrs: Attrs::new() }
+        Mark {
+            kind: kind.into(),
+            attrs: Attrs::new(),
+        }
     }
 
     pub fn with_attr(mut self, key: &str, value: serde_json::Value) -> Self {
@@ -119,9 +128,7 @@ impl Schema {
     pub fn v0() -> &'static Schema {
         use std::sync::OnceLock;
         static SCHEMA: OnceLock<Schema> = OnceLock::new();
-        SCHEMA.get_or_init(|| {
-            serde_json::from_str(SCHEMA_JSON).expect("schema.json is malformed")
-        })
+        SCHEMA.get_or_init(|| serde_json::from_str(SCHEMA_JSON).expect("schema.json is malformed"))
     }
 
     pub fn node(&self, kind: &str) -> Option<&NodeSpec> {
@@ -140,7 +147,14 @@ mod tests {
     #[test]
     fn schema_loads_and_has_the_v0_set() {
         let s = Schema::v0();
-        for kind in ["doc", "paragraph", "heading", "codeBlock", "listItem", "text"] {
+        for kind in [
+            "doc",
+            "paragraph",
+            "heading",
+            "codeBlock",
+            "listItem",
+            "text",
+        ] {
             assert!(s.node(kind).is_some(), "missing node {kind}");
         }
         for kind in ["strong", "em", "code", "link"] {
@@ -151,7 +165,10 @@ mod tests {
 
     #[test]
     fn node_json_matches_prosemirror_shape() {
-        let n = Node::element("paragraph", vec![Node::text("hi", vec![Mark::new("strong")])]);
+        let n = Node::element(
+            "paragraph",
+            vec![Node::text("hi", vec![Mark::new("strong")])],
+        );
         let json = serde_json::to_value(&n).unwrap();
         assert_eq!(json["type"], "paragraph");
         assert_eq!(json["content"][0]["text"], "hi");

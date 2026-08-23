@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/polar-schema", "crates/polar-markdown"]
+# Throwaway risk probes, deliberately outside the workspace: they pin their own
+# deps and must not gate the build.
+exclude = ["prototypes/yrs-check", "prototypes/editor-probe/src-tauri"]
 
 [workspace.package]
 edition = "2024"
