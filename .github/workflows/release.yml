@@ -70,6 +70,19 @@ jobs:
           key_path="$RUNNER_TEMP/AuthKey_${KEY_ID}.p8"
           printf '%s' "$KEY_BASE64" | base64 --decode > "$key_path"
           chmod 600 "$key_path"
+
+          # Fail here with a clear reason rather than eight minutes later with
+          # "invalidPEMDocument" from inside the bundler. `op item get --fields`
+          # CSV-quotes multi-line values, so a key exported that way decodes to
+          # a PEM wrapped in double quotes and is rejected — which is exactly
+          # how this broke the first time.
+          if ! openssl pkey -in "$key_path" -noout 2>/dev/null; then
+            echo "::error::The decoded notarization key is not a valid PEM."
+            echo "First bytes: $(head -c 30 "$key_path" | tr -d '\n')"
+            echo "Re-export it unquoted; see docs/releasing.md."
+            exit 1
+          fi
+          echo "Notarization key: valid PEM, $(wc -c < "$key_path") bytes"
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
       - name: Build signed bundle

@@ -62,7 +62,20 @@ op item get "App Store Connect API - LLM Notary Notarization (2RTKQ2H2FW)" \
 ```
 
 The `credential` field holds the raw PEM, so it is base64-encoded on the way
-past; the workflow decodes it back to a `.p8`.
+past; the workflow decodes it back to a `.p8` and checks it with `openssl`
+before building.
+
+Use `--format json` rather than `--fields`: `op item get --fields` CSV-quotes
+any multi-line value, so the key arrives wrapped in double quotes, decodes to
+something that is not a PEM, and the build fails eight minutes later with
+`invalidPEMDocument` from inside the bundler:
+
+```bash
+op item get "App Store Connect API - LLM Notary Notarization (2RTKQ2H2FW)" \
+  --vault "Exalto - LLM Notary" --format json --reveal \
+  | python3 -c "import json,sys; print(next(f['value'] for f in json.load(sys.stdin)['fields'] if f.get('label')=='credential'), end='')" \
+  | base64 | gh secret set APPLE_NOTARIZATION_KEY_BASE64
+```
 
 ### Why the DMG is notarized twice
 
