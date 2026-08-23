@@ -52,14 +52,20 @@ fn new_window(app: tauri::AppHandle) -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0));
-    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::default())
+    // The overlay title bar and the hidden title are macOS-only: the builder
+    // does not carry those methods at all on other platforms.
+    #[allow(unused_mut)]
+    let mut builder = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::default())
         .title("Polar")
         .inner_size(820.0, 720.0)
-        .min_inner_size(480.0, 400.0)
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+        .min_inner_size(480.0, 400.0);
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true);
+    }
+    builder.build().map_err(|e| e.to_string())?;
     Ok(label)
 }
 

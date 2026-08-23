@@ -6,6 +6,7 @@
  * silently overloading it by selection state would be a guessing game.
  */
 import type { Editor } from "@tiptap/core";
+import { accel } from "./keys";
 
 export function installLinkShortcut(editor: Editor, host: HTMLElement): () => void {
   const field = document.createElement("input");
@@ -49,7 +50,7 @@ export function installLinkShortcut(editor: Editor, host: HTMLElement): () => vo
   }
 
   const onKeyDown = (event: KeyboardEvent) => {
-    if (event.metaKey && event.shiftKey && event.key.toLowerCase() === "k") {
+    if (accel(event) && event.shiftKey && event.key.toLowerCase() === "k") {
       event.preventDefault();
       const hasSelection = open();
       if (!hasSelection) {
