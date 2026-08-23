@@ -1,7 +1,7 @@
 //! CommonMark + GFM -> ProseMirror tree.
 
-use thought_schema::{Mark, Node};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use thought_schema::{Mark, Node};
 
 pub fn from_markdown(md: &str) -> Node {
     let mut opts = Options::empty();

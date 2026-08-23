@@ -5,10 +5,10 @@
 //! the markdown-safe variant; the gap between the two *is* the set of
 //! limitations recorded in AD-12 and pinned below.
 
+use proptest::prelude::*;
 use thought_markdown::{from_markdown, normalize, round_trip, to_markdown};
 use thought_schema::{Mark, Node, Schema};
 use thought_testkit::markdown_safe_document as document;
-use proptest::prelude::*;
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(400))]

@@ -9,9 +9,9 @@
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use thought_mcp::{ActorRef, Workspace};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use thought_mcp::{ActorRef, Workspace};
 use tokio::sync::broadcast;
 
 /// Wire tags. Length-prefixed binary, because Yjs updates are binary and

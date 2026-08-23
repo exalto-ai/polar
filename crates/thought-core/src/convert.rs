@@ -1,9 +1,9 @@
 //! ProseMirror JSON attribute values <-> yrs `Any`.
 
-use thought_schema::Attrs as PmAttrs;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use thought_schema::Attrs as PmAttrs;
 use yrs::Any;
 
 pub fn json_to_any(value: &Value) -> Any {

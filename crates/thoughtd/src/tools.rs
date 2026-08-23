@@ -5,11 +5,11 @@
 //! anything worth testing belongs one layer down where it can be tested without
 //! a server.
 
-use thought_core::Position;
-use thought_mcp::{ActorRef, TextEdit, Workspace};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, tool, tool_router};
 use std::sync::Arc;
+use thought_core::Position;
+use thought_mcp::{ActorRef, TextEdit, Workspace};
 
 #[derive(Clone)]
 pub struct Thought {

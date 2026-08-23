@@ -8,8 +8,8 @@
 //! becoming constraints on representations that do not share them — the CRDT
 //! encoding, for instance, can hold everything the schema allows.
 
-use thought_schema::{Mark, Node};
 use proptest::prelude::*;
+use thought_schema::{Mark, Node};
 
 /// Text leaning on the characters that break naive markdown escaping.
 pub fn text() -> impl Strategy<Value = String> {

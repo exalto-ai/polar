@@ -5,8 +5,8 @@
 //! format ungated. This is that gate: Rust writes the fixture, TypeScript
 //! asserts against it, and CI fails if the committed file is stale.
 
-use thoughtd::sync::Frame;
 use std::path::PathBuf;
+use thoughtd::sync::Frame;
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frames.json")

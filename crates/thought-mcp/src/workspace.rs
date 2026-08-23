@@ -1,11 +1,11 @@
 use base64::Engine;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use thought_core::{BlockError, Document, Position};
 use thought_markdown::{from_markdown, to_markdown_with_spans};
 use thought_schema::{Node, Schema, normalize};
 use thought_store::{Actor, Origin, Store};
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 /// The caller, as asserted by the MCP session. Not authenticated (AD-6) — this
 /// is identity so that attribution and per-run revert have something to key on.

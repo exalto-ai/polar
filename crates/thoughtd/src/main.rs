@@ -19,10 +19,10 @@ use thoughtd::{discovery, logging};
 use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use thought_mcp::Workspace;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use std::sync::Arc;
+use thought_mcp::Workspace;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

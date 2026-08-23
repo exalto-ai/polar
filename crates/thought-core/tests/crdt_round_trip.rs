@@ -6,10 +6,10 @@
 //! back to the markdown-safe generator, the storage format has acquired
 //! markdown's limitations and the argument for a structured tree has collapsed.
 
+use proptest::prelude::*;
 use thought_core::{Document, Position};
 use thought_schema::{Mark, Node, Schema, normalize};
 use thought_testkit::document;
-use proptest::prelude::*;
 
 fn through_crdt(doc: &Node) -> Node {
     let crdt = Document::new();

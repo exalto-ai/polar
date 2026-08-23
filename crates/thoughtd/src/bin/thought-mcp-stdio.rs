@@ -6,10 +6,10 @@
 //! the real server is HTTP on loopback and this shim is what clients spawn: it
 //! finds the daemon, starts one only if none is running, and proxies.
 
-use thoughtd::discovery::{self, Daemon};
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use thoughtd::discovery::{self, Daemon};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let daemon = connect()?;

@@ -9,9 +9,9 @@
 //! get wrong — an actor touching one block must not re-attribute the others,
 //! and a document written before the table existed must attribute itself.
 
+use std::collections::HashMap;
 use thought_core::Position;
 use thought_mcp::{ActorRef, Workspace};
-use std::collections::HashMap;
 
 fn agent(name: &str) -> ActorRef {
     ActorRef::agent(name, Some("claude-opus-5"), Some(&format!("run-{name}")))

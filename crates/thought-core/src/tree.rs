@@ -7,8 +7,8 @@
 //! it merge instead of colliding (AD-3).
 
 use crate::convert::{any_map_to_attrs, any_to_json, json_to_any};
-use thought_schema::{Mark, Node};
 use std::sync::Arc;
+use thought_schema::{Mark, Node};
 use yrs::types::Attrs as YAttrs;
 use yrs::types::text::YChange;
 use yrs::types::xml::{XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim};
