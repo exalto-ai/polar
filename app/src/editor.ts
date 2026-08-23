@@ -9,6 +9,8 @@ import type { Awareness } from "y-protocols/awareness";
 import type * as Y from "yjs";
 import { extensions } from "./schema";
 import type { SyncProvider } from "./provider";
+import { installLinkShortcut } from "./link";
+import { installSlashMenu } from "./slash";
 
 export type Actor = { name: string; color: string; id: number };
 
@@ -34,6 +36,7 @@ function renderCaret(user: Actor): HTMLElement {
 }
 
 export function createEditor(
+  host: HTMLElement,
   element: HTMLElement,
   doc: Y.Doc,
   awareness: Awareness,
@@ -54,6 +57,9 @@ export function createEditor(
     ],
     autofocus: "end",
   });
+
+  installSlashMenu(editor, host);
+  installLinkShortcut(editor, host);
 
   // AD-17. y-prosemirror applies remote updates while an input method has live
   // marked text, redrawing the node being composed in. The provider holds them
