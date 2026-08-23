@@ -4,6 +4,9 @@
 //! prettier Rust-native design: this tree crosses to the editor unchanged, and
 //! every divergence here becomes a translation layer later.
 
+mod validate;
+pub use validate::Violation;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -110,8 +113,20 @@ pub struct MarkSpec {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AttrSpec {
-    #[serde(default)]
+    /// `None` means the key was absent, so the attribute is required.
+    /// `Some(Value::Null)` means an explicit `"default": null` — optional, with
+    /// a null default. Plain `Option` cannot tell these apart, because serde
+    /// deserializes JSON null into `None`; the custom deserializer restores the
+    /// distinction, and without it every nullable attr reads as required.
+    #[serde(default, deserialize_with = "present_even_if_null")]
     pub default: Option<serde_json::Value>,
+}
+
+fn present_even_if_null<'de, D>(d: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(d).map(Some)
 }
 
 #[derive(Debug, Clone, Deserialize)]
