@@ -15,9 +15,15 @@ function polarConnection() {
     name: "polar-connection",
     configureServer(server: any) {
       server.middlewares.use("/__polar/connection", (_req: any, res: any) => {
+        // Mirrors `support_dir` in crates/polard/src/discovery.rs.
         const home =
           process.env.POLAR_HOME ??
-          join(homedir(), "Library/Application Support/ai.exalto.polar");
+          (process.platform === "darwin"
+            ? join(homedir(), "Library/Application Support/ai.exalto.polar")
+            : join(
+                process.env.XDG_DATA_HOME ?? join(homedir(), ".local/share"),
+                "polar",
+              ));
         try {
           const config = JSON.parse(readFileSync(join(home, "daemon.json"), "utf8"));
           res.setHeader("Content-Type", "application/json");

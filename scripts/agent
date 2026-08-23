@@ -13,10 +13,15 @@ Point it at a document you have open in the window and watch the edits land.
 """
 import json, os, sys, time, urllib.request
 
-HOME = os.environ.get(
-    "POLAR_HOME",
-    os.path.expanduser("~/Library/Application Support/ai.exalto.polar"),
-)
+def default_home():
+    # Mirrors `support_dir` in crates/polard/src/discovery.rs.
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/ai.exalto.polar")
+    xdg = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(xdg, "polar")
+
+
+HOME = os.environ.get("POLAR_HOME", default_home())
 
 try:
     CONFIG = json.load(open(os.path.join(HOME, "daemon.json")))
