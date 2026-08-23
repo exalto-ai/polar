@@ -6,6 +6,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 pub fn from_markdown(md: &str) -> Node {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TABLES);
 
     let mut builder = Builder::default();
     for event in Parser::new_ext(md, opts) {
@@ -45,6 +46,8 @@ struct Builder {
     marks: Vec<Mark>,
     /// Set while inside a fenced block, where text is literal.
     in_code_block: bool,
+    /// GFM marks header cells by position, not by tag.
+    in_table_head: bool,
 }
 
 impl Builder {
@@ -145,6 +148,17 @@ impl Builder {
             }
             Tag::Item => self.open(Node::element("listItem", vec![])),
 
+            Tag::Table(_) => self.open(Node::element("table", vec![])),
+            Tag::TableHead => {
+                self.in_table_head = true;
+                self.open(Node::element("tableRow", vec![]));
+            }
+            Tag::TableRow => self.open(Node::element("tableRow", vec![])),
+            Tag::TableCell => {
+                let header = self.in_table_head;
+                self.open(Node::element("tableCell", vec![]).with_attr("header", header.into()));
+            }
+
             Tag::Strong => self.marks.push(Mark::new("strong")),
             Tag::Emphasis => self.marks.push(Mark::new("em")),
             Tag::Strikethrough => self.marks.push(Mark::new("strike")),
@@ -189,6 +203,12 @@ impl Builder {
                 {
                     text.pop();
                 }
+                self.close();
+            }
+
+            TagEnd::Table | TagEnd::TableRow | TagEnd::TableCell => self.close(),
+            TagEnd::TableHead => {
+                self.in_table_head = false;
                 self.close();
             }
 

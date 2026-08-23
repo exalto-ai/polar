@@ -102,6 +102,7 @@ fn block(node: &Node, out: &mut String) {
         }
         // bulletList / orderedList are handled in `blocks`, which alone can
         // see a list's siblings and pick a non-merging marker.
+        "table" => table(node, out),
         // `***`, not `---`: a dash rule doubles as a setext underline and
         // fuses with a `-` list marker (`- ---` re-parses as a rule at the
         // outer level). Asterisks are unambiguous in both positions.
@@ -109,6 +110,42 @@ fn block(node: &Node, out: &mut String) {
         _ => {
             // Unknown block: emit its inline content rather than dropping it.
             out.push_str(&inlines(&node.content));
+            out.push('\n');
+        }
+    }
+}
+
+/// GFM pipe table. The format requires a header row and a delimiter row, so a
+/// table's first row is emitted as the header regardless of its cells' `header`
+/// attribute — a fact the round-trip property will hold us to.
+fn table(node: &Node, out: &mut String) {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for row in &node.content {
+        rows.push(
+            row.content
+                .iter()
+                .map(|cell| inlines(&cell.content).replace('|', "\\|"))
+                .collect(),
+        );
+    }
+    if rows.is_empty() {
+        return;
+    }
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+
+    for (i, row) in rows.iter().enumerate() {
+        out.push('|');
+        for c in 0..width {
+            out.push(' ');
+            out.push_str(row.get(c).map(String::as_str).unwrap_or(""));
+            out.push_str(" |");
+        }
+        out.push('\n');
+        if i == 0 {
+            out.push('|');
+            for _ in 0..width {
+                out.push_str(" --- |");
+            }
             out.push('\n');
         }
     }

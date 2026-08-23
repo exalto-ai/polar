@@ -569,5 +569,9 @@ direct writes.
    edits and identical across replicas.
 2. **Does the actor identity survive an MCP session cleanly?** An agent reconnecting should
    be the same actor, or attribution fragments into one actor per connection.
-3. **Table round-tripping.** GFM tables are the most likely node to fail the property test.
-   If they do, they leave the v0 schema (AD-12) rather than getting a special case.
+3. ~~Table round-tripping.~~ **Resolved** — tables stay in v0. They round-trip over 20,000
+   generated documents under two constraints, both pinned in `table_constraints_are_pinned`:
+   tables must be rectangular (GFM pads every row to the header width), and the first row is
+   always the header (GFM has no headerless table). Neither is a real restriction —
+   ProseMirror tables are rectangular by construction. The initial failure was a generator
+   emitting ragged tables that no editor could produce.

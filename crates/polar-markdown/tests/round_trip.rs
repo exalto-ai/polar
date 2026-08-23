@@ -98,6 +98,32 @@ fn block() -> impl Strategy<Value = Node> {
         }),
     ];
 
+    // Rectangular by construction. GFM pads every row to the header's column
+    // count, so a ragged table cannot round-trip — but ProseMirror tables are
+    // rectangular anyway (prosemirror-tables enforces it), so a ragged table is
+    // not a document we could ever be handed. Generating them tested a shape
+    // that does not exist and blamed the serializer for the result.
+    let table = (1usize..4, 1usize..4)
+        .prop_flat_map(|(rows, cols)| {
+            prop::collection::vec(inlines(), rows * cols).prop_map(move |cells| (rows, cols, cells))
+        })
+        .prop_map(|(rows, cols, cells)| {
+            let rows: Vec<Node> = (0..rows)
+                .map(|r| {
+                    let row_cells = (0..cols)
+                        .map(|c| {
+                            Node::element("tableCell", cells[r * cols + c].clone())
+                                .with_attr("header", (r == 0).into())
+                        })
+                        .collect();
+                    Node::element("tableRow", row_cells)
+                })
+                .collect();
+            Node::element("table", rows)
+        });
+
+    let leaf = prop_oneof![4 => leaf, 1 => table];
+
     leaf.prop_recursive(3, 12, 3, |inner| {
         // schema.json says listItem content is `paragraph block*` — the first
         // child must be a paragraph. Generating a bare block here produced
@@ -249,5 +275,44 @@ fn intraword_emphasis_gap_is_pinned() {
     assert!(
         has(r"A~~\~~~", "strike"),
         "strike opens where emphasis would not"
+    );
+}
+
+/// Tables survive v0 (resolving M1.8 open question 3), but only under two
+/// constraints that are worth stating rather than discovering later.
+#[test]
+fn table_constraints_are_pinned() {
+    // GFM pads every row to the header's column count, so a ragged table comes
+    // back rectangular. ProseMirror tables are rectangular anyway, so this
+    // constrains what we may *emit*, not what we can represent.
+    let ragged = from_markdown("| a | b |\n| --- | --- |\n| c |\n");
+    let row = &ragged.content[0].content[1];
+    assert_eq!(row.content.len(), 2, "body row padded to header width");
+
+    // The first row is always the header — GFM has no headerless table.
+    let t = from_markdown("| h |\n| --- |\n| b |\n");
+    assert_eq!(t.content[0].content[0].content[0].attrs["header"], true);
+    assert_eq!(t.content[0].content[1].content[0].attrs["header"], false);
+
+    // Cells hold inline content only; schema.json says `inline*`, and GFM
+    // cannot express a block inside a cell regardless.
+    let with_pipe = Node::element(
+        "doc",
+        vec![Node::element(
+            "table",
+            vec![Node::element(
+                "tableRow",
+                vec![
+                    Node::element("tableCell", vec![Node::text("a|b", vec![])])
+                        .with_attr("header", true.into()),
+                ],
+            )],
+        )],
+    );
+    let expected = normalize(&with_pipe);
+    assert_eq!(
+        round_trip(&expected),
+        expected,
+        "a literal pipe must be escaped"
     );
 }
