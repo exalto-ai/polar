@@ -6,7 +6,7 @@
 //! a server.
 
 use polar_core::Position;
-use polar_mcp::{ActorRef, Workspace};
+use polar_mcp::{ActorRef, TextEdit, Workspace};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, tool, tool_router};
 use std::sync::Arc;
@@ -226,9 +226,11 @@ impl Polar {
             .replace_text(
                 &p.doc_id,
                 &p.block_id,
-                &p.find,
-                &p.replace,
-                p.occurrence,
+                &TextEdit {
+                    find: &p.find,
+                    replace: &p.replace,
+                    occurrence: p.occurrence,
+                },
                 p.version.as_deref(),
                 &p.caller.actor(),
             )
