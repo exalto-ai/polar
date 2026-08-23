@@ -17,6 +17,10 @@ struct Connection {
     /// The stdio shim an MCP client should spawn. Shown in the connections
     /// panel so adding an agent is a copy-paste rather than a scavenger hunt.
     stdio_command: String,
+    /// Who the window writes as, so the provenance rails can tell the user's
+    /// own blocks from everyone else's without spelling out an id that
+    /// `sync.rs` owns.
+    actor_id: String,
 }
 
 #[tauri::command]
@@ -33,6 +37,7 @@ fn connection(state: tauri::State<'_, Daemon>) -> Connection {
         stdio_command: find_binary("polar-mcp-stdio")
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "polar-mcp-stdio".into()),
+        actor_id: polard::EDITOR_ACTOR_ID.to_string(),
     }
 }
 

@@ -3,7 +3,7 @@ use polar_core::{BlockError, Document, Position};
 use polar_markdown::{from_markdown, to_markdown_with_spans};
 use polar_schema::{Node, Schema, normalize};
 use polar_store::{Actor, Origin, Store};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -31,6 +31,16 @@ impl ActorRef {
             model: model.map(str::to_string),
             session_id: session.map(str::to_string),
         }
+    }
+
+    /// The window's own actor.
+    ///
+    /// Every window on a device is the same actor, which AD-6 already implies:
+    /// identity is per device and per agent, not per window. Two windows are
+    /// two *peers* of one human, and the rails say so — which is why the second
+    /// human actor cannot appear until M3 puts a second device on the relay.
+    pub fn editor() -> ActorRef {
+        ActorRef::human("editor")
     }
 
     pub fn human(name: &str) -> ActorRef {
@@ -105,6 +115,25 @@ pub struct ActorSummary {
     pub edits: i64,
 }
 
+/// Who wrote one block. The rails in the window, and the answer to "where did
+/// this paragraph come from" for an agent that asks.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BlockAttribution {
+    pub block_id: String,
+    /// Who first wrote the block, and who last touched it. A paragraph an agent
+    /// drafted and a human then reworded is both, and only reporting the latter
+    /// loses where the text came from.
+    pub created_by: String,
+    pub created_at: i64,
+    pub touched_by: String,
+    pub touched_at: i64,
+    pub session_id: Option<String>,
+    pub kind: String,
+    pub display_name: String,
+    pub model: Option<String>,
+    pub color: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EditOutcome {
     pub doc_id: String,
@@ -170,6 +199,12 @@ const SNAPSHOT_EVERY: i64 = 200;
 struct Inner {
     store: Store,
     docs: HashMap<String, Document>,
+    /// Per document, each block's content fingerprint as of the last commit.
+    ///
+    /// Attribution is a diff, and a diff needs a before. Keeping it in memory
+    /// rather than re-deriving it means a commit hashes the tree it has already
+    /// built for reindexing, instead of serialising the document a second time.
+    prints: HashMap<String, HashMap<String, u64>>,
     /// Deltas committed under the current lock, drained and delivered to the
     /// observer once it is released — user code must not run under our mutex.
     pending: Vec<(String, Vec<u8>, ActorRef)>,
@@ -193,6 +228,7 @@ impl Workspace {
             inner: Mutex::new(Inner {
                 store: Store::open(path)?,
                 docs: HashMap::new(),
+                prints: HashMap::new(),
                 pending: Vec::new(),
             }),
             observer: Mutex::new(None),
@@ -204,6 +240,7 @@ impl Workspace {
             inner: Mutex::new(Inner {
                 store: Store::open_in_memory()?,
                 docs: HashMap::new(),
+                prints: HashMap::new(),
                 pending: Vec::new(),
             }),
             observer: Mutex::new(None),
@@ -266,6 +303,12 @@ impl Workspace {
             )?;
             inner.store.reindex(&doc_id, title, "")?;
             inner.docs.insert(doc_id.clone(), doc);
+
+            // Creation writes its update directly rather than through `commit`,
+            // so it has to attribute its own first block. Without this the
+            // baseline is empty and the *next* actor to write is credited with
+            // the paragraph this call made.
+            inner.attribute(&doc_id, actor, now_ms())?;
             Ok(doc_id)
         })?;
         self.read_document(&doc_id)
@@ -568,6 +611,41 @@ impl Workspace {
         })
     }
 
+    /// Who wrote each block of a document.
+    ///
+    /// Answers the per-block question the op log can only answer per *update*.
+    /// The table behind this is derived state (like the FTS index): a document
+    /// whose provenance has never been computed is attributed by replaying its
+    /// log here, once, and read from the table forever after.
+    ///
+    /// A document that arrives with content but no log — everything M3's relay
+    /// will deliver — reports nothing, which is the honest answer. Blank means
+    /// unknown, never "mine".
+    pub fn block_provenance(&self, doc_id: &str) -> Result<Vec<BlockAttribution>, WorkspaceError> {
+        self.with(|inner| {
+            // Hydrating also backfills, so a document that predates this table
+            // is attributed on first read rather than staying blank forever.
+            inner.doc(doc_id)?;
+            Ok(inner
+                .store
+                .provenance_for_document(doc_id)?
+                .into_iter()
+                .map(|a| BlockAttribution {
+                    block_id: a.block_id,
+                    created_by: a.created_by,
+                    created_at: a.created_at,
+                    touched_by: a.touched_by,
+                    touched_at: a.touched_at,
+                    session_id: a.session_id,
+                    kind: a.kind,
+                    display_name: a.display_name,
+                    model: a.model,
+                    color: a.color,
+                })
+                .collect())
+        })
+    }
+
     /// Attribution for the whole log — the activity feed and per-run revert.
     pub fn attribution(
         &self,
@@ -615,8 +693,106 @@ impl Inner {
                 })?;
             }
             self.docs.insert(doc_id.to_string(), doc);
+
+            // Seed the diff baseline from the document as it stands, so the
+            // next commit compares against reality rather than an empty map
+            // and re-attributes every block to whoever typed next.
+            let prints = Self::fingerprints(self.docs.get(doc_id).expect("just inserted"));
+            self.prints.insert(doc_id.to_string(), prints);
+
+            // Documents written before this table existed have a full log and
+            // no attribution. Replay pays that off once.
+            if !self.store.has_provenance(doc_id)? {
+                self.backfill(doc_id)?;
+            }
         }
         Ok(self.docs.get(doc_id).expect("just inserted"))
+    }
+
+    /// Each top-level block's content, hashed.
+    ///
+    /// Block ids are intrinsic and stable (AD-5), so a block that changed keeps
+    /// its id and only its fingerprint moves — which is exactly the signal
+    /// attribution needs, and why this is a hash rather than an id comparison.
+    fn fingerprints(doc: &Document) -> HashMap<String, u64> {
+        let tree = normalize(&doc.read());
+        let refs = doc.blocks();
+        // `normalize` only merges and drops *text* nodes, and a document's
+        // top-level children are always elements, so these stay in step — the
+        // same pairing `read_document` makes to attach line spans.
+        refs.iter()
+            .zip(tree.content.iter())
+            .map(|(r, node)| (r.block_id.clone(), fingerprint(node)))
+            .collect()
+    }
+
+    /// Attribute whatever this commit changed to the actor that wrote it.
+    ///
+    /// A block is *created* the first time its id appears and *touched* when
+    /// its fingerprint moves. Blocks that did not change are left alone, so a
+    /// one-word edit does not re-attribute the whole document to whoever made
+    /// it.
+    fn attribute(&mut self, doc_id: &str, actor: &ActorRef, at: i64) -> Result<(), WorkspaceError> {
+        let doc = self.docs.get(doc_id).expect("document is loaded");
+        let current = Self::fingerprints(doc);
+        let previous = self.prints.get(doc_id);
+
+        for (block_id, print) in &current {
+            let unchanged = previous.and_then(|p| p.get(block_id)) == Some(print);
+            if unchanged {
+                continue;
+            }
+            self.store
+                .touch_block(doc_id, block_id, &actor.id, actor.session_id.as_deref(), at)?;
+        }
+
+        if previous.is_some_and(|p| p.keys().any(|id| !current.contains_key(id))) {
+            let keep: HashSet<String> = current.keys().cloned().collect();
+            self.store.forget_blocks(doc_id, &keep)?;
+        }
+        self.prints.insert(doc_id.to_string(), current);
+        Ok(())
+    }
+
+    /// Attribute a document that has never been attributed, by replaying its
+    /// log one update at a time.
+    ///
+    /// Deliberately replays the *log* rather than starting from a snapshot:
+    /// snapshots compact history away and the log never does (AD-13), so the
+    /// log is the only thing that can say who wrote what. Runs once per
+    /// document — every commit after this one attributes itself incrementally.
+    fn backfill(&mut self, doc_id: &str) -> Result<(), WorkspaceError> {
+        let log = self.store.log(doc_id)?;
+        let replay = Document::new();
+        let mut previous: HashMap<String, u64> = HashMap::new();
+
+        for entry in &log {
+            // A corrupt frame stops the backfill rather than failing the read:
+            // partial attribution is worth more than none, and the document
+            // itself hydrates from the same bytes through its own path.
+            if replay.apply_update(&entry.payload).is_err() {
+                break;
+            }
+            let current = Self::fingerprints(&replay);
+            for (block_id, print) in &current {
+                if previous.get(block_id) == Some(print) {
+                    continue;
+                }
+                self.store.touch_block(
+                    doc_id,
+                    block_id,
+                    &entry.actor_id,
+                    entry.session_id.as_deref(),
+                    entry.created_at,
+                )?;
+            }
+            previous = current;
+        }
+
+        // Blocks that existed partway through the log but not at the end.
+        let keep: HashSet<String> = previous.keys().cloned().collect();
+        self.store.forget_blocks(doc_id, &keep)?;
+        Ok(())
     }
 
     /// Persist everything written since `before`, then keep derived state in
@@ -642,6 +818,10 @@ impl Inner {
         )?;
         self.pending
             .push((doc_id.to_string(), delta.clone(), actor.clone()));
+
+        // Before reindexing, while the actor is still in hand: which blocks
+        // this commit changed, and who to credit for them.
+        self.attribute(doc_id, actor, now_ms())?;
 
         let (markdown, _) = to_markdown_with_spans(&tree);
         // Reindexed on every mutation, not on snapshot as M1.4 first said.
@@ -687,6 +867,40 @@ fn staleness(doc: &Document, version: Option<&str>) -> Vec<String> {
         vec!["document changed since you read it; edit applied to the current state".into()]
     } else {
         vec![]
+    }
+}
+
+/// A block's content, hashed to a value that changes when the block does.
+///
+/// Walks the node rather than serialising it: attribution runs on every commit,
+/// and building a JSON string per block per keystroke would make writing pay
+/// for a feature that only reading uses.
+fn fingerprint(node: &Node) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hash_node(node, &mut hasher);
+    hasher.finish()
+}
+
+fn hash_node(node: &Node, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    node.kind.hash(hasher);
+    node.text.hash(hasher);
+    for (key, value) in &node.attrs {
+        key.hash(hasher);
+        // `serde_json::Value` is not `Hash`, and its `Display` is canonical
+        // enough for a change detector.
+        value.to_string().hash(hasher);
+    }
+    for mark in &node.marks {
+        mark.kind.hash(hasher);
+        for (key, value) in &mark.attrs {
+            key.hash(hasher);
+            value.to_string().hash(hasher);
+        }
+    }
+    for child in &node.content {
+        hash_node(child, hasher);
     }
 }
 

@@ -179,12 +179,109 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 }
 .ghost:hover { background: var(--raised); color: var(--ink); }
 
+/* ---------- provenance rails ---------- */
+/*
+ * Who wrote each block, in the left margin. Quiet on purpose: the rails are
+ * texture at rest and only resolve into names when asked, the same bargain the
+ * peer carets make. A document written by one person shows none at all — the
+ * layer is emptied in JS rather than faded out here, so there is nothing to
+ * hover either.
+ */
+.rails {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 0;
+  pointer-events: none;
+}
+.rail {
+  position: absolute;
+  /* Wider than it looks. The bar is 2px, which is far too small to point at, so
+     the element is a 14px hit area with the bar drawn at its inner edge — the
+     hover target a person aims for is the margin beside the text, not a
+     hairline. */
+  width: 14px;
+  left: -30px;
+  opacity: 0.42;
+  pointer-events: auto;
+  transition: opacity 140ms ease;
+}
+.rail::before {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--who);
+  transition: width 140ms ease;
+}
+/* Your own blocks, once someone else is in the document too. Present, but
+   ranked below everyone else's: by then the question is which parts are *not*
+   yours. Faint enough to read as background, not so faint it says nothing —
+   at 0.14 it was invisible on a white screen and the ranking became an
+   absence. */
+.rail[data-self] { opacity: 0.22; }
+
+/* An agent is not a person. The presence chips already say so by shape rather
+   than colour, and the rails repeat the distinction instead of asking anyone to
+   remember which hue meant what. */
+.rail[data-agent]::before {
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--who) 0 5px,
+    transparent 5px 9px
+  );
+  border-radius: 0;
+}
+
+.rail:hover,
+.rail[data-hover],
+.rail[data-lit] { opacity: 1; }
+.rail:hover::before,
+.rail[data-hover]::before,
+.rail[data-lit]::before { width: 3px; }
+.rail[data-dim] { opacity: 0.08; }
+
+.rail-label {
+  position: absolute;
+  left: -24px;
+  z-index: 5;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: -0.003em;
+  color: var(--ink-soft);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 3px 8px;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+}
+.rail-label[hidden] { display: none; }
+
+/* Below this the measure fills the window and there is no margin left to draw
+   in, so the rails move inside the editor's own padding. */
+@media (max-width: 860px) {
+  .rail { left: 2px; }
+  .rail-label { left: 18px; }
+}
+/* Narrower still and a rail would sit on top of the text it describes. */
+@media (max-width: 600px) {
+  .rails { display: none; }
+}
+
 /* ---------- page ---------- */
 .page { flex: 1; overflow-y: auto; }
 .editor {
   max-width: var(--measure);
   margin: 0 auto;
   padding: 8px 24px 45vh;
+  /* The rails measure against this box, so it has to be the offset parent. */
+  position: relative;
 }
 /* Deep bottom padding so the line being written sits mid-screen rather than
    pinned to the bottom edge. */
