@@ -39,19 +39,44 @@ jobs:
       - name: Build the daemon and shim
         run: ./scripts/stage-sidecars.sh universal-apple-darwin
 
-      - name: Build, sign and notarize
+      # An unset secret still resolves to an empty string, and Tauri treats a
+      # present-but-empty APPLE_CERTIFICATE as "sign this", then fails trying to
+      # import an empty certificate. Writing to $GITHUB_ENV only when the values
+      # exist keeps them genuinely absent otherwise, so one build step covers
+      # both cases.
+      - name: Configure signing, if it is configured
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD_SECRET: ${{ secrets.APPLE_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$CERT" ]; then
+            echo "No Apple signing secrets set — building unsigned."
+            echo "Gatekeeper will warn on first open; see docs/releasing.md."
+            exit 0
+          fi
+
+          # The delimiter form, because a base64 certificate is many lines.
+          {
+            echo "APPLE_CERTIFICATE<<POLAR_EOF"
+            echo "$CERT"
+            echo "POLAR_EOF"
+          } >> "$GITHUB_ENV"
+
+          echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "APPLE_ID=$APPLE_ID_SECRET" >> "$GITHUB_ENV"
+          echo "APPLE_PASSWORD=$APPLE_PASSWORD_SECRET" >> "$GITHUB_ENV"
+          echo "APPLE_TEAM_ID=$TEAM_ID" >> "$GITHUB_ENV"
+          echo "Signing as: $IDENTITY"
+
+      - name: Build and bundle
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Signing is optional. Without these the DMG still builds and runs —
-          # Gatekeeper shows a warning that the user has to click past. With
-          # them, tauri-action signs and notarizes.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: app
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
