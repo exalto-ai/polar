@@ -66,12 +66,28 @@ jobs:
             echo "POLAR_EOF"
           } >> "$GITHUB_ENV"
 
-          echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
-          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
-          echo "APPLE_ID=$APPLE_ID_SECRET" >> "$GITHUB_ENV"
-          echo "APPLE_PASSWORD=$APPLE_PASSWORD_SECRET" >> "$GITHUB_ENV"
-          echo "APPLE_TEAM_ID=$TEAM_ID" >> "$GITHUB_ENV"
-          echo "Signing as: $IDENTITY"
+          # Each value guarded on its own. Writing an empty APPLE_ID would make
+          # Tauri attempt notarization with no credentials — the same
+          # present-but-empty trap as the certificate, one level down.
+          set_if() {
+            [ -n "$2" ] && echo "$1=$2" >> "$GITHUB_ENV"
+          }
+          set_if APPLE_CERTIFICATE_PASSWORD "$CERT_PASSWORD"
+          set_if APPLE_SIGNING_IDENTITY "$IDENTITY"
+          set_if APPLE_ID "$APPLE_ID_SECRET"
+          set_if APPLE_PASSWORD "$APPLE_PASSWORD_SECRET"
+          set_if APPLE_TEAM_ID "$TEAM_ID"
+
+          echo "Signing as: ${IDENTITY:-<not set>}"
+          if [ -n "$APPLE_ID_SECRET" ] && [ -n "$APPLE_PASSWORD_SECRET" ]; then
+            echo "Notarizing: yes"
+          else
+            # Signed but unnotarized still trips Gatekeeper on a downloaded app,
+            # so this is worth saying loudly rather than discovering on open.
+            echo "Notarizing: NO — APPLE_ID and APPLE_PASSWORD are not both set."
+            echo "The build will be signed but not notarized, and macOS will"
+            echo "still refuse to open it on download. See docs/releasing.md."
+          fi
 
       - name: Build and bundle
         uses: tauri-apps/tauri-action@v0
