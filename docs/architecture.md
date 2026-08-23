@@ -207,6 +207,19 @@ CREATE TABLE actors (
   first_seen   INTEGER NOT NULL
 );
 
+-- Derived. Rebuildable by replaying the op log; dropped without loss (M2.8).
+CREATE TABLE block_provenance (
+  doc_id      TEXT    NOT NULL REFERENCES documents(id),
+  block_id    TEXT    NOT NULL,          -- yrs BranchID, "client:clock"
+  created_by  TEXT    NOT NULL REFERENCES actors(id),
+  created_at  INTEGER NOT NULL,
+  touched_by  TEXT    NOT NULL REFERENCES actors(id),
+  touched_at  INTEGER NOT NULL,
+  session_id  TEXT,                      -- the run that last touched it (AD-11)
+  PRIMARY KEY (doc_id, block_id)
+);
+CREATE INDEX block_provenance_doc ON block_provenance(doc_id);
+
 -- Derived read-model, rebuilt from the doc CRDT. Authority is Y.Doc "suggestions".
 CREATE TABLE suggestion_index (
   id          TEXT PRIMARY KEY,
@@ -238,7 +251,19 @@ read_document(doc_id, format="markdown")
 
 search(query, limit?)
   -> [{ doc_id, block_id, title, snippet }]
+
+document_actors(doc_id)
+  -> [{ actor_id, kind, display_name, model, color, last_seen, edits }]
+
+block_provenance(doc_id)
+  -> [{ block_id, created_by, created_at, touched_by, touched_at,
+        session_id, kind, display_name, model, color }]
 ```
+
+`block_provenance` answers per block what the op log answers per update. It is for agents as
+much as for the window: "who wrote this paragraph" is a question an agent asks before
+rewriting someone's work. A block with no entry is unattributed, which is not the same as
+belonging to the caller (M2.8).
 
 **Write** — every call takes the `version` from the last read.
 
@@ -720,6 +745,63 @@ was for.
 
 No relay, no sharing, no suggestion layer, no activity feed, no per-run revert UI. Those
 need M3's sharing story or are milestones of their own.
+
+## M2.8 — Provenance rails
+
+The other half of M2.6, and the second half of M2.0 (4): agent carets say who is
+*here*, and the rails say who wrote *this*.
+
+A thin bar in the left margin beside every block, coloured by the actor who last touched
+it, solid for a human and dashed for an agent — the same shape-not-colour distinction the
+presence chips make, because a palette nobody memorised does not distinguish anything.
+Hovering a bar names the actor; hovering an agent's presence chip lights everything it
+wrote.
+
+**Where it comes from.** The op log, as M2.6 said it would. Attribution is a diff: every
+commit already builds the normalized tree to reindex it, so `commit` additionally hashes
+each top-level block and compares against the previous hashes, and any block whose
+fingerprint moved is credited to that commit's actor. Block identity is intrinsic and
+stable (AD-5), so a block that changed keeps its id and only its content hash moves —
+which is exactly the signal this needs.
+
+Persisted in `block_provenance`, which is **derived state** with the same standing as
+`snapshots` and `doc_fts`: rebuildable, discardable, never the truth. A document with no
+attribution is attributed once by replaying its log — from the log, never a snapshot,
+since snapshots compact away the history that says who wrote what (AD-13).
+
+**`created_by` and `touched_by` are separate columns.** A paragraph an agent drafted and a
+human then reworded is both, and storing only the second erases where the words came from.
+The rail's label says "You · 4m ago, drafted by research" for exactly that case.
+
+**What it costs, stated plainly:**
+
+1. **Block granularity, not character.** Two actors in one paragraph: the last one owns the
+   rail. Character-level attribution needs something Yjs cannot carry (AD-1) and would mean
+   a second CRDT running alongside the first.
+2. **"Last touched" flattens history.** `created_by` recovers one step of it. Not more.
+3. **Blank means unknown, never yours.** A document can arrive with content and no local log,
+   and drawing rails on it as the reader's own would be a lie — so it gets none. M3.3 keeps
+   this from becoming permanent by putting an actor descriptor on the wire, and in doing so
+   hands the rails a job they do not do yet: distinguishing *this machine saw this person
+   write it* from *a peer told me this person wrote it*. Until they do, everything a rail
+   claims is something this daemon watched happen.
+4. **One human.** Every window on a device writes as one actor, which is what AD-6 already
+   says identity is — per device, per agent. Two windows are two peers of one human, and
+   the rails cannot tell them apart because there is nothing to tell apart. A second *human*
+   actor first becomes possible when M3 puts a second device on the relay (M3.3) — and it
+   arrives self-asserted, which is the point at which the sentence above stops being free.
+5. **It leans on one y-prosemirror internal.** Block ids come from `_item.id` on the CRDT's
+   children, matched to the editor's nodes by position and checked by node kind — TipTap
+   keeps a trailing paragraph the CRDT never sees, so the two lists are legitimately
+   different lengths. A disagreement skips the frame: a late rail is invisible, a rail on
+   the wrong paragraph is a lie.
+
+The rails are also where AD-11's "Revert this run" belongs when it is built — `session_id`
+is already on the row.
+
+## M2.9 — Open
+
+The manual IME pass (AD-8), which needs a person. Everything else in M2.0 passes in CI.
 
 ---
 
