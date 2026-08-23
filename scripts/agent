@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Drive Polar as an agent, from the terminal.
+Drive Proof of Thought as an agent, from the terminal.
 
     scripts/agent list
     scripts/agent read [<n>]

@@ -42,7 +42,7 @@ Apple ID password.
 
 Both live in 1Password, and a notarization key is per **team**, not per app — the
 Exalto key notarizes anything signed by the Exalto Developer ID, so nothing new
-had to be created for Polar:
+had to be created for Proof of Thought:
 
 - `Exalto - Apple Signing` → *Apple Developer ID - Exalto (3FGNZ9DY9Y)*
 - `Exalto - LLM Notary` → *App Store Connect API - LLM Notary Notarization*
@@ -95,7 +95,7 @@ cd app && npx tauri build --bundles app
 Then confirm the daemon actually shipped:
 
 ```bash
-ls app/src-tauri/target/*/release/bundle/macos/Polar.app/Contents/MacOS/
+ls app/src-tauri/target/*/release/bundle/macos/'Proof of Thought.app'/Contents/MacOS/
 ```
 
 `polard` and `polar-mcp-stdio` should both be there beside `app`.
