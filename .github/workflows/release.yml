@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.0). Creates a draft release."
+        required: true
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: npm ci --prefix app
+
+      # The window is useless without the daemon, so both binaries are built
+      # for both architectures and stitched into the bundle as sidecars.
+      - name: Build the daemon and shim
+        run: ./scripts/stage-sidecars.sh universal-apple-darwin
+
+      - name: Build, sign and notarize
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signing is optional. Without these the DMG still builds and runs —
+          # Gatekeeper shows a warning that the user has to click past. With
+          # them, tauri-action signs and notarizes.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: app
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: Polar ${{ github.event.inputs.tag || github.ref_name }}
+          releaseBody: |
+            A local-first writing app where people and agents edit the same
+            documents.
+
+            Download the `.dmg`, drag Polar to Applications, and open it. The
+            daemon ships inside the bundle and starts on first launch.
+          # Draft, so the DMG can be opened and checked before anyone gets it.
+          releaseDraft: true
+          prerelease: false
+          args: --target universal-apple-darwin

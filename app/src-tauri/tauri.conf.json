@@ -28,13 +28,26 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "dmg",
+      "app"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "externalBin": [
+      "binaries/polard",
+      "binaries/polar-mcp-stdio"
+    ],
+    "category": "Productivity",
+    "shortDescription": "A local-first writing app for humans and agents",
+    "longDescription": "Polar is a local-first writing app where people and AI agents edit the same documents. A background daemon owns the CRDT and the store; the window and every agent are clients of it.",
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
   }
 }
