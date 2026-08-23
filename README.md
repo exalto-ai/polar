@@ -24,6 +24,11 @@ anywhere. `cargo test --workspace` is green and CI gates every push.
 | `polard` | The daemon: MCP over loopback HTTP |
 | `polar-testkit` | Document generators shared by the property tests |
 
+## Install
+
+Releases attach a universal macOS `.dmg`; see [docs/releasing.md](docs/releasing.md)
+for how one is built and signed.
+
 ## Try it
 
 ```bash
