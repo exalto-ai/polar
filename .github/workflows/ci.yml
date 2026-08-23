@@ -54,3 +54,5 @@ jobs:
       - run: npm run schema:check --prefix app
       - run: npx tsc --noEmit
         working-directory: app
+      - run: npm test
+        working-directory: app
