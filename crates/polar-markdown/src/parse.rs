@@ -118,9 +118,7 @@ impl Builder {
                     HeadingLevel::H5 => 5,
                     HeadingLevel::H6 => 6,
                 };
-                self.open(
-                    Node::element("heading", vec![]).with_attr("level", level.into()),
-                );
+                self.open(Node::element("heading", vec![]).with_attr("level", level.into()));
             }
 
             Tag::BlockQuote(_) => self.open(Node::element("blockquote", vec![])),
@@ -138,8 +136,9 @@ impl Builder {
 
             Tag::List(start) => {
                 let node = match start {
-                    Some(n) => Node::element("orderedList", vec![])
-                        .with_attr("start", (n as i64).into()),
+                    Some(n) => {
+                        Node::element("orderedList", vec![]).with_attr("start", (n as i64).into())
+                    }
                     None => Node::element("bulletList", vec![]),
                 };
                 self.open(node);
@@ -150,7 +149,9 @@ impl Builder {
             Tag::Emphasis => self.marks.push(Mark::new("em")),
             Tag::Strikethrough => self.marks.push(Mark::new("strike")),
 
-            Tag::Link { dest_url, title, .. } => {
+            Tag::Link {
+                dest_url, title, ..
+            } => {
                 let mut mark = Mark::new("link").with_attr("href", dest_url.to_string().into());
                 if !title.is_empty() {
                     mark = mark.with_attr("title", title.to_string().into());
@@ -165,10 +166,9 @@ impl Builder {
 
     fn end(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::Paragraph
-            | TagEnd::Heading(_)
-            | TagEnd::BlockQuote(_)
-            | TagEnd::List(_) => self.close(),
+            TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::BlockQuote(_) | TagEnd::List(_) => {
+                self.close()
+            }
 
             TagEnd::Item => {
                 // A *tight* list emits Item -> Text with no Paragraph between,
@@ -204,6 +204,8 @@ impl Builder {
         while self.stack.len() > 1 {
             self.close();
         }
-        self.stack.pop().unwrap_or_else(|| Node::element("doc", vec![]))
+        self.stack
+            .pop()
+            .unwrap_or_else(|| Node::element("doc", vec![]))
     }
 }

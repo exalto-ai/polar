@@ -85,11 +85,7 @@ fn block(node: &Node, out: &mut String) {
             let text: String = node.content.iter().filter_map(|n| n.text.clone()).collect();
             // A fence must be longer than any backtick run inside it, or the
             // block terminates early and the round-trip silently loses content.
-            let longest = text
-                .split(|c| c != '`')
-                .map(str::len)
-                .max()
-                .unwrap_or(0);
+            let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
             let fence = "`".repeat(longest.max(2) + 1);
             out.push_str(&fence);
             if let Some(lang) = node.attr_str("language") {
@@ -152,7 +148,11 @@ fn inline(node: &Node) -> String {
 
     // `code` is literal: escaping inside it would round-trip as backslashes.
     let has_code = node.marks.iter().any(|m| m.kind == "code");
-    let mut s = if has_code { text.to_string() } else { escape(text) };
+    let mut s = if has_code {
+        text.to_string()
+    } else {
+        escape(text)
+    };
 
     // Innermost first, so the canonical mark order produces stable nesting.
     for mark in node.marks.iter().rev() {
@@ -169,11 +169,19 @@ fn wrap(s: &str, mark: &Mark) -> String {
         "code" => {
             let longest = s.split(|c| c != '`').map(str::len).max().unwrap_or(0);
             let fence = "`".repeat(longest + 1);
-            let pad = if s.starts_with('`') || s.ends_with('`') { " " } else { "" };
+            let pad = if s.starts_with('`') || s.ends_with('`') {
+                " "
+            } else {
+                ""
+            };
             format!("{fence}{pad}{s}{pad}{fence}")
         }
         "link" => {
-            let href = mark.attrs.get("href").and_then(|v| v.as_str()).unwrap_or("");
+            let href = mark
+                .attrs
+                .get("href")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             match mark.attrs.get("title").and_then(|v| v.as_str()) {
                 Some(t) => format!("[{s}]({href} \"{t}\")"),
                 None => format!("[{s}]({href})"),

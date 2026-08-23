@@ -59,7 +59,12 @@ pub fn normalize(node: &Node) -> Node {
 /// stable order is required before two trees can be compared.
 fn canonical_marks(marks: &[Mark]) -> Vec<Mark> {
     const ORDER: &[&str] = &["link", "strong", "em", "strike", "code"];
-    let rank = |m: &Mark| ORDER.iter().position(|k| *k == m.kind).unwrap_or(usize::MAX);
+    let rank = |m: &Mark| {
+        ORDER
+            .iter()
+            .position(|k| *k == m.kind)
+            .unwrap_or(usize::MAX)
+    };
     let mut out = marks.to_vec();
     out.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.kind.cmp(&b.kind)));
     out.dedup_by(|a, b| a.kind == b.kind);
