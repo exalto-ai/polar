@@ -8,7 +8,7 @@
 //! limitation of markdown itself, not a convenience. Each one is called out.
 
 use polar_markdown::{from_markdown, normalize, round_trip, to_markdown};
-use polar_schema::{Mark, Node};
+use polar_schema::{Mark, Node, Schema};
 use proptest::prelude::*;
 
 /// Text that leans on the characters that break naive escaping.
@@ -167,6 +167,29 @@ proptest! {
             serde_json::to_string_pretty(&expected).unwrap(),
             serde_json::to_string_pretty(&actual).unwrap()
         );
+    }
+
+    /// Closes the loop that bit twice in step 1: when the generator emits a tree
+    /// the schema forbids, the failure must name the generator rather than
+    /// arriving disguised as a broken serializer.
+    #[test]
+    fn generated_documents_are_schema_valid(doc in document()) {
+        let doc = normalize(&doc);
+        if let Err(errs) = Schema::v0().validate(&doc) {
+            let listed: Vec<String> = errs.iter().map(ToString::to_string).collect();
+            prop_assert!(false, "generator emitted an invalid document:\n  {}", listed.join("\n  "));
+        }
+    }
+
+    /// And the parser must not manufacture invalid trees out of valid markdown —
+    /// the tight-list bug produced exactly that.
+    #[test]
+    fn parsed_documents_are_schema_valid(doc in document()) {
+        let parsed = round_trip(&normalize(&doc));
+        if let Err(errs) = Schema::v0().validate(&parsed) {
+            let listed: Vec<String> = errs.iter().map(ToString::to_string).collect();
+            prop_assert!(false, "parser produced an invalid document:\n  {}", listed.join("\n  "));
+        }
     }
 
     /// Serializing is deterministic and stable under repetition — a projection
