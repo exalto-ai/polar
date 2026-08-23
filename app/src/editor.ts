@@ -10,7 +10,28 @@ import type * as Y from "yjs";
 import { extensions } from "./schema";
 import type { SyncProvider } from "./provider";
 
-export type Actor = { name: string; color: string };
+export type Actor = { name: string; color: string; id: number };
+
+/**
+ * The caret each peer leaves behind.
+ *
+ * The default renders a label that is always visible, which turns a busy
+ * document into a wall of name tags. This one carries the peer's id so the
+ * presence chips can point at a specific caret, and keeps the label hidden
+ * until you ask for it — by hovering the caret, or the chip that names it.
+ */
+function renderCaret(user: Actor): HTMLElement {
+  const caret = document.createElement("span");
+  caret.className = "peer-caret";
+  caret.style.setProperty("--who", user.color);
+  caret.dataset.peer = String(user.id);
+
+  const label = document.createElement("span");
+  label.className = "peer-label";
+  label.textContent = user.name;
+  caret.append(label);
+  return caret;
+}
 
 export function createEditor(
   element: HTMLElement,
@@ -25,7 +46,11 @@ export function createEditor(
       ...extensions,
       // The fragment name must match the daemon's root (polar_core::CONTENT).
       Collaboration.configure({ fragment: doc.getXmlFragment("content") }),
-      CollaborationCaret.configure({ provider: { awareness } as never, user }),
+      CollaborationCaret.configure({
+        provider: { awareness } as never,
+        user,
+        render: renderCaret as never,
+      }),
     ],
     autofocus: "end",
   });
