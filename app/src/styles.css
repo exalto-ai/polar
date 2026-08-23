@@ -19,7 +19,11 @@
   --display: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
 
-  --measure: 34rem;
+  /* The editor's line length. 34rem ran to roughly 64 characters, which is
+     classic for print and cramped on a screen this size. 42rem lands near 78 —
+     still short of the ~85 where line length starts measurably costing reading
+     speed, because the eye loses its place on the return sweep. */
+  --measure: 42rem;
   --chrome-height: 44px;
 }
 
