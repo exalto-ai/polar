@@ -172,11 +172,15 @@ struct Inner {
     docs: HashMap<String, Document>,
     /// Deltas committed under the current lock, drained and delivered to the
     /// observer once it is released — user code must not run under our mutex.
-    pending: Vec<(String, Vec<u8>)>,
+    pending: Vec<(String, Vec<u8>, ActorRef)>,
 }
 
-/// Notified of every committed change, whatever wrote it.
-type Observer = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
+/// Notified of every committed change, and by whom.
+///
+/// The actor matters because agents arrive over MCP, which carries no
+/// presence: the only way anyone learns an agent is working on a document is
+/// that it wrote something.
+type Observer = Arc<dyn Fn(&str, &[u8], &ActorRef) + Send + Sync>;
 
 pub struct Workspace {
     inner: Mutex<Inner>,
@@ -212,7 +216,7 @@ impl Workspace {
     /// typing over the sync socket must both reach every other peer. Wiring the
     /// fan-out to the socket alone left MCP edits invisible to an open editor —
     /// which is most of what makes this app worth building.
-    pub fn observe(&self, observer: impl Fn(&str, &[u8]) + Send + Sync + 'static) {
+    pub fn observe(&self, observer: impl Fn(&str, &[u8], &ActorRef) + Send + Sync + 'static) {
         *self.observer.lock().expect("observer mutex poisoned") = Some(Arc::new(observer));
     }
 
@@ -231,8 +235,8 @@ impl Workspace {
                 .expect("observer mutex poisoned")
                 .clone()
         {
-            for (doc_id, delta) in pending {
-                observer(&doc_id, &delta);
+            for (doc_id, delta, actor) in pending {
+                observer(&doc_id, &delta, &actor);
             }
         }
         result
@@ -608,7 +612,8 @@ impl Inner {
             actor.origin(),
             actor.session_id.as_deref(),
         )?;
-        self.pending.push((doc_id.to_string(), delta.clone()));
+        self.pending
+            .push((doc_id.to_string(), delta.clone(), actor.clone()));
 
         let (markdown, _) = to_markdown_with_spans(&tree);
         // Reindexed on every mutation, not on snapshot as M1.4 first said.

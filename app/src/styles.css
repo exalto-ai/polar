@@ -89,6 +89,12 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   transition: transform 120ms ease;
 }
 .who:hover { transform: scale(1.12); }
+/* An agent has just written; a window is present. The ring says "acting", not
+   "attending", so the two are not mistaken for the same kind of liveness. */
+.who.is-agent {
+  border-radius: 6px;
+  box-shadow: 0 0 0 1.5px var(--paper), 0 0 0 3px color-mix(in srgb, var(--who) 45%, transparent);
+}
 .status {
   width: 10px; height: 10px;
   border-radius: 50%;

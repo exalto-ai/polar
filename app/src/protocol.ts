@@ -11,6 +11,12 @@ export const Tag = {
   Broadcast: 0x04,
   Awareness: 0x05,
   Error: 0x06,
+  /**
+   * An agent wrote. Agents connect over MCP, which has no awareness protocol,
+   * so presence is inferred from edits rather than pretended into the awareness
+   * channel — a different kind of signal, and conflating them would mislead.
+   */
+  Presence: 0x07,
 } as const;
 
 export type Frame = { tag: number; docId: string; body: Uint8Array };
