@@ -99,6 +99,7 @@ pub enum WorkspaceError {
     NoSuchDocument(String),
     Block(BlockError),
     InvalidMarkdown(Vec<String>),
+    NotFound(String),
     Storage(polar_store::SqlError),
 }
 
@@ -114,6 +115,7 @@ impl std::fmt::Display for WorkspaceError {
                     errs.join("; ")
                 )
             }
+            WorkspaceError::NotFound(what) => write!(f, "{what}"),
             WorkspaceError::Storage(e) => write!(f, "storage: {e}"),
         }
     }
@@ -352,6 +354,70 @@ impl Workspace {
                 warnings,
             })
         })
+    }
+
+    /// Find and replace within a single block.
+    ///
+    /// `find` matches the block's **markdown**, not its rendered text, because
+    /// markdown is what the agent read — matching against something it never
+    /// saw would make failures inexplicable. The consequence is that `find`
+    /// must include any emphasis syntax the target carries.
+    pub fn replace_text(
+        &self,
+        doc_id: &str,
+        block_id: &str,
+        find: &str,
+        replace: &str,
+        occurrence: Option<usize>,
+        version: Option<&str>,
+        actor: &ActorRef,
+    ) -> Result<EditOutcome, WorkspaceError> {
+        if find.is_empty() {
+            return Err(WorkspaceError::InvalidMarkdown(vec![
+                "`find` must not be empty".into(),
+            ]));
+        }
+
+        let current = self.with(|inner| -> Result<String, WorkspaceError> {
+            let doc = inner.doc(doc_id)?;
+            let node = doc
+                .block(block_id)
+                .ok_or_else(|| WorkspaceError::Block(BlockError::NoSuchBlock(block_id.into())))?;
+            let (markdown, _) =
+                to_markdown_with_spans(&Node::element("doc", vec![normalize(&node)]));
+            Ok(markdown)
+        })?;
+
+        let hits = current.matches(find).count();
+        if hits == 0 {
+            return Err(WorkspaceError::NotFound(format!(
+                "`{find}` does not appear in block `{block_id}`"
+            )));
+        }
+
+        let updated = match occurrence {
+            // 1-based, matching how a person would say "the second one".
+            Some(n) => {
+                if n == 0 || n > hits {
+                    return Err(WorkspaceError::NotFound(format!(
+                        "occurrence {n} of `{find}`; the block has {hits}"
+                    )));
+                }
+                let mut out = String::with_capacity(current.len());
+                let mut rest = current.as_str();
+                for i in 1..=n {
+                    let at = rest.find(find).expect("counted above");
+                    out.push_str(&rest[..at]);
+                    out.push_str(if i == n { replace } else { find });
+                    rest = &rest[at + find.len()..];
+                }
+                out.push_str(rest);
+                out
+            }
+            None => current.replace(find, replace),
+        };
+
+        self.replace_block(doc_id, block_id, &updated, version, actor)
     }
 
     /// Attribution for the whole log — the activity feed and per-run revert.
