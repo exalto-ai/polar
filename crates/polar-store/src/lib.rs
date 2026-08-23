@@ -62,6 +62,19 @@ pub struct LoggedUpdate {
     pub created_at: i64,
 }
 
+/// Who has worked on a document, from the op log. Yjs cannot carry this
+/// (AD-1), which is why the log exists.
+#[derive(Debug, Clone)]
+pub struct ActorActivity {
+    pub actor_id: String,
+    pub kind: String,
+    pub display_name: String,
+    pub model: Option<String>,
+    pub color: String,
+    pub last_seen: i64,
+    pub edits: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct DocumentRow {
     pub id: String,
@@ -293,6 +306,32 @@ impl Store {
                     title: row.get(1)?,
                     updated_at: row.get(2)?,
                     deleted: row.get::<_, Option<i64>>(3)?.is_some(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Everyone who has written to a document, most recent first.
+    pub fn actors_for_document(&self, doc_id: &str) -> Result<Vec<ActorActivity>, SqlError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, a.kind, a.display_name, a.model, a.color,
+                    MAX(u.created_at) AS last_seen, COUNT(*) AS edits
+             FROM updates u JOIN actors a ON a.id = u.actor_id
+             WHERE u.doc_id = ?1
+             GROUP BY a.id
+             ORDER BY last_seen DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![doc_id], |row| {
+                Ok(ActorActivity {
+                    actor_id: row.get(0)?,
+                    kind: row.get(1)?,
+                    display_name: row.get(2)?,
+                    model: row.get(3)?,
+                    color: row.get(4)?,
+                    last_seen: row.get(5)?,
+                    edits: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

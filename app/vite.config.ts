@@ -26,6 +26,7 @@ function polarConnection() {
               sync_url: config.url.replace("http://", "ws://").replace("/mcp", "/sync"),
               mcp_url: config.url,
               token: config.token,
+              stdio_command: join(process.cwd(), "../target/debug/polar-mcp-stdio"),
             }),
           );
         } catch {

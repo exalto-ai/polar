@@ -94,6 +94,10 @@ export class Mcp {
     return (await this.call("search", { query, limit })).hits as SearchHit[];
   }
 
+  async documentActors(docId: string) {
+    return (await this.call("document_actors", { doc_id: docId })).actors as Actor[];
+  }
+
   async createDocument(title: string) {
     return await this.call("create_document", {
       title,
@@ -103,6 +107,16 @@ export class Mcp {
     });
   }
 }
+
+export type Actor = {
+  actor_id: string;
+  kind: "human" | "agent";
+  display_name: string;
+  model: string | null;
+  color: string;
+  last_seen: number;
+  edits: number;
+};
 
 export type DocumentSummary = { doc_id: string; title: string; updated_at: number };
 export type SearchHit = { doc_id: string; title: string; snippet: string };
