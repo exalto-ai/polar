@@ -86,16 +86,31 @@ impl Daemon {
             body["id"] = self.id.get().into();
         }
 
-        let mut request = self
-            .agent
-            .post(&self.url)
-            .header("Authorization", &format!("Bearer {}", self.token))
-            .header("Accept", "application/json, text/event-stream");
-        if let Some(session) = self.session.borrow().as_ref() {
-            request = request.header("Mcp-Session-Id", session);
-        }
+        // Built per attempt: a RequestBuilder is consumed by sending, and a
+        // transport failure needs a fresh one.
+        let build = || {
+            let mut request = self
+                .agent
+                .post(&self.url)
+                .header("Authorization", &format!("Bearer {}", self.token))
+                .header("Accept", "application/json, text/event-stream");
+            if let Some(session) = self.session.borrow().as_ref() {
+                request = request.header("Mcp-Session-Id", session);
+            }
+            request
+        };
 
-        let mut response = request.send_json(&body).expect("request succeeded");
+        // Retry once on a *transport* failure. Disabling idle pooling is not
+        // enough on its own: a keep-alive socket the server has already closed
+        // still fails on write with ECONNRESET. A connection that died before
+        // delivering anything has nothing to duplicate, so retrying is safe —
+        // the same reasoning as the stdio shim's retry.
+        let mut response = match build().send_json(&body) {
+            Err(ureq::Error::ConnectionFailed | ureq::Error::Io(_)) => build()
+                .send_json(&body)
+                .expect("request succeeded on retry"),
+            other => other.expect("request succeeded"),
+        };
         if self.session.borrow().is_none()
             && let Some(id) = response.headers().get("mcp-session-id")
         {
