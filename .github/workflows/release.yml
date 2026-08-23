@@ -9,11 +9,18 @@ on:
         description: "Tag to build (e.g. v0.1.0). Creates a draft release."
         required: true
 
+permissions:
+  contents: write
+
 jobs:
   macos:
     runs-on: macos-latest
-    permissions:
-      contents: write
+    env:
+      TARGET: universal-apple-darwin
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      # Signing is all-or-nothing: without a certificate the build is unsigned,
+      # and an unsigned build cannot be notarized either.
+      SIGN: ${{ secrets.APPLE_CERTIFICATE != '' }}
 
     steps:
       - uses: actions/checkout@v5
@@ -34,76 +41,115 @@ jobs:
 
       - run: npm ci --prefix app
 
-      # The window is useless without the daemon, so both binaries are built
-      # for both architectures and stitched into the bundle as sidecars.
+      # The window cannot reach a document without the daemon, so both binaries
+      # ship inside the bundle as sidecars.
       - name: Build the daemon and shim
-        run: ./scripts/stage-sidecars.sh universal-apple-darwin
+        run: ./scripts/stage-sidecars.sh "$TARGET"
 
-      # An unset secret still resolves to an empty string, and Tauri treats a
-      # present-but-empty APPLE_CERTIFICATE as "sign this", then fails trying to
-      # import an empty certificate. Writing to $GITHUB_ENV only when the values
-      # exist keeps them genuinely absent otherwise, so one build step covers
-      # both cases.
-      - name: Configure signing, if it is configured
+      - name: Import Developer ID certificate
+        if: env.SIGN == 'true'
+        uses: apple-actions/import-codesign-certs@v5
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      # An App Store Connect API key rather than an Apple ID and app-specific
+      # password: three values, no second factor, and nothing that expires when
+      # someone changes their Apple ID password.
+      - name: Prepare App Store Connect API key
+        if: env.SIGN == 'true'
         env:
-          CERT: ${{ secrets.APPLE_CERTIFICATE }}
-          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD_SECRET: ${{ secrets.APPLE_PASSWORD }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEY_BASE64: ${{ secrets.APPLE_NOTARIZATION_KEY_BASE64 }}
+          KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
         run: |
-          if [ -z "$CERT" ]; then
-            echo "No Apple signing secrets set — building unsigned."
-            echo "Gatekeeper will warn on first open; see docs/releasing.md."
+          set -euo pipefail
+          if [ -z "$KEY_BASE64" ]; then
+            echo "::warning::APPLE_NOTARIZATION_KEY_BASE64 is not set — the build will be signed but not notarized, and macOS will still refuse to open it on download."
             exit 0
           fi
+          key_path="$RUNNER_TEMP/AuthKey_${KEY_ID}.p8"
+          printf '%s' "$KEY_BASE64" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
-          # The delimiter form, because a base64 certificate is many lines.
-          {
-            echo "APPLE_CERTIFICATE<<POLAR_EOF"
-            echo "$CERT"
-            echo "POLAR_EOF"
-          } >> "$GITHUB_ENV"
+      - name: Build signed bundle
+        if: env.SIGN == 'true'
+        working-directory: app
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm exec -- tauri build --target "$TARGET" --bundles app,dmg --ci
 
-          # Each value guarded on its own. Writing an empty APPLE_ID would make
-          # Tauri attempt notarization with no credentials — the same
-          # present-but-empty trap as the certificate, one level down.
-          set_if() {
-            [ -n "$2" ] && echo "$1=$2" >> "$GITHUB_ENV"
-          }
-          set_if APPLE_CERTIFICATE_PASSWORD "$CERT_PASSWORD"
-          set_if APPLE_SIGNING_IDENTITY "$IDENTITY"
-          set_if APPLE_ID "$APPLE_ID_SECRET"
-          set_if APPLE_PASSWORD "$APPLE_PASSWORD_SECRET"
-          set_if APPLE_TEAM_ID "$TEAM_ID"
+      - name: Build unsigned bundle
+        if: env.SIGN != 'true'
+        working-directory: app
+        run: npm exec -- tauri build --target "$TARGET" --bundles app,dmg --no-sign --ci
 
-          echo "Signing as: ${IDENTITY:-<not set>}"
-          if [ -n "$APPLE_ID_SECRET" ] && [ -n "$APPLE_PASSWORD_SECRET" ]; then
-            echo "Notarizing: yes"
-          else
-            # Signed but unnotarized still trips Gatekeeper on a downloaded app,
-            # so this is worth saying loudly rather than discovering on open.
-            echo "Notarizing: NO — APPLE_ID and APPLE_PASSWORD are not both set."
-            echo "The build will be signed but not notarized, and macOS will"
-            echo "still refuse to open it on download. See docs/releasing.md."
+      # Tauri notarizes and staples the *application* before wrapping it in a
+      # disk image. The DMG is a separately distributed container and needs its
+      # own ticket, or Gatekeeper rejects the download even though the app
+      # inside it is fine.
+      - name: Notarize and staple the DMG
+        if: env.SIGN == 'true' && env.APPLE_API_KEY_PATH != ''
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+        run: |
+          set -euo pipefail
+          dmg=$(find "app/src-tauri/target/$TARGET/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)
+          test -n "$dmg"
+          xcrun notarytool submit "$dmg" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          xcrun stapler staple "$dmg"
+
+      - name: Verify the bundle
+        run: |
+          set -euo pipefail
+          dmg=$(find "app/src-tauri/target/$TARGET/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)
+          test -n "$dmg"
+          hdiutil verify "$dmg"
+
+          # The failure a release is most likely to have: a window with no
+          # daemon beside it.
+          app="app/src-tauri/target/$TARGET/release/bundle/macos/Polar.app"
+          for binary in polard polar-mcp-stdio; do
+            test -x "$app/Contents/MacOS/$binary" || {
+              echo "::error::$binary is missing from the bundle"
+              exit 1
+            }
+          done
+          lipo -archs "$app/Contents/MacOS/polard"
+
+          if [ "$SIGN" = "true" ]; then
+            # What a downloading user's machine will conclude.
+            spctl -a -t open --context context:primary-signature -v "$dmg"
           fi
 
-      - name: Build and bundle
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: app
-          tagName: ${{ github.event.inputs.tag || github.ref_name }}
-          releaseName: Polar ${{ github.event.inputs.tag || github.ref_name }}
-          releaseBody: |
-            A local-first writing app where people and agents edit the same
-            documents.
+          mkdir -p release
+          cp "$dmg" release/
+          (cd release && shasum -a 256 *.dmg > SHA256SUMS)
+          ls -la release
 
-            Download the `.dmg`, drag Polar to Applications, and open it. The
-            daemon ships inside the bundle and starts on first launch.
-          # Draft, so the DMG can be opened and checked before anyone gets it.
-          releaseDraft: true
-          prerelease: false
-          args: --target universal-apple-darwin
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          notes=$(cat <<'NOTES'
+          A local-first writing app where people and agents edit the same documents.
+
+          Download the `.dmg`, drag Polar to Applications, and open it. The daemon
+          ships inside the bundle and starts on first launch.
+          NOTES
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* \
+              --draft --title "Polar $TAG" --notes "$notes"
+          fi
