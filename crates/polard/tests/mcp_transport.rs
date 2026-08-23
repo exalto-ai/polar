@@ -78,7 +78,17 @@ fn an_agent_drives_the_daemon_over_mcp() {
 #[test]
 fn the_endpoint_refuses_an_unauthenticated_client() {
     let daemon = Daemon::start();
-    let response = ureq::post(&daemon.url)
+    // A dedicated agent with no idle pooling. The global agent reuses
+    // keep-alive sockets, and one the server has since closed fails on write
+    // with ECONNRESET — which reads as "not a 401" and fails the test for a
+    // reason that has nothing to do with authentication.
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .max_idle_connections(0)
+            .build(),
+    );
+    let response = agent
+        .post(&daemon.url)
         .header("Accept", "application/json, text/event-stream")
         .send_json(serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
