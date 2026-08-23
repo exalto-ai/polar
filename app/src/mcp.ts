@@ -98,6 +98,16 @@ export class Mcp {
     return (await this.call("document_actors", { doc_id: docId })).actors as Actor[];
   }
 
+  async setDocumentDeleted(docId: string, deleted: boolean) {
+    return await this.call("set_document_deleted", {
+      doc_id: docId,
+      deleted,
+      agent: "window",
+      model: null,
+      session: null,
+    });
+  }
+
   async createDocument(title: string) {
     return await this.call("create_document", {
       title,

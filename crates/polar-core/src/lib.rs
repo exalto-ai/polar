@@ -11,7 +11,7 @@ use polar_schema::Node;
 use yrs::types::xml::XmlFragment;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
-use yrs::{Doc, ReadTxn, StateVector, Transact, Update, XmlFragmentRef};
+use yrs::{Doc, Map, ReadTxn, StateVector, Transact, Update, XmlFragmentRef};
 
 /// Applying a peer's update can fail two ways, and they mean different things:
 /// a malformed frame is a transport or version problem, while an update error
@@ -37,6 +37,9 @@ pub use tree::sort_marks;
 
 /// The root fragment name. Matches the editor binding, which must agree.
 pub const CONTENT: &str = "content";
+
+/// Document metadata that must replicate: the deletion tombstone lives here.
+pub const META: &str = "meta";
 
 pub struct Document {
     doc: Doc,
@@ -87,6 +90,34 @@ impl Document {
         let fragment = self.fragment();
         let txn = self.doc.transact();
         Node::element("doc", tree::read_children(&txn, &fragment))
+    }
+
+    /// The deletion tombstone.
+    ///
+    /// Lives in the document CRDT, not a SQLite column (AD-14): a column cannot
+    /// replicate, so a peer would never learn the document was deleted. Last
+    /// writer wins, which also makes undelete just another write.
+    pub fn deleted_at(&self) -> Option<i64> {
+        let meta = self.doc.get_or_insert_map(META);
+        let txn = self.doc.transact();
+        match meta.get(&txn, "deleted_at") {
+            Some(yrs::Out::Any(yrs::Any::BigInt(at))) => Some(at),
+            Some(yrs::Out::Any(yrs::Any::Number(at))) => Some(at as i64),
+            _ => None,
+        }
+    }
+
+    pub fn set_deleted_at(&self, at: Option<i64>) {
+        let meta = self.doc.get_or_insert_map(META);
+        let mut txn = self.doc.transact_mut();
+        match at {
+            Some(at) => {
+                meta.insert(&mut txn, "deleted_at", yrs::Any::BigInt(at));
+            }
+            None => {
+                meta.remove(&mut txn, "deleted_at");
+            }
+        }
     }
 
     pub fn state_vector(&self) -> Vec<u8> {

@@ -122,6 +122,15 @@ pub struct ReplaceTextParams {
     pub caller: Caller,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteDocumentParams {
+    pub doc_id: String,
+    /// `true` trashes it, `false` restores it.
+    pub deleted: bool,
+    #[serde(flatten)]
+    pub caller: Caller,
+}
+
 #[tool_router(server_handler)]
 impl Polar {
     pub fn new(workspace: Arc<Workspace>) -> Self {
@@ -246,6 +255,21 @@ impl Polar {
                 p.version.as_deref(),
                 &p.caller.actor(),
             )
+            .map_err(failed)?;
+        Ok(Json(serde_json::to_value(out).map_err(failed)?))
+    }
+
+    #[tool(
+        description = "Move a document to the trash, or restore it. Soft delete: the \
+                       document and its history remain, and the tombstone replicates."
+    )]
+    fn set_document_deleted(
+        &self,
+        Parameters(p): Parameters<DeleteDocumentParams>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let out = self
+            .workspace
+            .set_document_deleted(&p.doc_id, p.deleted, &p.caller.actor())
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
     }

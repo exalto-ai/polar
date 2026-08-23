@@ -303,3 +303,69 @@ fn replace_text_edits_within_a_block() {
     );
     assert!(past_end.is_err());
 }
+
+/// Deleting is soft, and the tombstone must replicate — a SQLite column cannot
+/// (AD-14), which is why it lives in the document itself.
+#[test]
+fn a_trashed_document_leaves_the_list_but_keeps_its_history() {
+    let ws = Workspace::open_in_memory().unwrap();
+    let agent = agent();
+    let created = ws.create_document("Doomed", &agent).unwrap();
+    let block = created.blocks[0].block_id.clone();
+    ws.replace_block(&created.doc_id, &block, "Worth keeping.", None, &agent)
+        .unwrap();
+
+    assert!(
+        ws.list_documents(50)
+            .unwrap()
+            .iter()
+            .any(|d| d.doc_id == created.doc_id)
+    );
+
+    ws.set_document_deleted(&created.doc_id, true, &agent)
+        .unwrap();
+    assert!(
+        !ws.list_documents(50)
+            .unwrap()
+            .iter()
+            .any(|d| d.doc_id == created.doc_id),
+        "a trashed document must leave the list"
+    );
+
+    // Still readable, and its history is intact: this is a trash, not a shred.
+    let view = ws.read_document(&created.doc_id).unwrap();
+    assert!(view.markdown.contains("Worth keeping."));
+    assert!(ws.attribution(&created.doc_id).unwrap().len() >= 2);
+
+    ws.set_document_deleted(&created.doc_id, false, &agent)
+        .unwrap();
+    assert!(
+        ws.list_documents(50)
+            .unwrap()
+            .iter()
+            .any(|d| d.doc_id == created.doc_id),
+        "restoring must bring it back"
+    );
+}
+
+/// The tombstone rides in the document, so a peer that only ever sees update
+/// frames still learns the document was trashed.
+#[test]
+fn the_tombstone_travels_with_the_document() {
+    use polar_core::Document;
+
+    let ws = Workspace::open_in_memory().unwrap();
+    let agent = agent();
+    let created = ws.create_document("Travels", &agent).unwrap();
+    ws.set_document_deleted(&created.doc_id, true, &agent)
+        .unwrap();
+
+    // A fresh replica, caught up only by the sync protocol.
+    let peer = Document::new();
+    peer.apply_update(&ws.sync_since(&created.doc_id, &[]).unwrap())
+        .unwrap();
+    assert!(
+        peer.deleted_at().is_some(),
+        "the peer never learned the document was deleted"
+    );
+}

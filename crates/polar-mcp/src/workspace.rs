@@ -518,6 +518,34 @@ impl Workspace {
         })
     }
 
+    /// Move a document to the trash, or bring it back.
+    ///
+    /// Soft delete: the tombstone is a field in the document CRDT so it
+    /// replicates (AD-14), and editing a tombstoned document does not resurrect
+    /// it. The SQLite column is a cache of that field, not the truth.
+    pub fn set_document_deleted(
+        &self,
+        doc_id: &str,
+        deleted: bool,
+        actor: &ActorRef,
+    ) -> Result<EditOutcome, WorkspaceError> {
+        self.with(|inner| {
+            inner.register(actor)?;
+            let doc = inner.doc(doc_id)?;
+            let before = doc.state_vector();
+            doc.set_deleted_at(deleted.then(now_ms));
+            let at = doc.deleted_at();
+            let version = inner.commit(doc_id, &before, actor)?;
+            inner.store.cache_deleted_at(doc_id, at)?;
+            Ok(EditOutcome {
+                doc_id: doc_id.into(),
+                block_id: None,
+                version,
+                warnings: vec![],
+            })
+        })
+    }
+
     /// Who has worked on this document. Powers the window's connections panel,
     /// and is the first visible use of the attribution AD-6 insisted on keeping
     /// from the first commit.
@@ -660,6 +688,14 @@ fn staleness(doc: &Document, version: Option<&str>) -> Vec<String> {
     } else {
         vec![]
     }
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn derive_title(tree: &Node) -> String {
