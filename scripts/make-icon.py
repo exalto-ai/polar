@@ -13,7 +13,7 @@ The coin cut inverts it: the mark is knocked out of a filled disc, so the tile
 shows through the ring and the arm. A filled silhouette is what survives a Dock
 — outlines at 32px turn to lint, and there is nothing here to thin out.
 
-The tile is Polar Blue and the disc is white, rather than the other way round.
+The tile is Proof Blue and the disc is white, rather than the other way round.
 A dark tile put a blue mark on a near-black field and read as a widget; the
 brand colour belongs to the whole tile, which is the only part of the icon
 visible at a glance in a Dock. The gradient is the accent lifted at the top and
@@ -38,7 +38,7 @@ INSET = (SIZE - BODY) // 2
 FIELD = 96  # the coordinate space assets/orbit/*.svg are drawn in
 SS = 4  # supersampling factor for the knockout mask
 
-ACCENT = (47, 111, 237)  # #2f6fed, Polar Blue; see DESIGN.md
+ACCENT = (47, 111, 237)  # #2f6fed, Proof Blue; see DESIGN.md
 MARK = (255, 255, 255)
 
 

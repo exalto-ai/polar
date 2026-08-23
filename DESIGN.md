@@ -4,7 +4,7 @@ One accent, one mark, and the two files that define them. Everything else in the
 interface is neutral on purpose — if a second colour starts carrying meaning,
 it belongs in this document or it does not belong in the app.
 
-## Polar Blue
+## Proof Blue
 
 | | Light ground | Dark ground |
 | --- | --- | --- |
@@ -38,7 +38,7 @@ theirs across both themes.
 Orbit, coin cut: a filled disc with a ring and one radial arm knocked out of it,
 so whatever is behind shows through the mark. Polar coordinates — the document
 is the centre, and the editor, an agent over MCP and the relay are the same
-document seen from different bearings.
+document seen from different bearings. The engine is named for them.
 
 The arm sits at 45°, on the diagonal of the icon's square. Below that it reads
 as a clock hand; above it, it flattens and loses the climb.
@@ -50,10 +50,10 @@ Four cuts live in [`assets/orbit/`](assets/orbit):
 | `light.svg` | light |
 | `dark.svg` | dark, including the app tile |
 | `mono.svg` | one colour, inherited — the macOS template image |
-| `reversed.svg` | Polar blue or any saturated field |
+| `reversed.svg` | Proof Blue or any saturated field |
 
 All four are the same geometry on a 96 × 96 field. The app tile is the reversed
-cut — a white disc on Polar Blue, so the brand colour owns the whole tile rather
+cut — a white disc on Proof Blue, so the brand colour owns the whole tile rather
 than a shape inside it, which is all a Dock shows at a glance. Its gradient is
 the accent lifted at the top and deepened at the bottom, both derived from the
 one hex, so the icon cannot disagree with this file.

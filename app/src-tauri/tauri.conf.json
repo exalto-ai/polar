@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Polar",
+  "productName": "Proof of Thought",
   "version": "0.1.0",
   "identifier": "ai.exalto.polar",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Polar",
+        "title": "Proof of Thought",
         "width": 1040,
         "height": 820,
         "minWidth": 560,
@@ -45,7 +45,7 @@
     ],
     "category": "Productivity",
     "shortDescription": "A local-first writing app for humans and agents",
-    "longDescription": "Polar is a local-first writing app where people and AI agents edit the same documents. A background daemon owns the CRDT and the store; the window and every agent are clients of it.",
+    "longDescription": "Proof of Thought is a local-first writing app where people and AI agents edit the same documents. A background daemon owns the CRDT and the store; the window and every agent are clients of it.",
     "macOS": {
       "minimumSystemVersion": "11.0"
     }
