@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""
+Drive Polar as an agent, from the terminal.
+
+    scripts/agent list
+    scripts/agent read [<n>]
+    scripts/agent append [<n>] "## A heading\n\nAnd a paragraph."
+    scripts/agent watch [<n>]     # append a line every few seconds
+
+`<n>` is the 1-based index from `list` (sorted by title, so it stays put),
+defaulting to the first document.
+Point it at a document you have open in the window and watch the edits land.
+"""
+import json, os, sys, time, urllib.request
+
+HOME = os.environ.get(
+    "POLAR_HOME",
+    os.path.expanduser("~/Library/Application Support/ai.exalto.polar"),
+)
+
+try:
+    CONFIG = json.load(open(os.path.join(HOME, "daemon.json")))
+except FileNotFoundError:
+    sys.exit("No daemon is running. Start the app, or run: cargo run -p polard")
+
+_session = None
+_id = 0
+
+
+def rpc(method, params=None, notify=False):
+    global _session, _id
+    body = {"jsonrpc": "2.0", "method": method}
+    if not notify:
+        _id += 1
+        body["id"] = _id
+    if params is not None:
+        body["params"] = params
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Authorization": f"Bearer {CONFIG['token']}",
+    }
+    if _session:
+        headers["Mcp-Session-Id"] = _session
+
+    request = urllib.request.Request(CONFIG["url"], json.dumps(body).encode(), headers)
+    with urllib.request.urlopen(request) as response:
+        if _session is None and response.headers.get("mcp-session-id"):
+            _session = response.headers["mcp-session-id"]
+        raw = response.read().decode()
+
+    for line in raw.splitlines():
+        if line.startswith("data: ") and line[6:].strip():
+            message = json.loads(line[6:])
+            if "error" in message:
+                sys.exit(f"daemon: {message['error'].get('message')}")
+            if "result" in message:
+                return message["result"]
+
+
+def call(name, arguments):
+    result = rpc("tools/call", {"name": name, "arguments": arguments})
+    return json.loads(result["content"][0]["text"])
+
+
+CALLER = {"agent": "terminal", "model": None, "session": f"cli-{int(time.time())}"}
+
+rpc("initialize", {
+    "protocolVersion": "2025-06-18",
+    "capabilities": {},
+    "clientInfo": {"name": "polar-cli", "version": "1"},
+})
+rpc("notifications/initialized", {}, notify=True)
+
+
+def documents():
+    # Sorted by title, not recency: the daemon orders by updated_at, so an
+    # index would move under you the moment you wrote to a document.
+    return sorted(
+        call("list_documents", {"limit": 50})["documents"],
+        key=lambda d: d["title"].lower(),
+    )
+
+
+def pick(argv):
+    docs = documents()
+    if not docs:
+        sys.exit("No documents yet. Press ⌘K in the window and hit ⌘↵ to make one.")
+    index = int(argv[0]) - 1 if argv and argv[0].isdigit() else 0
+    return docs[index]["doc_id"], (argv[1:] if argv and argv[0].isdigit() else argv)
+
+
+command = sys.argv[1] if len(sys.argv) > 1 else "list"
+rest = sys.argv[2:]
+
+if command == "list":
+    for i, doc in enumerate(documents(), 1):
+        print(f"{i}. {doc['title']}")
+
+elif command == "read":
+    doc_id, _ = pick(rest)
+    print(call("read_document", {"doc_id": doc_id})["markdown"])
+
+elif command == "append":
+    doc_id, args = pick(rest)
+    if not args:
+        sys.exit('Nothing to append. Try: scripts/agent append "## Hello"')
+    call("insert_blocks", {
+        "doc_id": doc_id, "after": "end",
+        "markdown": args[0].replace("\\n", "\n"), **CALLER,
+    })
+    print("appended")
+
+elif command == "watch":
+    doc_id, _ = pick(rest)
+    print("Appending a line every 4s. Ctrl-C to stop.")
+    n = 1
+    try:
+        while True:
+            call("insert_blocks", {
+                "doc_id": doc_id, "after": "end",
+                "markdown": f"Line {n} from an agent at {time.strftime('%H:%M:%S')}.",
+                **CALLER,
+            })
+            print(f"  wrote line {n}")
+            n += 1
+            time.sleep(4)
+    except KeyboardInterrupt:
+        print("\nstopped")
+
+else:
+    sys.exit(__doc__)
