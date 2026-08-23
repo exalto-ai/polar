@@ -289,11 +289,25 @@ impl Workspace {
             let doc_id = uuid::Uuid::now_v7().to_string();
             inner.store.create_document(&doc_id, title)?;
 
+            // Seed the title as a heading rather than starting empty.
+            //
+            // The title *is* the first heading (that is how both the daemon and
+            // the window derive it), so a document created with a name and no
+            // heading is called "Untitled" the moment anyone reads it — the
+            // name you typed is discarded on the way in. Agents hit the same
+            // thing: `create_document(title: "Roadmap")` produced a document
+            // that did not say Roadmap anywhere.
             let doc = Document::new();
-            doc.set_document(&normalize(&Node::element(
-                "doc",
-                vec![Node::element("paragraph", vec![])],
-            )));
+            let mut blocks = Vec::new();
+            if !title.trim().is_empty() {
+                blocks.push(
+                    Node::element("heading", vec![Node::text(title.trim(), vec![])])
+                        .with_attr("level", 1.into()),
+                );
+            }
+            // Always a paragraph after it, so there is somewhere to start typing.
+            blocks.push(Node::element("paragraph", vec![]));
+            doc.set_document(&normalize(&Node::element("doc", blocks)));
             inner.store.append_update(
                 &doc_id,
                 &doc.encode_state(),
@@ -341,11 +355,15 @@ impl Workspace {
         })
     }
 
-    pub fn list_documents(&self, limit: usize) -> Result<Vec<DocumentSummary>, WorkspaceError> {
+    pub fn list_documents(
+        &self,
+        limit: usize,
+        trashed: bool,
+    ) -> Result<Vec<DocumentSummary>, WorkspaceError> {
         self.with(|inner| {
             Ok(inner
                 .store
-                .list_documents()?
+                .list_documents(trashed)?
                 .into_iter()
                 .take(limit)
                 .map(|row| DocumentSummary {
@@ -362,7 +380,7 @@ impl Workspace {
         self.with(|inner| {
             let titles: HashMap<String, String> = inner
                 .store
-                .list_documents()?
+                .list_documents(false)?
                 .into_iter()
                 .map(|d| (d.id, d.title))
                 .collect();
