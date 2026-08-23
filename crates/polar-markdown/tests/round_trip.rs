@@ -73,7 +73,7 @@ fn known_shapes_round_trip() {
             "doc",
             vec![Node::element(
                 "paragraph",
-                vec![Node::text("bold", vec![Mark::new("strong")])],
+                vec![Node::text("bold", vec![Mark::new("bold")])],
             )],
         ),
         Node::element(
@@ -117,17 +117,14 @@ fn intraword_emphasis_gap_is_pinned() {
 
     // The gap: a marked span fused to adjacent word characters, where what sits
     // against the delimiter is punctuation — supplied by the text itself...
-    assert!(!has(r"A**\***", "strong"), "fused, content is `*`");
-    assert!(
-        !has(r"A**\*x**", "strong"),
-        "fused, content starts with `*`"
-    );
-    assert!(!has(r"A**\_**", "strong"), "fused, content is `_`");
-    assert!(!has(r"A*\**", "em"), "fused em, content is `*`");
-    assert!(!has(r"A**\`**", "strong"), "fused, content is a backtick");
+    assert!(!has(r"A**\***", "bold"), "fused, content is `*`");
+    assert!(!has(r"A**\*x**", "bold"), "fused, content starts with `*`");
+    assert!(!has(r"A**\_**", "bold"), "fused, content is `_`");
+    assert!(!has(r"A*\**", "italic"), "fused em, content is `*`");
+    assert!(!has(r"A**\`**", "bold"), "fused, content is a backtick");
     // ...or by a nested mark's own delimiter, which is the broader case.
     assert!(
-        !has(r"A**~~a~~**", "strong"),
+        !has(r"A**~~a~~**", "bold"),
         "nested mark supplies the punctuation"
     );
     assert!(
@@ -136,22 +133,22 @@ fn intraword_emphasis_gap_is_pinned() {
     );
     // The rule is symmetric — the closing side fails the same way.
     assert!(
-        !has(r"**~~A~~**0", "strong"),
+        !has(r"**~~A~~**0", "bold"),
         "closing delimiter fused to next word"
     );
 
     // Whitespace on the relevant side resolves every one of them.
     assert!(
-        has(r"A **\*** B", "strong"),
+        has(r"A **\*** B", "bold"),
         "whitespace separates the delimiter"
     );
     assert!(
-        has(r"A **~~a~~** B", "strong"),
+        has(r"A **~~a~~** B", "bold"),
         "whitespace fixes the nested case"
     );
-    assert!(has(r"**\***", "strong"), "span stands alone");
-    assert!(has(r"A**x\***", "strong"), "content merely ends with `*`");
-    assert!(has(r"A**x\*x**", "strong"), "punctuation is interior");
+    assert!(has(r"**\***", "bold"), "span stands alone");
+    assert!(has(r"A**x\***", "bold"), "content merely ends with `*`");
+    assert!(has(r"A**x\*x**", "bold"), "punctuation is interior");
     assert!(
         has(r"A~~\~~~", "strike"),
         "strike opens where emphasis would not"
@@ -169,23 +166,30 @@ fn table_constraints_are_pinned() {
     let row = &ragged.content[0].content[1];
     assert_eq!(row.content.len(), 2, "body row padded to header width");
 
-    // The first row is always the header — GFM has no headerless table.
+    // The first row is always the header — GFM has no headerless table — and
+    // header cells are their own node type, matching TipTap.
     let t = from_markdown("| h |\n| --- |\n| b |\n");
-    assert_eq!(t.content[0].content[0].content[0].attrs["header"], true);
-    assert_eq!(t.content[0].content[1].content[0].attrs["header"], false);
+    assert_eq!(t.content[0].content[0].content[0].kind, "tableHeader");
+    assert_eq!(t.content[0].content[1].content[0].kind, "tableCell");
+    // And the cell wraps its text in a block, as ProseMirror requires.
+    assert_eq!(
+        t.content[0].content[0].content[0].content[0].kind,
+        "paragraph"
+    );
 
-    // Cells hold inline content only; schema.json says `inline*`, and GFM
-    // cannot express a block inside a cell regardless.
+    // A cell holds blocks, not inline content — ProseMirror's shape, which
+    // TipTap's table extension defines and Rust follows (M2.2). A literal pipe
+    // inside one has to be escaped or it re-parses as a column break.
     let with_pipe = Node::element(
         "doc",
         vec![Node::element(
             "table",
             vec![Node::element(
                 "tableRow",
-                vec![
-                    Node::element("tableCell", vec![Node::text("a|b", vec![])])
-                        .with_attr("header", true.into()),
-                ],
+                vec![Node::element(
+                    "tableHeader",
+                    vec![Node::element("paragraph", vec![Node::text("a|b", vec![])])],
+                )],
             )],
         )],
     );

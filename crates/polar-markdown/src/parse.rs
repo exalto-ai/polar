@@ -155,12 +155,18 @@ impl Builder {
             }
             Tag::TableRow => self.open(Node::element("tableRow", vec![])),
             Tag::TableCell => {
-                let header = self.in_table_head;
-                self.open(Node::element("tableCell", vec![]).with_attr("header", header.into()));
+                // GFM marks header cells by position; ProseMirror gives them
+                // their own node type, which is what TipTap expects.
+                let kind = if self.in_table_head {
+                    "tableHeader"
+                } else {
+                    "tableCell"
+                };
+                self.open(Node::element(kind, vec![]));
             }
 
-            Tag::Strong => self.marks.push(Mark::new("strong")),
-            Tag::Emphasis => self.marks.push(Mark::new("em")),
+            Tag::Strong => self.marks.push(Mark::new("bold")),
+            Tag::Emphasis => self.marks.push(Mark::new("italic")),
             Tag::Strikethrough => self.marks.push(Mark::new("strike")),
 
             Tag::Link {
@@ -206,7 +212,17 @@ impl Builder {
                 self.close();
             }
 
-            TagEnd::Table | TagEnd::TableRow | TagEnd::TableCell => self.close(),
+            TagEnd::Table | TagEnd::TableRow => self.close(),
+
+            TagEnd::TableCell => {
+                // ProseMirror table cells hold blocks, not inline content, so
+                // GFM's inline cell text is wrapped the way a tight list item's
+                // is.
+                if let Some(cell) = self.stack.last_mut() {
+                    wrap_loose_inlines(cell);
+                }
+                self.close();
+            }
             TagEnd::TableHead => {
                 self.in_table_head = false;
                 self.close();

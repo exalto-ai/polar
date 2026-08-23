@@ -40,8 +40,8 @@ pub fn text() -> impl Strategy<Value = String> {
 pub fn marks() -> impl Strategy<Value = Vec<Mark>> {
     prop::collection::vec(
         prop_oneof![
-            Just(Mark::new("strong")),
-            Just(Mark::new("em")),
+            Just(Mark::new("bold")),
+            Just(Mark::new("italic")),
             Just(Mark::new("strike")),
             Just(Mark::new("code")),
             Just(Mark::new("link").with_attr("href", "https://example.com".into())),
@@ -85,10 +85,14 @@ fn table(markdown_safe: bool) -> BoxedStrategy<Node> {
         .prop_map(|(rows, cols, cells)| {
             let rows: Vec<Node> = (0..rows)
                 .map(|r| {
+                    // GFM has no headerless table, so the first row is always
+                    // header cells — a distinct node type, as TipTap expects.
+                    let kind = if r == 0 { "tableHeader" } else { "tableCell" };
                     let row_cells = (0..cols)
                         .map(|c| {
-                            Node::element("tableCell", cells[r * cols + c].clone())
-                                .with_attr("header", (r == 0).into())
+                            // Cells hold blocks, not inline content.
+                            let para = Node::element("paragraph", cells[r * cols + c].clone());
+                            Node::element(kind, vec![para])
                         })
                         .collect();
                     Node::element("tableRow", row_cells)
