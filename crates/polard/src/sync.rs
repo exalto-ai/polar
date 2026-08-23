@@ -131,11 +131,37 @@ pub struct SyncState {
 
 impl SyncState {
     pub fn new(workspace: Arc<Workspace>) -> SyncState {
-        SyncState {
-            workspace,
+        let state = SyncState {
+            workspace: workspace.clone(),
             channels: Arc::new(Mutex::new(HashMap::new())),
             next_peer: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-        }
+        };
+
+        // Every committed change fans out, whatever produced it. Broadcasting
+        // only from this socket left agent edits over MCP invisible to an open
+        // editor — which is most of the point of the app.
+        //
+        // A peer therefore receives its own update back. That is harmless: Yjs
+        // updates are idempotent, so applying one you already have is a no-op,
+        // and one fan-out path is worth more than the saved bytes.
+        let channels = state.channels.clone();
+        workspace.observe(move |doc_id, update| {
+            let sender = channels
+                .lock()
+                .expect("sync channels poisoned")
+                .get(doc_id)
+                .cloned();
+            if let Some(sender) = sender {
+                let _ = sender.send((
+                    u64::MAX,
+                    Frame::Broadcast {
+                        doc_id: doc_id.to_string(),
+                        update: update.to_vec(),
+                    },
+                ));
+            }
+        });
+        state
     }
 
     fn channel(&self, doc_id: &str) -> Fanout {
@@ -148,7 +174,10 @@ impl SyncState {
 }
 
 pub async fn handler(ws: WebSocketUpgrade, State(state): State<SyncState>) -> Response {
-    ws.on_upgrade(move |socket| connection(socket, state))
+    // A browser closes the connection unless the server names one of the
+    // subprotocols it offered, and the token rides in as one of them.
+    ws.protocols(["polar.v1"])
+        .on_upgrade(move |socket| connection(socket, state))
 }
 
 async fn connection(mut socket: WebSocket, state: SyncState) {

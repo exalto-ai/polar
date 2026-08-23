@@ -62,8 +62,18 @@ impl Node {
         self
     }
 
+    /// Read an integer attribute, however it was encoded.
+    ///
+    /// y-prosemirror writes numeric attributes as JavaScript numbers, which
+    /// cross as floats — and `as_i64` returns `None` for a float, so a heading
+    /// written in the editor silently read back as level 1. Some clients send
+    /// them as strings too. The document model should not care which.
     pub fn attr_i64(&self, key: &str) -> Option<i64> {
-        self.attrs.get(key)?.as_i64()
+        let value = self.attrs.get(key)?;
+        value
+            .as_i64()
+            .or_else(|| value.as_f64().map(|f| f as i64))
+            .or_else(|| value.as_str()?.parse().ok())
     }
 
     pub fn attr_str(&self, key: &str) -> Option<&str> {
@@ -235,6 +245,21 @@ mod tests {
             assert!(s.mark(kind).is_some(), "missing mark {kind}");
         }
         assert!(s.node("codeBlock").unwrap().code);
+    }
+
+    /// The shape y-prosemirror actually sends. A float `level` read back as
+    /// `None` turned every heading written in the editor into an h1.
+    #[test]
+    fn integer_attrs_survive_however_they_were_encoded() {
+        let cases = [
+            serde_json::json!(2),
+            serde_json::json!(2.0),
+            serde_json::json!("2"),
+        ];
+        for value in cases {
+            let node = Node::element("heading", vec![]).with_attr("level", value.clone());
+            assert_eq!(node.attr_i64("level"), Some(2), "failed for {value}");
+        }
     }
 
     #[test]

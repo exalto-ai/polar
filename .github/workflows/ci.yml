@@ -52,3 +52,4 @@ jobs:
 
       - run: npm ci --prefix app
       - run: npm run schema:check --prefix app
+      - run: npx --prefix app tsc --noEmit
