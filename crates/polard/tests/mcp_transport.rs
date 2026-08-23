@@ -56,6 +56,7 @@ fn start() -> Daemon {
 }
 
 struct Client {
+    agent: ureq::Agent,
     url: String,
     token: String,
     session: Option<String>,
@@ -73,7 +74,9 @@ impl Client {
             body["id"] = self.id.into();
         }
 
-        let mut req = ureq::post(&self.url)
+        let mut req = self
+            .agent
+            .post(&self.url)
             .header("Authorization", &format!("Bearer {}", self.token))
             .header("Accept", "application/json, text/event-stream");
         if let Some(session) = &self.session {
@@ -119,6 +122,14 @@ impl Client {
 
     fn connect(daemon: &Daemon) -> Client {
         let mut client = Client {
+            // No idle pooling: a keep-alive socket the server has since closed
+            // fails on write with ECONNRESET, which would read as a product bug
+            // rather than the transport artefact it is.
+            agent: ureq::Agent::new_with_config(
+                ureq::Agent::config_builder()
+                    .max_idle_connections(0)
+                    .build(),
+            ),
             url: daemon.url.clone(),
             token: daemon.token.clone(),
             session: None,

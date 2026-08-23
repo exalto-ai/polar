@@ -114,11 +114,32 @@ fn spawn() -> Result<Daemon, Box<dyn std::error::Error>> {
 }
 
 /// One JSON-RPC message across, one response back.
+///
+/// Retries once on a *transport* failure. The shim idles between messages —
+/// often for minutes while a person thinks — and an idle keep-alive connection
+/// gets closed by the server; the pooled socket then fails on write with
+/// ECONNRESET. Retrying an HTTP error status would be wrong, but a connection
+/// that died while idle has not delivered anything to retry.
 fn forward(
     daemon: &Daemon,
     body: &str,
     session: &mut Option<String>,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    match send_once(daemon, body, session) {
+        Err(e) if is_transport_failure(&e) => Ok(send_once(daemon, body, session)?),
+        other => Ok(other?),
+    }
+}
+
+fn is_transport_failure(error: &ureq::Error) -> bool {
+    matches!(error, ureq::Error::ConnectionFailed | ureq::Error::Io(_))
+}
+
+fn send_once(
+    daemon: &Daemon,
+    body: &str,
+    session: &mut Option<String>,
+) -> Result<Option<String>, ureq::Error> {
     let mut request = ureq::post(&daemon.url)
         .header("Authorization", &format!("Bearer {}", daemon.token))
         .header("Content-Type", "application/json")
@@ -130,8 +151,9 @@ fn forward(
     let mut response = request.send(body)?;
     if session.is_none()
         && let Some(id) = response.headers().get("mcp-session-id")
+        && let Ok(id) = id.to_str()
     {
-        *session = Some(id.to_str()?.to_string());
+        *session = Some(id.to_string());
     }
 
     let raw = response.body_mut().read_to_string()?;
