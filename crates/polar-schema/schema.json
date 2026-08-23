@@ -19,6 +19,12 @@
     },
     "listItem": { "content": "paragraph block*", "md": "list_item" },
     "horizontalRule": { "group": "block", "md": "hr" },
+    "table": { "group": "block", "content": "tableRow+", "md": "table" },
+    "tableRow": { "content": "tableCell+" },
+    "tableCell": {
+      "content": "inline*",
+      "attrs": { "header": { "default": false } }
+    },
     "text": { "group": "inline" }
   },
   "marks": {
