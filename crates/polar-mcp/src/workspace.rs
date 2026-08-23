@@ -5,7 +5,7 @@ use polar_schema::{Node, Schema, normalize};
 use polar_store::{Actor, Origin, Store};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// The caller, as asserted by the MCP session. Not authenticated (AD-6) — this
 /// is identity so that attribution and per-run revert have something to key on.
@@ -159,10 +159,17 @@ const SNAPSHOT_EVERY: i64 = 200;
 struct Inner {
     store: Store,
     docs: HashMap<String, Document>,
+    /// Deltas committed under the current lock, drained and delivered to the
+    /// observer once it is released — user code must not run under our mutex.
+    pending: Vec<(String, Vec<u8>)>,
 }
+
+/// Notified of every committed change, whatever wrote it.
+type Observer = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
 
 pub struct Workspace {
     inner: Mutex<Inner>,
+    observer: Mutex<Option<Observer>>,
 }
 
 impl Workspace {
@@ -171,7 +178,9 @@ impl Workspace {
             inner: Mutex::new(Inner {
                 store: Store::open(path)?,
                 docs: HashMap::new(),
+                pending: Vec::new(),
             }),
+            observer: Mutex::new(None),
         })
     }
 
@@ -180,12 +189,42 @@ impl Workspace {
             inner: Mutex::new(Inner {
                 store: Store::open_in_memory()?,
                 docs: HashMap::new(),
+                pending: Vec::new(),
             }),
+            observer: Mutex::new(None),
         })
     }
 
+    /// Watch every committed change, whatever produced it.
+    ///
+    /// The daemon has one change stream: an agent editing over MCP and a window
+    /// typing over the sync socket must both reach every other peer. Wiring the
+    /// fan-out to the socket alone left MCP edits invisible to an open editor —
+    /// which is most of what makes this app worth building.
+    pub fn observe(&self, observer: impl Fn(&str, &[u8]) + Send + Sync + 'static) {
+        *self.observer.lock().expect("observer mutex poisoned") = Some(Arc::new(observer));
+    }
+
     fn with<T>(&self, f: impl FnOnce(&mut Inner) -> T) -> T {
-        f(&mut self.inner.lock().expect("workspace mutex poisoned"))
+        let (result, pending) = {
+            let mut inner = self.inner.lock().expect("workspace mutex poisoned");
+            let result = f(&mut inner);
+            (result, std::mem::take(&mut inner.pending))
+        };
+        // Deliberately outside the lock: an observer that re-entered the
+        // workspace would deadlock.
+        if !pending.is_empty()
+            && let Some(observer) = self
+                .observer
+                .lock()
+                .expect("observer mutex poisoned")
+                .clone()
+        {
+            for (doc_id, delta) in pending {
+                observer(&doc_id, &delta);
+            }
+        }
+        result
     }
 
     pub fn create_document(
@@ -536,6 +575,7 @@ impl Inner {
             actor.origin(),
             actor.session_id.as_deref(),
         )?;
+        self.pending.push((doc_id.to_string(), delta.clone()));
 
         let (markdown, _) = to_markdown_with_spans(&tree);
         // Reindexed on every mutation, not on snapshot as M1.4 first said.

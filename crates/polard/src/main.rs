@@ -16,7 +16,7 @@ use polard::sync;
 
 use polard::discovery;
 
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use polar_mcp::Workspace;
@@ -60,16 +60,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Any local process can reach a loopback port, and documents are
                     // the user's private writing. Possession of the 0600 discovery
                     // file is the grant.
-                    let presented = req
-                        .headers()
+                    let headers = req.headers();
+                    let bearer = headers
                         .get(axum::http::header::AUTHORIZATION)
                         .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.strip_prefix("Bearer "));
-                    match presented {
+                        .and_then(|v| v.strip_prefix("Bearer "))
+                        .map(str::to_string);
+
+                    // The browser WebSocket API cannot set headers, and a token
+                    // in the URL would reach logs and history. Carry it as a
+                    // subprotocol instead: header-borne, never part of the URL.
+                    let subprotocol = headers
+                        .get("sec-websocket-protocol")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| {
+                            v.split(',')
+                                .map(str::trim)
+                                .find_map(|p| p.strip_prefix("polar.token."))
+                        })
+                        .map(str::to_string);
+
+                    match bearer.or(subprotocol) {
                         Some(t) if t == expected => Ok::<Response, StatusCode>(next.run(req).await),
                         _ => Err(StatusCode::UNAUTHORIZED),
                     }
                 }
+            },
+        ))
+        // CORS, outermost so it runs before auth.
+        //
+        // The webview is cross-origin whichever way it loads — tauri://localhost
+        // in a build, http://localhost:1420 in dev — so without this the window
+        // cannot call its own daemon. Preflight must be answered *before* the
+        // auth layer, because a preflight request carries no Authorization
+        // header and would otherwise be rejected as unauthenticated.
+        //
+        // Only loopback and the Tauri scheme are echoed back, and every real
+        // request still needs the bearer token, so a page on the open web can
+        // neither read a response nor authenticate one.
+        .layer(middleware::from_fn(
+            |req: Request<axum::body::Body>, next: Next| async move {
+                let origin = req
+                    .headers()
+                    .get(axum::http::header::ORIGIN)
+                    .and_then(|v| v.to_str().ok())
+                    .filter(|o| {
+                        *o == "tauri://localhost"
+                            || o.starts_with("http://localhost:")
+                            || o.starts_with("http://127.0.0.1:")
+                    })
+                    .map(str::to_string);
+
+                let mut response = if req.method() == Method::OPTIONS {
+                    Response::new(axum::body::Body::empty())
+                } else {
+                    next.run(req).await
+                };
+
+                if let Some(origin) = origin
+                    && let Ok(value) = HeaderValue::from_str(&origin)
+                {
+                    let headers = response.headers_mut();
+                    headers.insert("access-control-allow-origin", value);
+                    headers.insert(
+                        "access-control-allow-headers",
+                        HeaderValue::from_static("authorization, content-type, mcp-session-id"),
+                    );
+                    headers.insert(
+                        "access-control-allow-methods",
+                        HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+                    );
+                    headers.insert(
+                        "access-control-expose-headers",
+                        HeaderValue::from_static("mcp-session-id"),
+                    );
+                }
+                response
             },
         ));
 
