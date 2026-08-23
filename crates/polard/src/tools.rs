@@ -107,6 +107,21 @@ pub struct DeleteBlockParams {
     pub caller: Caller,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ReplaceTextParams {
+    pub doc_id: String,
+    pub block_id: String,
+    pub find: String,
+    pub replace: String,
+    /// 1-based. Omit to replace every match.
+    #[serde(default)]
+    pub occurrence: Option<usize>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(flatten)]
+    pub caller: Caller,
+}
+
 #[tool_router(server_handler)]
 impl Polar {
     pub fn new(workspace: Arc<Workspace>) -> Self {
@@ -190,6 +205,30 @@ impl Polar {
                 &p.doc_id,
                 &position,
                 &p.markdown,
+                p.version.as_deref(),
+                &p.caller.actor(),
+            )
+            .map_err(failed)?;
+        Ok(Json(serde_json::to_value(out).map_err(failed)?))
+    }
+
+    #[tool(
+        description = "Find and replace within one block. `find` matches the block's markdown \
+                       (what read_document returned), so include any emphasis syntax. Omit \
+                       `occurrence` to replace every match, or pass a 1-based index."
+    )]
+    fn replace_text(
+        &self,
+        Parameters(p): Parameters<ReplaceTextParams>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let out = self
+            .workspace
+            .replace_text(
+                &p.doc_id,
+                &p.block_id,
+                &p.find,
+                &p.replace,
+                p.occurrence,
                 p.version.as_deref(),
                 &p.caller.actor(),
             )

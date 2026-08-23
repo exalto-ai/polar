@@ -203,6 +203,21 @@ impl Document {
         Ok(())
     }
 
+    /// One block as a ProseMirror node, or `None` if it no longer exists.
+    pub fn block(&self, id: &str) -> Option<Node> {
+        let fragment = self.fragment_ref();
+        let txn = self.transact();
+        let (_, element) = self.find(&txn, &fragment, id)?;
+        let mut node = Node::element(element.tag().as_ref(), tree::read_children(&txn, &element));
+        for (key, value) in element.attributes(&txn) {
+            if let yrs::Out::Any(any) = value {
+                node.attrs
+                    .insert(key.to_string(), crate::convert::any_to_json(&any));
+            }
+        }
+        Some(node)
+    }
+
     /// The plain text of a block, ignoring marks.
     pub fn block_text(&self, id: &str) -> Result<String, BlockError> {
         let fragment = self.fragment_ref();

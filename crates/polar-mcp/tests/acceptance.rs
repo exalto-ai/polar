@@ -211,3 +211,71 @@ fn search_reflects_edits_immediately() {
     assert_eq!(hits.len(), 1, "the index must not lag the edit");
     assert_eq!(hits[0].doc_id, created.doc_id);
 }
+
+/// `replace_text` matches the block's markdown, because markdown is what the
+/// agent read. Matching against rendered text it never saw would make failures
+/// inexplicable.
+#[test]
+fn replace_text_edits_within_a_block() {
+    let ws = Workspace::open_in_memory().unwrap();
+    let agent = agent();
+    let created = ws.create_document("Notes", &agent).unwrap();
+    let block = created.blocks[0].block_id.clone();
+
+    ws.replace_block(
+        &created.doc_id,
+        &block,
+        "ship on Tuesday, review on Tuesday",
+        None,
+        &agent,
+    )
+    .unwrap();
+    let block = ws.read_document(&created.doc_id).unwrap().blocks[0]
+        .block_id
+        .clone();
+
+    // Targeting one occurrence leaves the others alone.
+    ws.replace_text(
+        &created.doc_id,
+        &block,
+        "Tuesday",
+        "Thursday",
+        Some(2),
+        None,
+        &agent,
+    )
+    .unwrap();
+    let md = ws.read_document(&created.doc_id).unwrap().markdown;
+    assert_eq!(md, "ship on Tuesday, review on Thursday");
+
+    // Omitting the occurrence replaces every match.
+    let block = ws.read_document(&created.doc_id).unwrap().blocks[0]
+        .block_id
+        .clone();
+    ws.replace_text(&created.doc_id, &block, "on", "before", None, None, &agent)
+        .unwrap();
+    assert_eq!(
+        ws.read_document(&created.doc_id).unwrap().markdown,
+        "ship before Tuesday, review before Thursday"
+    );
+
+    // A miss is reported rather than silently doing nothing, which would leave
+    // an agent believing it had made an edit.
+    let block = ws.read_document(&created.doc_id).unwrap().blocks[0]
+        .block_id
+        .clone();
+    let missing = ws.replace_text(&created.doc_id, &block, "Saturday", "x", None, None, &agent);
+    assert!(missing.is_err());
+    assert!(format!("{}", missing.unwrap_err()).contains("does not appear"));
+
+    let past_end = ws.replace_text(
+        &created.doc_id,
+        &block,
+        "before",
+        "x",
+        Some(9),
+        None,
+        &agent,
+    );
+    assert!(past_end.is_err());
+}
