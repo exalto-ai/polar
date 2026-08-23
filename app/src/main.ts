@@ -7,6 +7,7 @@ import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { Editor } from "@tiptap/core";
 import { createEditor } from "./editor";
+import { ACCEL_LABEL, accel, relabelShortcutHints } from "./keys";
 import { Mcp, type DocumentSummary } from "./mcp";
 import { colorFor, playfulName, seedFrom } from "./names";
 import { installProvenanceRails, type Rails } from "./provenance";
@@ -402,8 +403,8 @@ function renderResults() {
     const empty = document.createElement("li");
     empty.className = "empty";
     empty.textContent = els.input.value
-      ? "No matches — ⌘↵ to create"
-      : "No documents yet — ⌘↵ to create";
+      ? `No matches — ${ACCEL_LABEL}↵ to create`
+      : `No documents yet — ${ACCEL_LABEL}↵ to create`;
     els.results.replaceChildren(empty);
   }
 }
@@ -470,12 +471,12 @@ async function createFromQuery() {
 // ---------------------------------------------------------------- keys
 
 document.addEventListener("keydown", (event) => {
-  if (event.metaKey && event.key.toLowerCase() === "n") {
+  if (accel(event) && event.key.toLowerCase() === "n") {
     event.preventDefault();
     void invoke("new_window");
     return;
   }
-  if (event.metaKey && event.key.toLowerCase() === "k") {
+  if (accel(event) && event.key.toLowerCase() === "k") {
     event.preventDefault();
     els.scrim.hidden ? openSwitcher() : closeSwitcher();
     return;
@@ -485,10 +486,10 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     event.preventDefault();
     closeSwitcher();
-  } else if (event.key === "Backspace" && event.metaKey) {
+  } else if (event.key === "Backspace" && accel(event)) {
     event.preventDefault();
     void trashSelected();
-  } else if (event.key === "Enter" && event.metaKey) {
+  } else if (event.key === "Enter" && accel(event)) {
     event.preventDefault();
     void createFromQuery();
   } else if (event.key === "Enter") {
@@ -520,6 +521,7 @@ async function loadConnection(): Promise<Connection> {
 }
 
 async function boot() {
+  relabelShortcutHints();
   connection = await loadConnection();
   mcp = new Mcp(connection.mcp_url, connection.token);
   els.stdioCommand.textContent = connection.stdio_command;

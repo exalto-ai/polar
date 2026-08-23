@@ -11,7 +11,15 @@ fn support_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    Path::new(&home).join("Library/Application Support/ai.exalto.polar")
+    #[cfg(target_os = "macos")]
+    return Path::new(&home).join("Library/Application Support/ai.exalto.polar");
+    // Everywhere else, the XDG data directory. A macOS-shaped path under a
+    // Linux `$HOME` would work and would still be the wrong place to look.
+    #[cfg(not(target_os = "macos"))]
+    return std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| Path::new(&home).join(".local/share"))
+        .join("polar");
 }
 
 pub fn default_db_path() -> PathBuf {
