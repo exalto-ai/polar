@@ -8,9 +8,16 @@ python3 scripts/make-icon.py
 npx tauri icon ../assets/icon.png   # from app/
 ```
 
-The mark is the caret the editor draws — thin bar, round cap — sitting in a gap
-in a paragraph. The product is a cursor several people and several agents
-share, so the icon is that cursor rather than a page or a pen. It is drawn by
-`scripts/make-icon.py`, at a size where the caret survives being shrunk to 32px:
-it is the only saturated shape, and the text lines are quiet enough to read as
-texture rather than competing with it.
+The mark is Orbit, coin cut: a disc of Polar Blue with a ring and one radial arm
+knocked out of it. It is a point in polar coordinates — the document at the
+centre, and every client a different bearing on it. Because the mark is cut out
+rather than drawn on, the tile's own gradient shows through it, and the disc is
+the only saturated shape.
+
+It is drawn by `scripts/make-icon.py` on the same 96 × 96 field as
+`orbit/*.svg`, scaled up, so the icon and the vectors cannot drift apart. The
+tile takes the dark-ground accent (`#6ea1ff`), because the tile is dark. See
+[`../DESIGN.md`](../DESIGN.md).
+
+`orbit/` holds the four cuts of the mark for use outside the app — one per
+ground, all the same geometry.
