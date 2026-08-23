@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/polar-schema", "crates/polar-markdown", "crates/polar-testkit", "crates/polar-core", "crates/polar-store"]
+members = ["crates/polar-schema", "crates/polar-markdown", "crates/polar-testkit", "crates/polar-core", "crates/polar-store", "crates/polar-mcp"]
 # Throwaway risk probes, deliberately outside the workspace: they pin their own
 # deps and must not gate the build.
 exclude = ["prototypes/yrs-check", "prototypes/editor-probe/src-tauri"]
@@ -14,5 +14,7 @@ license = "MIT"
 polar-schema = { path = "crates/polar-schema" }
 polar-testkit = { path = "crates/polar-testkit" }
 polar-core = { path = "crates/polar-core" }
+polar-markdown = { path = "crates/polar-markdown" }
+polar-store = { path = "crates/polar-store" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
