@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Polar — WKWebView editor probe</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">
+        <span class="dot"></span>
+        <h1>Editor probe</h1>
+        <span class="sub">AD-8 · can WKWebView host a collaborative ProseMirror?</span>
+      </div>
+      <div class="engine" id="engine">detecting…</div>
+    </header>
+
+    <section class="controls">
+      <label class="ctl">
+        <span>Link latency <b id="lat-val">120</b>ms</span>
+        <input type="range" id="latency" min="0" max="1200" step="20" value="120" />
+      </label>
+      <button id="offline" class="toggle">Go offline</button>
+      <span class="queued" id="queued">0 queued</span>
+      <div class="spacer"></div>
+      <label class="ctl inline">
+        <span>Agent ops</span>
+        <select id="ops">
+          <option value="1">1</option>
+          <option value="10" selected>10</option>
+          <option value="50">50</option>
+          <option value="200">200</option>
+        </select>
+      </label>
+      <button id="burst" class="primary">Run agent burst</button>
+      <button id="selftest-run">Self-test</button>
+      <button id="reset">Reset</button>
+    </section>
+
+    <section class="metrics" id="metrics"></section>
+    <section class="selftest" id="selftest" hidden></section>
+
+    <main class="panes">
+      <div class="pane">
+        <div class="pane-head"><span class="who you">You</span><span class="hint">type here — try IME, ⌘Z, <code>## </code>, <code>- </code></span></div>
+        <div id="editor-a" class="editor"></div>
+      </div>
+      <div class="pane">
+        <div class="pane-head"><span class="who peer">Peer</span><span class="hint">a second replica · agent writes land here</span></div>
+        <div id="editor-b" class="editor"></div>
+      </div>
+    </main>
+
+    <section class="lower">
+      <div class="logwrap">
+        <div class="lower-head">Event log <button id="clear" class="mini">clear</button></div>
+        <div id="log" class="log"></div>
+      </div>
+      <div class="checklist">
+        <div class="lower-head">Manual passes</div>
+        <ol id="checks">
+          <li><b>IME under load.</b> Switch to Japanese/Pinyin. Start a long composition, then hit <i>Run agent burst</i> mid-composition. Does the candidate window survive?</li>
+          <li><b>Caret stability.</b> Put the caret mid-paragraph, burst 50 ops. Does it hold position or jump to the end?</li>
+          <li><b>Offline divergence.</b> Go offline, edit both panes heavily, come back online. Is the merge structurally valid?</li>
+          <li><b>Undo scoping.</b> Type, let the agent edit, press ⌘Z. Does it undo only your text?</li>
+          <li><b>Input rules.</b> Type <code>## </code>, <code>- </code>, <code>&gt; </code>, <code>```</code> at 1200ms latency with a burst running.</li>
+          <li><b>Selection at boundaries.</b> Shift-arrow across a block edge while remote edits land.</li>
+        </ol>
+      </div>
+    </section>
+  </body>
+</html>
