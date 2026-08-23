@@ -136,93 +136,44 @@ impl From<BlockError> for WorkspaceError {
 /// Compact updates into a snapshot after this many, per AD-13.
 const SNAPSHOT_EVERY: i64 = 200;
 
-pub struct Workspace {
+/// Store and document cache live under **one** mutex rather than two.
+///
+/// `rusqlite::Connection` is `Send` but not `Sync`, so the store needs a lock
+/// regardless. Two locks would then need a global ordering — and the natural
+/// call shapes disagree about it: reading a document goes cache-then-store
+/// while creating one goes store-then-cache. One lock removes the question.
+/// It also matches M1.4: the daemon owns the document, so there is no
+/// concurrency here worth designing around.
+struct Inner {
     store: Store,
-    docs: Mutex<HashMap<String, Document>>,
+    docs: HashMap<String, Document>,
+}
+
+pub struct Workspace {
+    inner: Mutex<Inner>,
 }
 
 impl Workspace {
     pub fn open(path: impl AsRef<Path>) -> Result<Workspace, WorkspaceError> {
         Ok(Workspace {
-            store: Store::open(path)?,
-            docs: Mutex::new(HashMap::new()),
+            inner: Mutex::new(Inner {
+                store: Store::open(path)?,
+                docs: HashMap::new(),
+            }),
         })
     }
 
     pub fn open_in_memory() -> Result<Workspace, WorkspaceError> {
         Ok(Workspace {
-            store: Store::open_in_memory()?,
-            docs: Mutex::new(HashMap::new()),
+            inner: Mutex::new(Inner {
+                store: Store::open_in_memory()?,
+                docs: HashMap::new(),
+            }),
         })
     }
 
-    fn with_doc<T>(
-        &self,
-        doc_id: &str,
-        f: impl FnOnce(&Document) -> T,
-    ) -> Result<T, WorkspaceError> {
-        let mut docs = self.docs.lock().expect("workspace mutex poisoned");
-        if !docs.contains_key(doc_id) {
-            // Lazy load: documents are hydrated on first touch, not at boot.
-            let restored = self.store.restore(doc_id)?;
-            if restored.snapshot.is_none() && restored.updates.is_empty() {
-                return Err(WorkspaceError::NoSuchDocument(doc_id.to_string()));
-            }
-            let doc = Document::new();
-            if let Some(state) = &restored.snapshot {
-                let _ = doc.apply_update(state);
-            }
-            for update in &restored.updates {
-                let _ = doc.apply_update(update);
-            }
-            docs.insert(doc_id.to_string(), doc);
-        }
-        Ok(f(docs.get(doc_id).expect("just inserted")))
-    }
-
-    fn register(&self, actor: &ActorRef) -> Result<(), WorkspaceError> {
-        self.store.upsert_actor(&Actor {
-            id: actor.id.clone(),
-            kind: actor.kind.clone(),
-            display_name: actor.display_name.clone(),
-            model: actor.model.clone(),
-            color: color_for(&actor.id),
-        })?;
-        Ok(())
-    }
-
-    /// Persist everything written since `before`, then keep the derived state
-    /// (search index, denormalized title) in step.
-    fn commit(
-        &self,
-        doc_id: &str,
-        doc: &Document,
-        before: &[u8],
-        actor: &ActorRef,
-    ) -> Result<String, WorkspaceError> {
-        let delta = doc.diff_since(before);
-        let seq = self.store.append_update(
-            doc_id,
-            &delta,
-            &actor.id,
-            actor.origin(),
-            actor.session_id.as_deref(),
-        )?;
-
-        let tree = normalize(&doc.read());
-        let (markdown, _) = to_markdown_with_spans(&tree);
-        // Reindexed on every mutation, not on snapshot as the ADR first said.
-        // Serializing a document and writing two rows is cheap; agents reading
-        // a stale index is not, and search is how they avoid reading every
-        // document.
-        self.store
-            .reindex(doc_id, &derive_title(&tree), &markdown)?;
-
-        if self.store.updates_since_snapshot(doc_id)? >= SNAPSHOT_EVERY {
-            self.store
-                .write_snapshot(doc_id, seq, &doc.encode_state(), &doc.state_vector())?;
-        }
-        Ok(encode_version(&doc.state_vector()))
+    fn with<T>(&self, f: impl FnOnce(&mut Inner) -> T) -> T {
+        f(&mut self.inner.lock().expect("workspace mutex poisoned"))
     }
 
     pub fn create_document(
@@ -230,126 +181,93 @@ impl Workspace {
         title: &str,
         actor: &ActorRef,
     ) -> Result<DocumentView, WorkspaceError> {
-        self.register(actor)?;
-        let doc_id = uuid::Uuid::now_v7().to_string();
-        self.store.create_document(&doc_id, title)?;
+        let doc_id = self.with(|inner| -> Result<String, WorkspaceError> {
+            inner.register(actor)?;
+            let doc_id = uuid::Uuid::now_v7().to_string();
+            inner.store.create_document(&doc_id, title)?;
 
-        let doc = Document::new();
-        let seed = normalize(&Node::element(
-            "doc",
-            vec![Node::element("paragraph", vec![])],
-        ));
-        doc.set_document(&seed);
-
-        self.store.append_update(
-            &doc_id,
-            &doc.encode_state(),
-            &actor.id,
-            actor.origin(),
-            actor.session_id.as_deref(),
-        )?;
-        self.store.reindex(&doc_id, title, "")?;
-        self.docs
-            .lock()
-            .expect("workspace mutex poisoned")
-            .insert(doc_id.clone(), doc);
-
+            let doc = Document::new();
+            doc.set_document(&normalize(&Node::element(
+                "doc",
+                vec![Node::element("paragraph", vec![])],
+            )));
+            inner.store.append_update(
+                &doc_id,
+                &doc.encode_state(),
+                &actor.id,
+                actor.origin(),
+                actor.session_id.as_deref(),
+            )?;
+            inner.store.reindex(&doc_id, title, "")?;
+            inner.docs.insert(doc_id.clone(), doc);
+            Ok(doc_id)
+        })?;
         self.read_document(&doc_id)
     }
 
     pub fn read_document(&self, doc_id: &str) -> Result<DocumentView, WorkspaceError> {
-        let (tree, refs, version) = self.with_doc(doc_id, |doc| {
-            (
-                normalize(&doc.read()),
-                doc.blocks(),
-                encode_version(&doc.state_vector()),
-            )
-        })?;
-
-        let (markdown, spans) = to_markdown_with_spans(&tree);
-        let blocks = refs
-            .iter()
-            .enumerate()
-            .map(|(i, r)| BlockSpan {
-                block_id: r.block_id.clone(),
-                kind: r.kind.clone(),
-                line_start: spans.get(i).map(|s| s.0).unwrap_or(0),
-                line_end: spans.get(i).map(|s| s.1).unwrap_or(0),
+        self.with(|inner| {
+            let doc = inner.doc(doc_id)?;
+            let tree = normalize(&doc.read());
+            let refs = doc.blocks();
+            let version = encode_version(&doc.state_vector());
+            let (markdown, spans) = to_markdown_with_spans(&tree);
+            let blocks = refs
+                .iter()
+                .enumerate()
+                .map(|(i, r)| BlockSpan {
+                    block_id: r.block_id.clone(),
+                    kind: r.kind.clone(),
+                    line_start: spans.get(i).map(|s| s.0).unwrap_or(0),
+                    line_end: spans.get(i).map(|s| s.1).unwrap_or(0),
+                })
+                .collect();
+            Ok(DocumentView {
+                doc_id: doc_id.to_string(),
+                title: derive_title(&tree),
+                markdown,
+                version,
+                blocks,
             })
-            .collect();
-
-        Ok(DocumentView {
-            doc_id: doc_id.to_string(),
-            title: derive_title(&tree),
-            markdown,
-            version,
-            blocks,
         })
     }
 
     pub fn list_documents(&self, limit: usize) -> Result<Vec<DocumentSummary>, WorkspaceError> {
-        Ok(self
-            .store
-            .list_documents()?
-            .into_iter()
-            .take(limit)
-            .map(|row| DocumentSummary {
-                doc_id: row.id,
-                title: row.title,
-                updated_at: row.updated_at,
-                word_count: 0,
-            })
-            .collect())
+        self.with(|inner| {
+            Ok(inner
+                .store
+                .list_documents()?
+                .into_iter()
+                .take(limit)
+                .map(|row| DocumentSummary {
+                    doc_id: row.id,
+                    title: row.title,
+                    updated_at: row.updated_at,
+                    word_count: 0,
+                })
+                .collect())
+        })
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, WorkspaceError> {
-        let titles: HashMap<String, String> = self
-            .store
-            .list_documents()?
-            .into_iter()
-            .map(|d| (d.id, d.title))
-            .collect();
-        Ok(self
-            .store
-            .search(query, limit)?
-            .into_iter()
-            .map(|(doc_id, snippet)| SearchHit {
-                title: titles.get(&doc_id).cloned().unwrap_or_default(),
-                doc_id,
-                snippet,
-            })
-            .collect())
-    }
-
-    /// A stale `version` **warns and proceeds**.
-    ///
-    /// The CRDT merges correctly regardless, so a stale read is not a conflict —
-    /// it is a semantic risk that the agent reasoned about text which has since
-    /// moved. Failing the call would punish the agent for something that is not
-    /// an error and push callers toward re-reading the whole document, which is
-    /// exactly the whole-document traffic AD-5 exists to prevent.
-    fn staleness(&self, doc: &Document, version: Option<&str>) -> Vec<String> {
-        let Some(version) = version else {
-            return vec![];
-        };
-        let Some(seen) = decode_version(version) else {
-            return vec!["unreadable version token; proceeding".into()];
-        };
-        if doc.diff_since(&seen).len() > 2 {
-            vec!["document changed since you read it; edit applied to the current state".into()]
-        } else {
-            vec![]
-        }
-    }
-
-    fn parse_blocks(&self, markdown: &str) -> Result<Vec<Node>, WorkspaceError> {
-        let parsed = normalize(&from_markdown(markdown));
-        if let Err(errs) = Schema::v0().validate(&parsed) {
-            return Err(WorkspaceError::InvalidMarkdown(
-                errs.iter().map(ToString::to_string).collect(),
-            ));
-        }
-        Ok(parsed.content)
+        self.with(|inner| {
+            let titles: HashMap<String, String> = inner
+                .store
+                .list_documents()?
+                .into_iter()
+                .map(|d| (d.id, d.title))
+                .collect();
+            Ok(inner
+                .store
+                .search(query, limit)?
+                .into_iter()
+                .map(|(doc_id, snippet)| SearchHit {
+                    title: titles.get(&doc_id).cloned().unwrap_or_default(),
+                    doc_id,
+                    snippet,
+                })
+                .collect())
+        })
     }
 
     pub fn replace_block(
@@ -360,35 +278,31 @@ impl Workspace {
         version: Option<&str>,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
-        self.register(actor)?;
-        let nodes = self.parse_blocks(markdown)?;
+        let nodes = parse_blocks(markdown)?;
         let Some(first) = nodes.first() else {
             return Err(WorkspaceError::InvalidMarkdown(vec![
                 "markdown produced no blocks".into(),
             ]));
         };
-
-        let (before, warnings, result) = self.with_doc(doc_id, |doc| {
+        self.with(|inner| {
+            inner.register(actor)?;
+            let doc = inner.doc(doc_id)?;
             let before = doc.state_vector();
-            let warnings = self.staleness(doc, version);
-            let result = doc.replace_block(block_id, first);
-            // Extra blocks in the payload follow the one being replaced, rather
-            // than being silently dropped.
-            if let Ok(ref block) = result
-                && nodes.len() > 1
-            {
-                let _ = doc.insert_blocks(&Position::After(block.block_id.clone()), &nodes[1..]);
-            }
-            (before, warnings, result)
-        })?;
+            let warnings = staleness(doc, version);
 
-        let block = result?;
-        let version = self.with_doc(doc_id, |doc| self.commit(doc_id, doc, &before, actor))??;
-        Ok(EditOutcome {
-            doc_id: doc_id.into(),
-            block_id: Some(block.block_id),
-            version,
-            warnings,
+            let block = doc.replace_block(block_id, first)?;
+            // Extra blocks in the payload follow the one replaced rather than
+            // being silently dropped.
+            if nodes.len() > 1 {
+                doc.insert_blocks(&Position::After(block.block_id.clone()), &nodes[1..])?;
+            }
+            let version = inner.commit(doc_id, &before, actor)?;
+            Ok(EditOutcome {
+                doc_id: doc_id.into(),
+                block_id: Some(block.block_id),
+                version,
+                warnings,
+            })
         })
     }
 
@@ -400,22 +314,20 @@ impl Workspace {
         version: Option<&str>,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
-        self.register(actor)?;
-        let nodes = self.parse_blocks(markdown)?;
-
-        let (before, warnings, result) = self.with_doc(doc_id, |doc| {
+        let nodes = parse_blocks(markdown)?;
+        self.with(|inner| {
+            inner.register(actor)?;
+            let doc = inner.doc(doc_id)?;
             let before = doc.state_vector();
-            let warnings = self.staleness(doc, version);
-            (before, warnings, doc.insert_blocks(after, &nodes))
-        })?;
-
-        let created = result?;
-        let version = self.with_doc(doc_id, |doc| self.commit(doc_id, doc, &before, actor))??;
-        Ok(EditOutcome {
-            doc_id: doc_id.into(),
-            block_id: created.first().map(|b| b.block_id.clone()),
-            version,
-            warnings,
+            let warnings = staleness(doc, version);
+            let created = doc.insert_blocks(after, &nodes)?;
+            let version = inner.commit(doc_id, &before, actor)?;
+            Ok(EditOutcome {
+                doc_id: doc_id.into(),
+                block_id: created.first().map(|b| b.block_id.clone()),
+                version,
+                warnings,
+            })
         })
     }
 
@@ -426,33 +338,139 @@ impl Workspace {
         version: Option<&str>,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
-        self.register(actor)?;
-        let (before, warnings, result) = self.with_doc(doc_id, |doc| {
+        self.with(|inner| {
+            inner.register(actor)?;
+            let doc = inner.doc(doc_id)?;
             let before = doc.state_vector();
-            let warnings = self.staleness(doc, version);
-            (before, warnings, doc.delete_block(block_id))
-        })?;
-        result?;
-        let version = self.with_doc(doc_id, |doc| self.commit(doc_id, doc, &before, actor))??;
-        Ok(EditOutcome {
-            doc_id: doc_id.into(),
-            block_id: None,
-            version,
-            warnings,
+            let warnings = staleness(doc, version);
+            doc.delete_block(block_id)?;
+            let version = inner.commit(doc_id, &before, actor)?;
+            Ok(EditOutcome {
+                doc_id: doc_id.into(),
+                block_id: None,
+                version,
+                warnings,
+            })
         })
     }
 
-    /// Attribution for the whole log, for the activity feed and per-run revert.
+    /// Attribution for the whole log — the activity feed and per-run revert.
     pub fn attribution(
         &self,
         doc_id: &str,
     ) -> Result<Vec<(String, Option<String>)>, WorkspaceError> {
-        Ok(self
-            .store
-            .log(doc_id)?
-            .into_iter()
-            .map(|u| (u.actor_id, u.session_id))
-            .collect())
+        self.with(|inner| {
+            Ok(inner
+                .store
+                .log(doc_id)?
+                .into_iter()
+                .map(|u| (u.actor_id, u.session_id))
+                .collect())
+        })
+    }
+}
+
+impl Inner {
+    fn register(&self, actor: &ActorRef) -> Result<(), WorkspaceError> {
+        self.store.upsert_actor(&Actor {
+            id: actor.id.clone(),
+            kind: actor.kind.clone(),
+            display_name: actor.display_name.clone(),
+            model: actor.model.clone(),
+            color: color_for(&actor.id),
+        })?;
+        Ok(())
+    }
+
+    /// Documents are hydrated on first touch, not at boot.
+    fn doc(&mut self, doc_id: &str) -> Result<&Document, WorkspaceError> {
+        if !self.docs.contains_key(doc_id) {
+            let restored = self.store.restore(doc_id)?;
+            if restored.snapshot.is_none() && restored.updates.is_empty() {
+                return Err(WorkspaceError::NoSuchDocument(doc_id.to_string()));
+            }
+            let doc = Document::new();
+            if let Some(state) = &restored.snapshot {
+                doc.apply_update(state).map_err(|e| {
+                    WorkspaceError::InvalidMarkdown(vec![format!("corrupt snapshot: {e}")])
+                })?;
+            }
+            for update in &restored.updates {
+                doc.apply_update(update).map_err(|e| {
+                    WorkspaceError::InvalidMarkdown(vec![format!("corrupt update: {e}")])
+                })?;
+            }
+            self.docs.insert(doc_id.to_string(), doc);
+        }
+        Ok(self.docs.get(doc_id).expect("just inserted"))
+    }
+
+    /// Persist everything written since `before`, then keep derived state in
+    /// step.
+    fn commit(
+        &mut self,
+        doc_id: &str,
+        before: &[u8],
+        actor: &ActorRef,
+    ) -> Result<String, WorkspaceError> {
+        let doc = self.docs.get(doc_id).expect("document is loaded");
+        let delta = doc.diff_since(before);
+        let tree = normalize(&doc.read());
+        let state = doc.encode_state();
+        let state_vector = doc.state_vector();
+
+        let seq = self.store.append_update(
+            doc_id,
+            &delta,
+            &actor.id,
+            actor.origin(),
+            actor.session_id.as_deref(),
+        )?;
+
+        let (markdown, _) = to_markdown_with_spans(&tree);
+        // Reindexed on every mutation, not on snapshot as M1.4 first said.
+        // Serializing a document and writing two rows is cheap; agents reading
+        // a stale index is not, and search is how they avoid reading every
+        // document.
+        self.store
+            .reindex(doc_id, &derive_title(&tree), &markdown)?;
+
+        if self.store.updates_since_snapshot(doc_id)? >= SNAPSHOT_EVERY {
+            self.store
+                .write_snapshot(doc_id, seq, &state, &state_vector)?;
+        }
+        Ok(encode_version(&state_vector))
+    }
+}
+
+fn parse_blocks(markdown: &str) -> Result<Vec<Node>, WorkspaceError> {
+    let parsed = normalize(&from_markdown(markdown));
+    if let Err(errs) = Schema::v0().validate(&parsed) {
+        return Err(WorkspaceError::InvalidMarkdown(
+            errs.iter().map(ToString::to_string).collect(),
+        ));
+    }
+    Ok(parsed.content)
+}
+
+/// A stale `version` **warns and proceeds**.
+///
+/// The CRDT merges correctly regardless, so a stale read is not a conflict — it
+/// is the semantic risk that the agent reasoned about text which has since
+/// moved. Failing would punish the agent for something that is not an error and
+/// push callers toward re-reading whole documents, which is exactly the traffic
+/// AD-5 exists to prevent.
+fn staleness(doc: &Document, version: Option<&str>) -> Vec<String> {
+    let Some(version) = version else {
+        return vec![];
+    };
+    let Some(seen) = decode_version(version) else {
+        return vec!["unreadable version token; proceeding".into()];
+    };
+    if doc.diff_since(&seen).len() > 2 {
+        vec!["document changed since you read it; edit applied to the current state".into()]
+    } else {
+        vec![]
     }
 }
 

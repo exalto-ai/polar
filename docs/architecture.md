@@ -390,7 +390,11 @@ Part I is decisions. This is the first thing we actually build.
 with no precedent to copy is a Rust daemon serving CRDT documents to agents over MCP with
 stable anchors, so that is where the unknowns are and that is what goes first.
 
-## M1.0 — Acceptance
+## M1.0 — Acceptance — **met 2026-08-23**
+
+All four criteria pass in CI, and `polard` serves them over real MCP. What follows is the
+design as built; corrections found while building it are marked inline.
+
 
 M1 is done when, with no window open anywhere:
 
@@ -557,6 +561,19 @@ but the arrow points the other direction.
 
 ## M1.6 — MCP surface
 
+**Built.** `polar-mcp` holds the tool surface with no transport attached, which is what lets
+M1.0 be tested with no window, no editor and no HTTP; `polard` wires it to `rmcp`'s
+streamable-HTTP server. Corrections found while building:
+
+* **Store and document cache share one mutex.** `rusqlite::Connection` is `Send` but not
+  `Sync`, so the store needs a lock regardless — and two locks would need a global ordering
+  the natural call shapes disagree about (reads go cache-then-store, creates go
+  store-then-cache). One lock removes the question.
+* **`POLAR_HOME`** overrides the store and discovery locations, or a test run publishes
+  itself as *the* daemon and overwrites the real one's port and token.
+* **Reindex on every mutation**, not on snapshot as M1.4 said — serializing a document and
+  writing two rows is cheap, and agents reading a stale index is not.
+
 HTTP on localhost. The port and a token live in
 `~/Library/Application Support/ai.exalto.polar/daemon.json`, mode `0600` — any local
 process can reach a localhost port, and documents are the user's private writing.
@@ -593,8 +610,10 @@ direct writes.
 
 1. ~~Does `yrs` expose branch IDs publicly?~~ **Resolved** — see M1.3. IDs are stable across
    edits and identical across replicas.
-2. **Does the actor identity survive an MCP session cleanly?** An agent reconnecting should
-   be the same actor, or attribution fragments into one actor per connection.
+2. ~~Does the actor identity survive an MCP session cleanly?~~ **Resolved** — identity derives
+   from the client-supplied `agent` name, never the connection, so a reconnecting agent stays
+   one actor. Every write names its caller; there is no anonymous edit path, because an
+   unattributed change cannot appear in the activity feed or be reverted with its run.
 3. ~~Table round-tripping.~~ **Resolved** — tables stay in v0. They round-trip over 20,000
    generated documents under two constraints, both pinned in `table_constraints_are_pinned`:
    tables must be rectangular (GFM pads every row to the header width), and the first row is
