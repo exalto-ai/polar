@@ -216,7 +216,7 @@ async fn connection(mut socket: WebSocket, state: SyncState) {
         .next_peer
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // The window is a human's edit path; agents come in over MCP.
-    let actor = ActorRef::human("editor");
+    let actor = ActorRef::editor();
     let mut subscriptions: Vec<broadcast::Receiver<(u64, Frame)>> = Vec::new();
     let mut senders: HashMap<String, Fanout> = HashMap::new();
 

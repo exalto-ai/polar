@@ -8,6 +8,7 @@
 //! activity feed and per-run revert read it (AD-13).
 
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashSet;
 use std::path::Path;
 
 mod schema;
@@ -73,6 +74,25 @@ pub struct ActorActivity {
     pub color: String,
     pub last_seen: i64,
     pub edits: i64,
+}
+
+/// Who wrote one block, joined to the actor that wrote it.
+///
+/// `created_by` and `touched_by` are separate because they answer different
+/// questions: where the text came from, and who last had a hand in it.
+#[derive(Debug, Clone)]
+pub struct BlockAttribution {
+    pub block_id: String,
+    pub created_by: String,
+    pub created_at: i64,
+    pub touched_by: String,
+    pub touched_at: i64,
+    pub session_id: Option<String>,
+    /// From the actor row for `touched_by` — the rail's colour and label.
+    pub kind: String,
+    pub display_name: String,
+    pub model: Option<String>,
+    pub color: String,
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +352,88 @@ impl Store {
                     color: row.get(4)?,
                     last_seen: row.get(5)?,
                     edits: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Record that `actor_id` touched `block_id`. First touch also sets
+    /// `created_by`, and later ones deliberately leave it alone.
+    pub fn touch_block(
+        &self,
+        doc_id: &str,
+        block_id: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        at: i64,
+    ) -> Result<(), SqlError> {
+        self.conn.execute(
+            "INSERT INTO block_provenance
+                 (doc_id, block_id, created_by, created_at, touched_by, touched_at, session_id)
+             VALUES (?1, ?2, ?3, ?5, ?3, ?5, ?4)
+             ON CONFLICT(doc_id, block_id) DO UPDATE SET touched_by = excluded.touched_by,
+                                                         touched_at = excluded.touched_at,
+                                                         session_id = excluded.session_id",
+            params![doc_id, block_id, actor_id, session_id, at],
+        )?;
+        Ok(())
+    }
+
+    /// Drop rows for blocks that no longer exist, so the table tracks the
+    /// document rather than growing with every paragraph ever deleted.
+    ///
+    /// Reads the current ids and deletes the difference rather than building an
+    /// `IN (...)` list: block ids are interpolated from document content, and
+    /// SQL assembled by string concatenation is how that becomes an injection.
+    pub fn forget_blocks(&self, doc_id: &str, keep: &HashSet<String>) -> Result<(), SqlError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT block_id FROM block_provenance WHERE doc_id = ?1")?;
+        let present = stmt
+            .query_map(params![doc_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for block_id in present.iter().filter(|id| !keep.contains(*id)) {
+            self.conn.execute(
+                "DELETE FROM block_provenance WHERE doc_id = ?1 AND block_id = ?2",
+                params![doc_id, block_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// True once a document has been attributed, so the rebuild-by-replay path
+    /// runs once per document rather than on every hydration.
+    pub fn has_provenance(&self, doc_id: &str) -> Result<bool, SqlError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM block_provenance WHERE doc_id = ?1",
+            params![doc_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Every attributed block in a document, joined to whoever last touched it.
+    pub fn provenance_for_document(&self, doc_id: &str) -> Result<Vec<BlockAttribution>, SqlError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.block_id, p.created_by, p.created_at, p.touched_by, p.touched_at,
+                    p.session_id, a.kind, a.display_name, a.model, a.color
+             FROM block_provenance p JOIN actors a ON a.id = p.touched_by
+             WHERE p.doc_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![doc_id], |row| {
+                Ok(BlockAttribution {
+                    block_id: row.get(0)?,
+                    created_by: row.get(1)?,
+                    created_at: row.get(2)?,
+                    touched_by: row.get(3)?,
+                    touched_at: row.get(4)?,
+                    session_id: row.get(5)?,
+                    kind: row.get(6)?,
+                    display_name: row.get(7)?,
+                    model: row.get(8)?,
+                    color: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

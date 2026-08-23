@@ -5,6 +5,16 @@
  * The switcher searches through the daemon's `search` tool, the same one agents
  * use, so there is one search implementation rather than two that disagree.
  */
+/**
+ * The window, when it calls a tool that writes.
+ *
+ * `kind: "human"` matters: creating a document goes through the agent tool
+ * surface, but a document the user just made is not an agent's work, and
+ * attributing it to one would put an agent's rail beside their first paragraph.
+ * This resolves to the same actor the window's typing writes as.
+ */
+const WINDOW = { agent: "editor", model: null, session: null, kind: "human" } as const;
+
 /** The daemon restarted and no longer knows our session. */
 class StaleSession extends Error {}
 
@@ -98,23 +108,17 @@ export class Mcp {
     return (await this.call("document_actors", { doc_id: docId })).actors as Actor[];
   }
 
+  async blockProvenance(docId: string) {
+    return (await this.call("block_provenance", { doc_id: docId }))
+      .blocks as BlockAttribution[];
+  }
+
   async setDocumentDeleted(docId: string, deleted: boolean) {
-    return await this.call("set_document_deleted", {
-      doc_id: docId,
-      deleted,
-      agent: "window",
-      model: null,
-      session: null,
-    });
+    return await this.call("set_document_deleted", { doc_id: docId, deleted, ...WINDOW });
   }
 
   async createDocument(title: string) {
-    return await this.call("create_document", {
-      title,
-      agent: "window",
-      model: null,
-      session: null,
-    });
+    return await this.call("create_document", { title, ...WINDOW });
   }
 }
 
@@ -126,6 +130,21 @@ export type Actor = {
   color: string;
   last_seen: number;
   edits: number;
+};
+
+/** Who wrote one block. `created_by` and `touched_by` differ once someone
+ *  edits someone else's text, and the rails' label says so. */
+export type BlockAttribution = {
+  block_id: string;
+  created_by: string;
+  created_at: number;
+  touched_by: string;
+  touched_at: number;
+  session_id: string | null;
+  kind: "human" | "agent";
+  display_name: string;
+  model: string | null;
+  color: string;
 };
 
 export type DocumentSummary = { doc_id: string; title: string; updated_at: number };

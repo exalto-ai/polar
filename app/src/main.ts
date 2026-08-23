@@ -9,6 +9,7 @@ import type { Editor } from "@tiptap/core";
 import { createEditor } from "./editor";
 import { Mcp, type DocumentSummary } from "./mcp";
 import { colorFor, playfulName, seedFrom } from "./names";
+import { installProvenanceRails, type Rails } from "./provenance";
 import { SyncProvider, type AgentPresence, type ProviderStatus } from "./provider";
 
 type Connection = {
@@ -16,6 +17,8 @@ type Connection = {
   mcp_url: string;
   token: string;
   stdio_command: string;
+  /** Who this window writes as, from `polar_mcp::EDITOR_ACTOR_ID`. */
+  actor_id: string;
 };
 
 const els = {
@@ -33,8 +36,13 @@ const els = {
 
 let connection: Connection;
 let mcp: Mcp;
-let open: { doc: Y.Doc; awareness: Awareness; provider: SyncProvider; editor: Editor } | null =
-  null;
+let open: {
+  doc: Y.Doc;
+  awareness: Awareness;
+  provider: SyncProvider;
+  editor: Editor;
+  rails: Rails;
+} | null = null;
 let openDocId = "";
 
 /**
@@ -50,6 +58,7 @@ const activeAgents = new Map<string, { presence: AgentPresence; at: number }>();
 function noteAgent(presence: AgentPresence) {
   activeAgents.set(presence.actor_id, { presence, at: Date.now() });
   renderPeers();
+  scheduleProvenance();
   // Re-render when this one lapses, so the chip disappears without a further
   // edit to trigger it.
   setTimeout(renderPeers, AGENT_PRESENCE_MS + 250);
@@ -173,7 +182,14 @@ function renderPresence(awareness: Awareness, self: number) {
     chip.style.setProperty("--who", colorFor(seedFrom(presence.actor_id)));
     chip.textContent = initials(presence.name || presence.actor_id);
     const model = presence.model ? ` · ${presence.model}` : "";
-    chip.title = `${presence.name}${model} — wrote ${ago(at)}`;
+    chip.title = `${presence.name}${model} — wrote ${ago(at)}, hover to see where`;
+
+    // Pointing at an agent's chip lights the blocks it wrote, the same bargain
+    // the window chips make with carets. Deliberately not offered for window
+    // chips: every window on this device writes as one actor, so lighting them
+    // would highlight the user's own blocks as if a peer had written them.
+    chip.addEventListener("mouseenter", () => open?.rails.highlight(presence.actor_id));
+    chip.addEventListener("mouseleave", () => open?.rails.highlight(null));
     return chip;
   });
 
@@ -181,6 +197,7 @@ function renderPresence(awareness: Awareness, self: number) {
 }
 
 async function openDocument(docId: string) {
+  open?.rails.destroy();
   open?.provider.destroy();
   open?.editor.destroy();
   els.editor.replaceChildren();
@@ -208,8 +225,10 @@ async function openDocument(docId: string) {
   const editor = createEditor(document.body, els.editor, doc, awareness, provider, user);
   awareness.setLocalStateField("user", user);
 
+  const rails = installProvenanceRails(editor, doc, els.editor, connection.actor_id);
+
   provider.connect();
-  open = { doc, awareness, provider, editor };
+  open = { doc, awareness, provider, editor, rails };
   openDocId = docId;
 
   // Exposed in development so the editor can be driven directly. Synthetic
@@ -220,11 +239,41 @@ async function openDocument(docId: string) {
   }
 
   editor.on("update", () => refreshTitle(editor));
+  editor.on("update", scheduleProvenance);
   awareness.on("change", renderPeers);
   refreshTitle(editor);
   activeAgents.clear();
   renderPeers();
   rememberOpenDocument(docId);
+  void refreshProvenance();
+}
+
+/**
+ * Re-ask the daemon who wrote what.
+ *
+ * Attribution lives in the op log, not the CRDT (AD-1), so it does not ride the
+ * update frames — it is fetched. Debounced because a burst of keystrokes is one
+ * question, not forty, and the answer only moves once the daemon has committed.
+ */
+const PROVENANCE_DEBOUNCE_MS = 400;
+let provenanceTimer: number | null = null;
+
+async function refreshProvenance() {
+  if (!open) return;
+  const docId = openDocId;
+  try {
+    const blocks = await mcp.blockProvenance(docId);
+    // The switcher may have moved on while this was in flight.
+    if (open && openDocId === docId) open.rails.setProvenance(blocks);
+  } catch {
+    // A daemon we cannot reach is already reported by the status dot. Rails
+    // simply keep saying whatever they last knew.
+  }
+}
+
+function scheduleProvenance() {
+  if (provenanceTimer !== null) clearTimeout(provenanceTimer);
+  provenanceTimer = window.setTimeout(() => void refreshProvenance(), PROVENANCE_DEBOUNCE_MS);
 }
 
 // ---------------------------------------------------------------- connections

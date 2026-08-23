@@ -33,11 +33,23 @@ pub struct Caller {
     /// Groups one agent turn so it can be reverted as a unit.
     #[serde(default)]
     pub session: Option<String>,
+    /// `"human"` or `"agent"`, defaulting to agent because almost every caller
+    /// is one.
+    ///
+    /// The window is the exception: it creates and trashes documents through
+    /// these same tools, and calling that an agent made a document the user
+    /// just made look like an agent's work in the provenance rails.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 impl Caller {
     fn actor(&self) -> ActorRef {
-        ActorRef::agent(&self.agent, self.model.as_deref(), self.session.as_deref())
+        if self.kind.as_deref() == Some("human") {
+            ActorRef::human(&self.agent)
+        } else {
+            ActorRef::agent(&self.agent, self.model.as_deref(), self.session.as_deref())
+        }
     }
 }
 
@@ -169,6 +181,21 @@ impl Polar {
     ) -> Result<Json<serde_json::Value>, ErrorData> {
         let actors = self.workspace.document_actors(&p.doc_id).map_err(failed)?;
         Ok(Json(serde_json::json!({ "actors": actors })))
+    }
+
+    #[tool(
+        description = "Who wrote each block of a document — which human, which agent, when, \
+                       and in which run. `created_by` is who first wrote the block and \
+                       `touched_by` who last changed it; they differ when one actor edits \
+                       another's text. Blocks with no entry are unattributed, which is not \
+                       the same as yours."
+    )]
+    fn block_provenance(
+        &self,
+        Parameters(p): Parameters<DocParams>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let blocks = self.workspace.block_provenance(&p.doc_id).map_err(failed)?;
+        Ok(Json(serde_json::json!({ "blocks": blocks })))
     }
 
     #[tool(description = "Full-text search across documents.")]

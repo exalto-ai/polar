@@ -27,6 +27,9 @@ function polarConnection() {
               mcp_url: config.url,
               token: config.token,
               stdio_command: join(process.cwd(), "../target/debug/polar-mcp-stdio"),
+              // Dev-only mirror of `polar_mcp::EDITOR_ACTOR_ID`; real builds
+              // get it from the Tauri command, which reads the constant.
+              actor_id: "human:editor",
             }),
           );
         } catch {
