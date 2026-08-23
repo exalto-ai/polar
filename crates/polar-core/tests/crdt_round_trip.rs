@@ -79,7 +79,7 @@ fn crdt_holds_what_markdown_cannot() {
                     "paragraph",
                     vec![
                         Node::text("A", vec![]),
-                        Node::text("*", vec![Mark::new("strong")]),
+                        Node::text("*", vec![Mark::new("bold")]),
                     ],
                 )],
             ),

@@ -1,0 +1,33 @@
+{
+  "name": "app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "schema": "tsx scripts/export-schema.ts",
+    "schema:check": "tsx scripts/export-schema.ts --check"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tiptap/core": "^3.30.2",
+    "@tiptap/extension-collaboration": "^3.30.2",
+    "@tiptap/extension-collaboration-caret": "^3.30.2",
+    "@tiptap/extension-link": "^3.30.2",
+    "@tiptap/extension-table": "^3.30.2",
+    "@tiptap/pm": "^3.30.2",
+    "@tiptap/starter-kit": "^3.30.2",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.32"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "tsx": "^4.23.12",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3"
+  }
+}

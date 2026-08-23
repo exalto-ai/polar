@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ec9dfbbcf2d1a463b668c1322fd2aafa2e395fe03a3bb223d6d7404b9c140f65 # shrinks to doc = Node { kind: "doc", attrs: {}, content: [Node { kind: "blockquote", attrs: {}, content: [Node { kind: "table", attrs: {}, content: [Node { kind: "tableRow", attrs: {}, content: [Node { kind: "tableHeader", attrs: {}, content: [Node { kind: "text", attrs: {}, content: [], text: Some("0"), marks: [] }], text: None, marks: [] }], text: None, marks: [] }], text: None, marks: [] }], text: None, marks: [] }], text: None, marks: [] }

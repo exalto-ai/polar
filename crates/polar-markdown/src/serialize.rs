@@ -138,15 +138,25 @@ fn block(node: &Node, out: &mut String) {
 }
 
 /// GFM pipe table. The format requires a header row and a delimiter row, so a
-/// table's first row is emitted as the header regardless of its cells' `header`
-/// attribute — a fact the round-trip property will hold us to.
+/// table's first row is emitted as the header whatever its cells are — a fact
+/// the round-trip property holds us to.
+///
+/// `colspan` and `rowspan` are not expressible in GFM. A merged cell is
+/// therefore projection-only under AD-12: it survives in the document and the
+/// editor, but markdown flattens it.
 fn table(node: &Node, out: &mut String) {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for row in &node.content {
         rows.push(
             row.content
                 .iter()
-                .map(|cell| inlines(&cell.content).replace('|', "\\|"))
+                .map(|cell| {
+                    // A cell holds blocks; GFM gives it one line. Concatenate
+                    // their inline content rather than dropping all but the
+                    // first, which would lose text silently.
+                    let text: String = cell.content.iter().map(|b| inlines(&b.content)).collect();
+                    text.replace('|', "\\|")
+                })
                 .collect(),
         );
     }
@@ -222,8 +232,11 @@ fn inline(node: &Node) -> String {
 
 fn wrap(s: &str, mark: &Mark) -> String {
     match mark.kind.as_str() {
-        "strong" => format!("**{s}**"),
-        "em" => format!("*{s}*"),
+        // Names follow TipTap, which defines the schema (M2.2). ProseMirror's
+        // own convention is strong/em; the editor is the harder thing to
+        // change, so Rust follows it.
+        "bold" => format!("**{s}**"),
+        "italic" => format!("*{s}*"),
         "strike" => format!("~~{s}~~"),
         "code" => {
             let longest = s.split(|c| c != '`').map(str::len).max().unwrap_or(0);

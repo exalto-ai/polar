@@ -201,7 +201,7 @@ pub fn normalize(node: &Node) -> Node {
 /// Marks are a set, not a sequence, but the tree stores them as a Vec — so a
 /// stable order is required before two trees can be compared.
 fn canonical_marks(marks: &[Mark]) -> Vec<Mark> {
-    const ORDER: &[&str] = &["link", "strong", "em", "strike", "code"];
+    const ORDER: &[&str] = &["link", "bold", "italic", "strike", "code"];
     let rank = |m: &Mark| {
         ORDER
             .iter()
@@ -231,7 +231,7 @@ mod tests {
         ] {
             assert!(s.node(kind).is_some(), "missing node {kind}");
         }
-        for kind in ["strong", "em", "code", "link"] {
+        for kind in ["bold", "italic", "code", "link"] {
             assert!(s.mark(kind).is_some(), "missing mark {kind}");
         }
         assert!(s.node("codeBlock").unwrap().code);
@@ -239,14 +239,11 @@ mod tests {
 
     #[test]
     fn node_json_matches_prosemirror_shape() {
-        let n = Node::element(
-            "paragraph",
-            vec![Node::text("hi", vec![Mark::new("strong")])],
-        );
+        let n = Node::element("paragraph", vec![Node::text("hi", vec![Mark::new("bold")])]);
         let json = serde_json::to_value(&n).unwrap();
         assert_eq!(json["type"], "paragraph");
         assert_eq!(json["content"][0]["text"], "hi");
-        assert_eq!(json["content"][0]["marks"][0]["type"], "strong");
+        assert_eq!(json["content"][0]["marks"][0]["type"], "bold");
         // absent rather than null: ProseMirror omits empty fields
         assert!(json.get("attrs").is_none());
     }

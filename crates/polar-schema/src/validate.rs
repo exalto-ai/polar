@@ -23,40 +23,85 @@ impl fmt::Display for Violation {
     }
 }
 
-/// One term of a content expression, e.g. `block*` or `paragraph`.
+/// One term of a content expression: `block*`, `paragraph`, or an alternation
+/// like `(tableCell | tableHeader)+`.
 struct Term {
-    name: String,
+    /// Any of these satisfies the term.
+    names: Vec<String>,
     min: usize,
     max: usize,
 }
 
+impl Term {
+    fn describe(&self) -> String {
+        self.names.join(" | ")
+    }
+}
+
+/// Split on whitespace, but keep a parenthesised alternation whole.
+fn tokenize(expr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in expr.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 fn parse_expr(expr: &str) -> Vec<Term> {
-    expr.split_whitespace()
+    tokenize(expr)
+        .into_iter()
         .map(|tok| {
-            let (name, min, max) = match tok.chars().last() {
+            let (body, min, max) = match tok.chars().last() {
                 Some('+') => (&tok[..tok.len() - 1], 1, usize::MAX),
                 Some('*') => (&tok[..tok.len() - 1], 0, usize::MAX),
                 Some('?') => (&tok[..tok.len() - 1], 0, 1),
-                _ => (tok, 1, 1),
+                _ => (tok.as_str(), 1, 1),
             };
-            Term {
-                name: name.to_string(),
-                min,
-                max,
-            }
+            let names = body
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .split('|')
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .collect();
+            Term { names, min, max }
         })
         .collect()
 }
 
 impl Schema {
     /// Does `node` satisfy `name`, either as its type or via its group?
+    ///
+    /// A ProseMirror `group` is a whitespace-separated *set*, not a single
+    /// name — `bulletList` belongs to `"block list"`. Comparing the whole
+    /// string put every list outside `block+`.
     fn matches(&self, node: &Node, name: &str) -> bool {
         if node.kind == name {
             return true;
         }
         self.node(&node.kind)
             .and_then(|spec| spec.group.as_deref())
-            .is_some_and(|group| group == name)
+            .is_some_and(|groups| groups.split_whitespace().any(|g| g == name))
     }
 
     pub fn validate(&self, root: &Node) -> Result<(), Vec<Violation>> {
@@ -122,9 +167,9 @@ impl Schema {
         }
     }
 
-    /// Greedy left-to-right match. Sufficient for v0, whose expressions have no
-    /// alternation and never place a required term after an unbounded one; a
-    /// richer expression would need real backtracking.
+    /// Greedy left-to-right match, with alternation inside a term. Sufficient
+    /// for v0, which never places a required term after an unbounded one; that
+    /// would need real backtracking.
     fn check_content(&self, node: &Node, expr: &str, path: &str, out: &mut Vec<Violation>) {
         let terms = parse_expr(expr);
         let mut i = 0;
@@ -133,7 +178,7 @@ impl Schema {
             let mut count = 0;
             while i < node.content.len()
                 && count < term.max
-                && self.matches(&node.content[i], &term.name)
+                && term.names.iter().any(|n| self.matches(&node.content[i], n))
             {
                 i += 1;
                 count += 1;
@@ -144,7 +189,7 @@ impl Schema {
                     message: format!(
                         "`{}` requires `{expr}`; expected `{}` at position {i}, found {}",
                         node.kind,
-                        term.name,
+                        term.describe(),
                         node.content
                             .get(i)
                             .map(|n| format!("`{}`", n.kind))
@@ -213,13 +258,31 @@ mod tests {
         );
     }
 
+    /// A group is a set. Comparing the whole string excluded every list from
+    /// `block+`, which only surfaced once the schema came from TipTap.
+    #[test]
+    fn membership_of_a_multi_group_node() {
+        let doc = Node::element(
+            "doc",
+            vec![Node::element(
+                "bulletList",
+                vec![Node::element("listItem", vec![para("x")])],
+            )],
+        );
+        assert_eq!(Schema::v0().validate(&doc), Ok(()));
+        assert_eq!(
+            Schema::v0().node("bulletList").unwrap().group.as_deref(),
+            Some("block list")
+        );
+    }
+
     #[test]
     fn rejects_unknown_types_and_misplaced_marks() {
         let doc = Node::element("doc", vec![Node::element("toggle", vec![])]);
         assert!(Schema::v0().validate(&doc).is_err());
 
         let mut p = para("x");
-        p.marks.push(Mark::new("strong"));
+        p.marks.push(Mark::new("bold"));
         let doc = Node::element("doc", vec![p]);
         let errs = Schema::v0().validate(&doc).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("carries marks")));
@@ -240,8 +303,19 @@ mod tests {
         assert_eq!(Schema::v0().validate(&doc), Ok(()));
     }
 
+    /// TipTap declares `href` with a null default, so an href-less link is
+    /// schema-*valid* and validation cannot catch it. Recorded rather than
+    /// worked around: the schema comes from the editor (M2.2), and the markdown
+    /// projection cannot produce one anyway — a parsed link always carries its
+    /// destination, even if empty.
     #[test]
-    fn rejects_a_link_without_href() {
+    fn link_href_is_optional_because_tiptap_says_so() {
+        assert!(
+            Schema::v0().mark("link").unwrap().attrs["href"]
+                .default
+                .is_some(),
+            "`href` has a default, so it is optional"
+        );
         let doc = Node::element(
             "doc",
             vec![Node::element(
@@ -249,7 +323,6 @@ mod tests {
                 vec![Node::text("x", vec![Mark::new("link")])],
             )],
         );
-        let errs = Schema::v0().validate(&doc).unwrap_err();
-        assert!(errs.iter().any(|e| e.message.contains("href")));
+        assert_eq!(Schema::v0().validate(&doc), Ok(()));
     }
 }
