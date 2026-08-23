@@ -100,6 +100,21 @@ jobs:
         working-directory: app
         run: npm exec -- tauri build --target "$TARGET" --bundles app,dmg --no-sign --ci
 
+      # Tauri names the disk image after `productName`, which now contains
+      # spaces, and a download URL would carry them as %20. The convention every
+      # multi-word Mac app follows is spaces in the `.app` and none in the
+      # artifact: "Visual Studio Code.app" ships as VSCode-darwin-universal.zip,
+      # "Android Studio.app" as android-studio-*.dmg. Renamed before notarizing
+      # so the ticket is stapled to the file that is actually distributed.
+      - name: Give the disk image a space-free name
+        run: |
+          set -euo pipefail
+          dmg=$(find "app/src-tauri/target/$TARGET/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)
+          test -n "$dmg"
+          renamed="$(dirname "$dmg")/ProofOfThought_${TAG#v}_${TARGET%%-*}.dmg"
+          mv "$dmg" "$renamed"
+          echo "$(basename "$dmg") -> $(basename "$renamed")"
+
       # Tauri notarizes and staples the *application* before wrapping it in a
       # disk image. The DMG is a separately distributed container and needs its
       # own ticket, or Gatekeeper rejects the download even though the app
