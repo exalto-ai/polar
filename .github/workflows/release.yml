@@ -100,6 +100,21 @@ jobs:
         working-directory: app
         run: npm exec -- tauri build --target "$TARGET" --bundles app,dmg --no-sign --ci
 
+      # Tauri names the disk image after `productName`, which now contains
+      # spaces, and a download URL would carry them as %20. The convention every
+      # multi-word Mac app follows is spaces in the `.app` and none in the
+      # artifact: "Visual Studio Code.app" ships as VSCode-darwin-universal.zip,
+      # "Android Studio.app" as android-studio-*.dmg. Renamed before notarizing
+      # so the ticket is stapled to the file that is actually distributed.
+      - name: Give the disk image a space-free name
+        run: |
+          set -euo pipefail
+          dmg=$(find "app/src-tauri/target/$TARGET/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)
+          test -n "$dmg"
+          renamed="$(dirname "$dmg")/ProofOfThought_${TAG#v}_${TARGET%%-*}.dmg"
+          mv "$dmg" "$renamed"
+          echo "$(basename "$dmg") -> $(basename "$renamed")"
+
       # Tauri notarizes and staples the *application* before wrapping it in a
       # disk image. The DMG is a separately distributed container and needs its
       # own ticket, or Gatekeeper rejects the download even though the app
@@ -129,7 +144,7 @@ jobs:
 
           # The failure a release is most likely to have: a window with no
           # daemon beside it.
-          app="app/src-tauri/target/$TARGET/release/bundle/macos/Polar.app"
+          app="app/src-tauri/target/$TARGET/release/bundle/macos/Proof of Thought.app"
           for binary in polard polar-mcp-stdio; do
             test -x "$app/Contents/MacOS/$binary" || {
               echo "::error::$binary is missing from the bundle"
@@ -156,7 +171,7 @@ jobs:
           notes=$(cat <<'NOTES'
           A local-first writing app where people and agents edit the same documents.
 
-          Download the `.dmg`, drag Polar to Applications, and open it. The daemon
+          Download the `.dmg`, drag Proof of Thought to Applications, and open it. The daemon
           ships inside the bundle and starts on first launch.
           NOTES
           )
@@ -164,5 +179,5 @@ jobs:
             gh release upload "$TAG" release/* --clobber
           else
             gh release create "$TAG" release/* \
-              --draft --title "Polar $TAG" --notes "$notes"
+              --draft --title "Proof of Thought $TAG" --notes "$notes"
           fi

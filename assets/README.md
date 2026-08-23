@@ -13,7 +13,7 @@ of it. It is a point in polar coordinates — the document at the centre, and
 every client a different bearing on it. Because the mark is cut out rather than
 drawn on, the tile shows through the ring and the arm.
 
-The tile is Polar Blue and the disc is white, which is the reversed cut in
+The tile is Proof Blue and the disc is white, which is the reversed cut in
 `orbit/`. It is drawn by `scripts/make-icon.py` on the same 96 × 96 field as
 those SVGs, scaled up, so the icon and the vectors cannot drift apart. See
 [`../DESIGN.md`](../DESIGN.md).

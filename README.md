@@ -1,7 +1,11 @@
-# Polar
+# Proof of Thought
 
 A local-first macOS writing app. Individual documents, real-time collaboration between
 humans *and* agents, fully functional offline, syncing through a self-hostable relay.
+
+The engine is called **polar** — the crates, the `polard` daemon, the bundle
+identifier and the sync protocol all keep that name. *Proof of Thought* is what
+the app is called on the outside.
 
 **M2 is complete**: the daemon, the window, and any number of agents edit one document at
 once. An agent writing over MCP appears live in an open editor, and a rail in the left

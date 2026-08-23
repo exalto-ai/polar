@@ -1,4 +1,4 @@
-# Polar — Architecture (v0)
+# Proof of Thought — Architecture (v0)
 
 **Status:** draft, nothing built yet · **Date:** 2026-08-22
 
@@ -123,7 +123,7 @@ rather than fatal to the stack.
 ## 2. Shape
 
 ```
-┌─ Polar.app (Tauri shell) ──────────────────┐
+┌─ Proof of Thought.app (Tauri shell) ───────┐
 │   ProseMirror/TipTap ↔ Yjs (view replica)  │
 └──────────────────┬─────────────────────────┘
                    │ IPC — Yjs update frames + awareness
