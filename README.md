@@ -8,6 +8,8 @@ anywhere. `cargo test --workspace` is green and CI gates every push.
 
 - **[docs/architecture.md](docs/architecture.md)** — 17 decisions, each with its cost
   stated. Written to be argued with.
+- **[DESIGN.md](DESIGN.md)** — one accent, one mark, and the file each is
+  defined in.
 - **[prototypes/editor-probe](prototypes/editor-probe)** — throwaway probe answering
   whether WKWebView can host a collaborative ProseMirror (AD-8). It can: identical to
   Chromium on all five automated checks. One manual IME pass is still outstanding.
