@@ -244,3 +244,35 @@ fn line_spans_locate_their_blocks() {
     assert!(lines[start - 1].contains("one"));
     assert!(lines[end - 1].contains("two"));
 }
+
+/// Every span has to point at a line that exists.
+///
+/// A block can serialize to nothing — an empty paragraph does — and the naive
+/// computation gave it the line *after* the document, so an agent asking for
+/// line 12 of an 11-line document got an answer rather than an error.
+#[test]
+fn line_spans_stay_inside_the_document() {
+    let doc = Node::element(
+        "doc",
+        vec![
+            Node::element("heading", vec![Node::text("Title", vec![])])
+                .with_attr("level", 1.into()),
+            Node::element("paragraph", vec![Node::text("Body.", vec![])]),
+            // Renders to nothing at all.
+            Node::element("paragraph", vec![]),
+        ],
+    );
+
+    let (markdown, spans) = polar_markdown::to_markdown_with_spans(&doc);
+    let lines = markdown.lines().count();
+
+    assert_eq!(spans.len(), doc.content.len());
+    for (i, (start, end)) in spans.iter().enumerate() {
+        assert!(*start >= 1, "block {i} starts at line {start}");
+        assert!(
+            *end <= lines,
+            "block {i} ends at line {end}, past the {lines} the document has"
+        );
+        assert!(start <= end, "block {i} spans backwards");
+    }
+}

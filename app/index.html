@@ -35,11 +35,15 @@
       <div id="editor" class="editor"></div>
     </main>
 
+    <!-- Errors used to have nowhere to go: a failed call left the status dot
+         green and the window silently wrong. -->
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
     <div class="scrim" id="scrim" hidden>
       <div class="switcher" role="dialog" aria-label="Open document">
         <input id="switcher-input" type="text" placeholder="Search documents…" autocomplete="off" spellcheck="false" />
         <ul id="switcher-results"></ul>
-        <div class="switcher-hint"><kbd>↵</kbd> open · <kbd>⌘↵</kbd> new · <kbd>⌘⌫</kbd> trash · <kbd>esc</kbd> close</div>
+        <div class="switcher-hint" id="switcher-hint"></div>
       </div>
     </div>
   </body>

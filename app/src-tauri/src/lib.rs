@@ -57,8 +57,10 @@ fn new_window(app: tauri::AppHandle) -> Result<String, String> {
     #[allow(unused_mut)]
     let mut builder = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::default())
         .title("Polar")
-        .inner_size(820.0, 720.0)
-        .min_inner_size(480.0, 400.0);
+        // Matches tauri.conf.json: the measure is 768px wide, and anything
+        // narrower than ~860 pushes the provenance rails on top of the text.
+        .inner_size(1040.0, 820.0)
+        .min_inner_size(560.0, 400.0);
     #[cfg(target_os = "macos")]
     {
         builder = builder

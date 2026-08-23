@@ -1,3 +1,7 @@
+//! Documents here are created unnamed on purpose: a named one is seeded with
+//! its title as a heading, and these tests are about how blocks are attributed
+//! rather than about that heading.
+//!
 //! Per-block attribution: who wrote which paragraph.
 //!
 //! The op log answers "who wrote" per *update*; these pin the per-*block*
@@ -32,7 +36,7 @@ fn touched(ws: &Workspace, doc_id: &str) -> HashMap<String, String> {
 #[test]
 fn the_block_a_new_document_starts_with_belongs_to_whoever_made_it() {
     let ws = Workspace::open_in_memory().unwrap();
-    let doc = ws.create_document("Notes", &human()).unwrap();
+    let doc = ws.create_document("", &human()).unwrap();
     let first = doc.blocks[0].block_id.clone();
 
     assert_eq!(
@@ -61,7 +65,7 @@ fn the_block_a_new_document_starts_with_belongs_to_whoever_made_it() {
 fn each_block_is_attributed_to_whoever_wrote_it() {
     let ws = Workspace::open_in_memory().unwrap();
     let opus = agent("opus");
-    let doc = ws.create_document("Notes", &opus).unwrap();
+    let doc = ws.create_document("", &opus).unwrap();
 
     let first = doc.blocks[0].block_id.clone();
     ws.replace_block(&doc.doc_id, &first, "# Roadmap", None, &opus)
@@ -101,7 +105,7 @@ fn each_block_is_attributed_to_whoever_wrote_it() {
 fn editing_one_block_leaves_the_others_attributed_to_whoever_wrote_them() {
     let ws = Workspace::open_in_memory().unwrap();
     let opus = agent("opus");
-    let doc = ws.create_document("Notes", &opus).unwrap();
+    let doc = ws.create_document("", &opus).unwrap();
 
     ws.replace_block(
         &doc.doc_id,
@@ -143,7 +147,7 @@ fn editing_one_block_leaves_the_others_attributed_to_whoever_wrote_them() {
 fn a_reworded_block_remembers_who_drafted_it() {
     let ws = Workspace::open_in_memory().unwrap();
     let opus = agent("opus");
-    let doc = ws.create_document("Notes", &opus).unwrap();
+    let doc = ws.create_document("", &opus).unwrap();
     let first = doc.blocks[0].block_id.clone();
 
     ws.replace_block(&doc.doc_id, &first, "A drafted sentence.", None, &opus)
@@ -166,7 +170,7 @@ fn a_reworded_block_remembers_who_drafted_it() {
 fn a_deleted_block_stops_being_attributed() {
     let ws = Workspace::open_in_memory().unwrap();
     let opus = agent("opus");
-    let doc = ws.create_document("Notes", &opus).unwrap();
+    let doc = ws.create_document("", &opus).unwrap();
 
     ws.replace_block(
         &doc.doc_id,
@@ -197,7 +201,7 @@ fn a_document_written_before_the_table_existed_attributes_itself() {
     let opus = agent("opus");
     let doc_id = {
         let ws = Workspace::open(&path).unwrap();
-        let doc = ws.create_document("Notes", &opus).unwrap();
+        let doc = ws.create_document("", &opus).unwrap();
         ws.replace_block(
             &doc.doc_id,
             &doc.blocks[0].block_id,
@@ -234,7 +238,7 @@ fn two_agents_keep_their_own_blocks() {
     let ws = Workspace::open_in_memory().unwrap();
     let (a, b) = (agent("opus"), agent("haiku"));
 
-    let doc = ws.create_document("Notes", &a).unwrap();
+    let doc = ws.create_document("", &a).unwrap();
     ws.replace_block(&doc.doc_id, &doc.blocks[0].block_id, "Opening.", None, &a)
         .unwrap();
 

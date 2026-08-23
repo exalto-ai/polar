@@ -441,6 +441,40 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   border-right-width: 2.5px;
 }
 
+/* ---------- toast ---------- */
+/* Bottom centre rather than a corner: it is a consequence of what you just
+   did, so it belongs near where you were looking, and it never covers the
+   first line of the document. */
+.toast {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  max-width: min(520px, calc(100vw - 48px));
+  padding: 9px 14px;
+  border-radius: 9px;
+  background: var(--raised);
+  border: 1px solid var(--rule);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.toast[hidden] { display: none; }
+.toast[data-kind="error"] {
+  border-color: color-mix(in srgb, #d4574c 45%, var(--rule));
+}
+.toast[data-kind="error"]::before {
+  content: "";
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #d4574c;
+  margin-right: 8px;
+  vertical-align: 1px;
+}
+
 /* ---------- slash menu ---------- */
 /* Anchored to the caret, so it appears where you are typing. */
 .slash {
@@ -525,6 +559,12 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   border-bottom: 1px solid var(--rule);
 }
 .switcher input::placeholder { color: var(--ink-faint); }
+/* The trash is a mode, not a separate window, so the field says which list you
+   are looking at rather than leaving you to infer it from the contents. */
+.switcher[data-mode="trash"] input {
+  border-left: 2px solid #d4574c;
+  padding-left: 14px;
+}
 .switcher ul { list-style: none; margin: 0; padding: 6px; max-height: 44vh; overflow-y: auto; }
 .hit {
   padding: 8px 10px;

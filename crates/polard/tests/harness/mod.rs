@@ -44,14 +44,21 @@ impl Daemon {
         // a connection refused on an unrelated request.
         let stderr = child.stderr.take().expect("piped stderr");
         let mut reader = BufReader::new(stderr);
+
+        // Scan for the readiness line rather than assuming it comes first: the
+        // daemon also logs to stderr, so anything else it has to say at startup
+        // would otherwise be mistaken for a failure to start.
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .expect("daemon printed a startup line");
-        assert!(
-            line.contains("listening"),
-            "unexpected startup output: {line}"
-        );
+        loop {
+            line.clear();
+            let read = reader
+                .read_line(&mut line)
+                .expect("daemon stderr is readable");
+            assert!(read > 0, "daemon exited before reporting a port");
+            if line.contains("listening on") {
+                break;
+            }
+        }
 
         std::thread::spawn(move || {
             let mut sink = String::new();

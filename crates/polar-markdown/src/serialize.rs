@@ -18,6 +18,18 @@ pub fn to_markdown_with_spans(doc: &Node) -> (String, Vec<(usize, usize)>) {
     while out.ends_with('\n') {
         out.pop();
     }
+
+    // Clamp only now, because only now is the real line count known: a block
+    // can serialize to nothing — an empty paragraph does — and the trailing
+    // newlines just stripped were counted while walking. Left alone, the last
+    // block claims the line *after* the document, and an agent asking for line
+    // 12 of an 11-line document gets an answer rather than an error.
+    let total = out.lines().count().max(1);
+    for span in &mut spans {
+        span.0 = span.0.clamp(1, total);
+        span.1 = span.1.clamp(span.0, total);
+    }
+
     (out, spans)
 }
 

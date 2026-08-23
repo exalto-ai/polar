@@ -68,7 +68,9 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
         Frame::Sync { update, .. } => local.apply_update(&update).expect("valid sync"),
         other => panic!("expected SYNC, got {other:?}"),
     }
-    assert_eq!(local.blocks().len(), 1, "caught up to the created document");
+    // A named document is seeded with its title as a heading and a paragraph
+    // to type in, so catching up means seeing both.
+    assert_eq!(local.blocks().len(), 2, "caught up to the created document");
 
     // Peer B joins and subscribes too.
     let mut b = connect(&daemon).await;
@@ -88,7 +90,7 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
 
     // A edits and publishes only the delta.
     let before = local.state_vector();
-    let block = local.blocks()[0].block_id.clone();
+    let block = local.blocks()[1].block_id.clone();
     local
         .replace_block(
             &block,

@@ -16,8 +16,14 @@ pub struct Polar {
     workspace: Arc<Workspace>,
 }
 
+/// Every tool failure passes through here, so this is the one place that can
+/// notice them. Without it a failing tool is a JSON-RPC error the agent sees and
+/// the daemon has no memory of, which is exactly the case someone reports later
+/// as "it just stopped working".
 fn failed(e: impl std::fmt::Display) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
+    let message = e.to_string();
+    tracing::warn!(error = %message, "tool call failed");
+    ErrorData::internal_error(message, None)
 }
 
 /// Every write names its caller. There is no anonymous edit path, because an
@@ -57,6 +63,10 @@ impl Caller {
 pub struct ListParams {
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// List trashed documents instead of live ones. Deleting is soft, so this
+    /// is how a document comes back.
+    #[serde(default)]
+    pub trashed: bool,
 }
 
 fn default_limit() -> usize {
@@ -149,12 +159,19 @@ impl Polar {
         Polar { workspace }
     }
 
-    #[tool(description = "List documents, most recently updated first.")]
+    #[tool(
+        description = "List documents, most recently updated first. Pass `trashed: true` \
+                       to list deleted ones instead — deleting is soft, and this is how a \
+                       document is found again."
+    )]
     fn list_documents(
         &self,
         Parameters(p): Parameters<ListParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
-        let docs = self.workspace.list_documents(p.limit).map_err(failed)?;
+        let docs = self
+            .workspace
+            .list_documents(p.limit, p.trashed)
+            .map_err(failed)?;
         Ok(Json(serde_json::json!({ "documents": docs })))
     }
 

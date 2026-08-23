@@ -29,6 +29,12 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 SIZE = 1024
+# Apple's macOS icon grid: the body occupies 824 of a 1024 canvas and the rest
+# is transparent margin. Drawn edge to edge instead, the tile is ~24% larger in
+# area than every neighbour in the Dock, which reads as an app that does not
+# know the conventions rather than as a bold icon.
+BODY = 824
+INSET = (SIZE - BODY) // 2
 FIELD = 96  # the coordinate space assets/orbit/*.svg are drawn in
 SS = 4  # supersampling factor for the knockout mask
 
@@ -72,7 +78,10 @@ def _tile() -> Image.Image:
 
     mask = Image.new("L", (SIZE, SIZE), 0)
     ImageDraw.Draw(mask).rounded_rectangle(
-        [0, 0, SIZE - 1, SIZE - 1], radius=int(SIZE * CORNER), fill=255
+        [INSET, INSET, INSET + BODY - 1, INSET + BODY - 1],
+        # The corner radius is a proportion of the body, not the canvas.
+        radius=int(BODY * CORNER),
+        fill=255,
     )
     image = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     image.paste(column.resize((SIZE, SIZE)), (0, 0), mask)
@@ -81,10 +90,13 @@ def _tile() -> Image.Image:
 
 def _coin_mask() -> Image.Image:
     """Opaque where the coin is, transparent where the mark is cut out of it."""
-    scale = SIZE * SS / FIELD
+    # The mark is placed against the body, not the canvas, so it keeps its
+    # proportions inside the tile when the tile is inset.
+    scale = BODY * SS / FIELD
+    offset = INSET * SS
 
     def at(x: float, y: float) -> tuple[float, float]:
-        return x * scale, y * scale
+        return x * scale + offset, y * scale + offset
 
     def blob(centre: tuple[float, float], radius: float) -> list[float]:
         cx, cy = at(*centre)

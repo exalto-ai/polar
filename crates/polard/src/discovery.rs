@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 /// `POLAR_HOME` overrides the location of the store and the discovery file.
 /// Without it, a test run would publish itself as *the* daemon and overwrite
 /// the real one's port and token.
+/// Where the store, the discovery file and the logs live.
+pub fn home() -> PathBuf {
+    support_dir()
+}
+
 fn support_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("POLAR_HOME") {
         return PathBuf::from(dir);

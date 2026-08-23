@@ -17,12 +17,13 @@ fn an_agent_can_create_read_and_edit_a_document() {
     let agent = agent();
 
     let created = ws.create_document("Notes", &agent).unwrap();
-    assert_eq!(
-        created.blocks.len(),
-        1,
-        "a new document starts with one block"
-    );
+    // The name becomes the heading, with a paragraph after it to type in.
+    assert_eq!(created.title, "Notes");
+    assert!(created.markdown.starts_with("# Notes"));
+    assert_eq!(created.blocks.len(), 2);
 
+    // Replace the seeded heading, so the document's first heading — and so its
+    // title — becomes the new one.
     let first = created.blocks[0].block_id.clone();
     ws.replace_block(
         &created.doc_id,
@@ -316,7 +317,7 @@ fn a_trashed_document_leaves_the_list_but_keeps_its_history() {
         .unwrap();
 
     assert!(
-        ws.list_documents(50)
+        ws.list_documents(50, false)
             .unwrap()
             .iter()
             .any(|d| d.doc_id == created.doc_id)
@@ -325,7 +326,7 @@ fn a_trashed_document_leaves_the_list_but_keeps_its_history() {
     ws.set_document_deleted(&created.doc_id, true, &agent)
         .unwrap();
     assert!(
-        !ws.list_documents(50)
+        !ws.list_documents(50, false)
             .unwrap()
             .iter()
             .any(|d| d.doc_id == created.doc_id),
@@ -340,7 +341,7 @@ fn a_trashed_document_leaves_the_list_but_keeps_its_history() {
     ws.set_document_deleted(&created.doc_id, false, &agent)
         .unwrap();
     assert!(
-        ws.list_documents(50)
+        ws.list_documents(50, false)
             .unwrap()
             .iter()
             .any(|d| d.doc_id == created.doc_id),
@@ -368,4 +369,32 @@ fn the_tombstone_travels_with_the_document() {
         peer.deleted_at().is_some(),
         "the peer never learned the document was deleted"
     );
+}
+
+/// A document created with a name should be called that name. The title is the
+/// first heading, so creating an empty one threw the name away — you typed it
+/// into the switcher and got "Untitled" back.
+#[test]
+fn a_new_document_is_called_what_you_named_it() {
+    let ws = Workspace::open_in_memory().unwrap();
+    let agent = agent();
+
+    let created = ws.create_document("Quarterly roadmap", &agent).unwrap();
+    assert_eq!(created.title, "Quarterly roadmap");
+    assert_eq!(
+        ws.read_document(&created.doc_id).unwrap().title,
+        "Quarterly roadmap",
+        "the title must survive being read back, not just be echoed"
+    );
+    assert!(
+        ws.list_documents(50, false)
+            .unwrap()
+            .iter()
+            .any(|d| d.title == "Quarterly roadmap")
+    );
+
+    // An unnamed document still gets somewhere to type, and no empty heading.
+    let blank = ws.create_document("", &agent).unwrap();
+    assert_eq!(blank.blocks.len(), 1);
+    assert_eq!(blank.title, "Untitled");
 }

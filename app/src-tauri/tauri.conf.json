@@ -14,9 +14,9 @@
     "windows": [
       {
         "title": "Polar",
-        "width": 820,
-        "height": 720,
-        "minWidth": 480,
+        "width": 1040,
+        "height": 820,
+        "minWidth": 560,
         "minHeight": 400,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
