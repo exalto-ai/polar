@@ -27,11 +27,27 @@ anywhere. `cargo test --workspace` is green and CI gates every push.
 ## Try it
 
 ```bash
-cargo run -p polard -- /tmp/polar.db
+npm run tauri dev --prefix app
 ```
 
-It prints its port and writes `daemon.json` (mode 0600) with a bearer token. Point an MCP
-client at the URL inside.
+The app starts the daemon itself. Press ⌘K to switch documents, ⌘↵ to make one.
+
+To watch an agent edit a document you have open, from another terminal:
+
+```bash
+scripts/agent watch 2
+```
+
+The daemon can also be run on its own, which is the whole point — agents do not need a
+window:
+
+```bash
+cargo run -p polard
+```
+
+It prints its port and writes `daemon.json` (mode 0600) with a bearer token. MCP clients
+that speak HTTP can use the URL inside; clients that spawn a stdio server should spawn
+`polar-mcp-stdio`, which finds or starts the daemon and proxies to it.
 
 ## Shape
 
