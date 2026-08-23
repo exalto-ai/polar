@@ -9,7 +9,7 @@ import type { Editor } from "@tiptap/core";
 import { createEditor } from "./editor";
 import { Mcp, type DocumentSummary } from "./mcp";
 import { colorFor, playfulName, seedFrom } from "./names";
-import { SyncProvider, type ProviderStatus } from "./provider";
+import { SyncProvider, type AgentPresence, type ProviderStatus } from "./provider";
 
 type Connection = {
   sync_url: string;
@@ -36,6 +36,32 @@ let mcp: Mcp;
 let open: { doc: Y.Doc; awareness: Awareness; provider: SyncProvider; editor: Editor } | null =
   null;
 let openDocId = "";
+
+/**
+ * Agents that have written recently.
+ *
+ * An agent has no session to be "in" — it connects over MCP, does something,
+ * and leaves. So presence here means *recently active*, and it lapses on its
+ * own rather than waiting for a disconnect that never comes.
+ */
+const AGENT_PRESENCE_MS = 45_000;
+const activeAgents = new Map<string, { presence: AgentPresence; at: number }>();
+
+function noteAgent(presence: AgentPresence) {
+  activeAgents.set(presence.actor_id, { presence, at: Date.now() });
+  renderPeers();
+  // Re-render when this one lapses, so the chip disappears without a further
+  // edit to trigger it.
+  setTimeout(renderPeers, AGENT_PRESENCE_MS + 250);
+}
+
+function liveAgents() {
+  const cutoff = Date.now() - AGENT_PRESENCE_MS;
+  for (const [id, entry] of activeAgents) {
+    if (entry.at < cutoff) activeAgents.delete(id);
+  }
+  return [...activeAgents.values()];
+}
 
 function setStatus(status: ProviderStatus) {
   els.status.dataset.state = status;
@@ -78,37 +104,80 @@ function pointAt(peerId: number, pointed: boolean) {
     .forEach((caret) => caret.classList.toggle("is-pointed", pointed));
 }
 
+function renderPeers() {
+  if (!open) return;
+  renderPresence(open.awareness, open.doc.clientID);
+  if (!els.connections.hidden) void renderConnections();
+}
+
+/**
+ * Remember which document this window had open.
+ *
+ * Session storage is per window, so two windows no longer overwrite each
+ * other's idea of "the last document" — which they did, and meant opening a
+ * second window could yank the first one somewhere else on the next launch.
+ * The shared copy survives as the starting point for a brand-new window.
+ */
+function rememberOpenDocument(docId: string) {
+  window.sessionStorage.setItem("polar.last", docId);
+  window.localStorage.setItem("polar.last", docId);
+}
+
+function lastOpenDocument(): string | null {
+  return (
+    window.sessionStorage.getItem("polar.last") ??
+    window.localStorage.getItem("polar.last")
+  );
+}
+
+function initials(name: string): string {
+  return name
+    .split(/[\s:_-]+/)
+    .map((word) => word[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}
+
 function renderPresence(awareness: Awareness, self: number) {
   const others = [...awareness.getStates().entries()].filter(([id]) => id !== self);
-  els.presence.replaceChildren(
-    ...others.map(([id, state]) => {
-      const user = (state as { user?: { name: string; color: string } }).user;
-      const name = user?.name ?? "Someone";
-      const chip = document.createElement("span");
-      chip.className = "who";
-      chip.style.setProperty("--who", user?.color ?? "#888");
-      // Initials of both words, so two peers are told apart at a glance.
-      chip.textContent = name
-        .split(" ")
-        .map((word) => word[0])
-        .join("")
-        .slice(0, 2)
-        .toUpperCase();
-      chip.title = `${name} — click to find their cursor`;
+  const windows = others.map(([id, state]) => {
+    const user = (state as { user?: { name: string; color: string } }).user;
+    const name = user?.name ?? "Someone";
+    const chip = document.createElement("span");
+    chip.className = "who";
+    chip.style.setProperty("--who", user?.color ?? "#888");
+    // Initials of both words, so two peers are told apart at a glance.
+    chip.textContent = initials(name);
+    chip.title = `${name} — click to find their cursor`;
 
-      // Pointing at a chip points at that peer's caret, which is otherwise a
-      // 2px line somewhere in the document.
-      chip.addEventListener("mouseenter", () => pointAt(id, true));
-      chip.addEventListener("mouseleave", () => pointAt(id, false));
-      chip.addEventListener("click", () => {
-        const caret = document.querySelector(`.peer-caret[data-peer="${id}"]`);
-        caret?.scrollIntoView({ behavior: "smooth", block: "center" });
-        pointAt(id, true);
-        setTimeout(() => pointAt(id, false), 1800);
-      });
-      return chip;
-    }),
-  );
+    // Pointing at a chip points at that peer's caret, which is otherwise a
+    // 2px line somewhere in the document.
+    chip.addEventListener("mouseenter", () => pointAt(id, true));
+    chip.addEventListener("mouseleave", () => pointAt(id, false));
+    chip.addEventListener("click", () => {
+      const caret = document.querySelector(`.peer-caret[data-peer="${id}"]`);
+      caret?.scrollIntoView({ behavior: "smooth", block: "center" });
+      pointAt(id, true);
+      setTimeout(() => pointAt(id, false), 1800);
+    });
+    return chip;
+  });
+
+  // Agents are shown differently on purpose: a window is *present*, an agent
+  // has *just written*. Marking them the same would claim a kind of liveness
+  // agents do not have.
+  const agents = liveAgents().map(({ presence, at }) => {
+    const chip = document.createElement("span");
+    chip.className = "who is-agent";
+    chip.style.setProperty("--who", colorFor(seedFrom(presence.actor_id)));
+    chip.textContent = initials(presence.name || presence.actor_id);
+    const model = presence.model ? ` · ${presence.model}` : "";
+    chip.title = `${presence.name}${model} — wrote ${ago(at)}`;
+    return chip;
+  });
+
+  els.presence.replaceChildren(...agents, ...windows);
 }
 
 async function openDocument(docId: string) {
@@ -125,6 +194,7 @@ async function openDocument(docId: string) {
     doc,
     awareness,
     setStatus,
+    noteAgent,
   );
 
   // A window has no name of its own, and "Window 72" tells you nothing. Both
@@ -143,12 +213,11 @@ async function openDocument(docId: string) {
   openDocId = docId;
 
   editor.on("update", () => refreshTitle(editor));
-  awareness.on("change", () => {
-    renderPresence(awareness, doc.clientID);
-    if (!els.connections.hidden) void renderConnections();
-  });
+  awareness.on("change", renderPeers);
   refreshTitle(editor);
-  window.localStorage.setItem("polar.last", docId);
+  activeAgents.clear();
+  renderPeers();
+  rememberOpenDocument(docId);
 }
 
 // ---------------------------------------------------------------- connections
@@ -377,7 +446,7 @@ async function boot() {
   await mcp.connect();
 
   const documents = await mcp.listDocuments();
-  const last = window.localStorage.getItem("polar.last");
+  const last = lastOpenDocument();
   const target =
     documents.find((d) => d.doc_id === last) ??
     documents[0] ??

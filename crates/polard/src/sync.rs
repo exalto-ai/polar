@@ -23,6 +23,7 @@ mod tag {
     pub const BROADCAST: u8 = 0x04;
     pub const AWARENESS: u8 = 0x05;
     pub const ERROR: u8 = 0x06;
+    pub const PRESENCE: u8 = 0x07;
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,14 @@ pub enum Frame {
         doc_id: String,
         message: String,
     },
+    /// An agent just wrote. Agents connect over MCP, which has no awareness
+    /// protocol, so their presence is inferred from their edits and published
+    /// here rather than pretended into the awareness channel — it is a
+    /// different kind of signal, and conflating them would mislead the window.
+    Presence {
+        doc_id: String,
+        actor: String,
+    },
 }
 
 impl Frame {
@@ -65,6 +74,7 @@ impl Frame {
             Frame::Broadcast { doc_id, update } => (tag::BROADCAST, doc_id, update.clone()),
             Frame::Awareness { doc_id, payload } => (tag::AWARENESS, doc_id, payload.clone()),
             Frame::Error { doc_id, message } => (tag::ERROR, doc_id, message.as_bytes().to_vec()),
+            Frame::Presence { doc_id, actor } => (tag::PRESENCE, doc_id, actor.as_bytes().to_vec()),
         };
         let id = doc_id.as_bytes();
         let mut out = Vec::with_capacity(5 + id.len() + body.len());
@@ -113,6 +123,10 @@ impl Frame {
                 doc_id,
                 message: String::from_utf8_lossy(&body).into_owned(),
             },
+            tag::PRESENCE => Frame::Presence {
+                doc_id,
+                actor: String::from_utf8_lossy(&body).into_owned(),
+            },
             _ => return None,
         })
     }
@@ -145,18 +159,35 @@ impl SyncState {
         // updates are idempotent, so applying one you already have is a no-op,
         // and one fan-out path is worth more than the saved bytes.
         let channels = state.channels.clone();
-        workspace.observe(move |doc_id, update| {
+        workspace.observe(move |doc_id, update, actor| {
             let sender = channels
                 .lock()
                 .expect("sync channels poisoned")
                 .get(doc_id)
                 .cloned();
-            if let Some(sender) = sender {
+            let Some(sender) = sender else { return };
+
+            let _ = sender.send((
+                u64::MAX,
+                Frame::Broadcast {
+                    doc_id: doc_id.to_string(),
+                    update: update.to_vec(),
+                },
+            ));
+
+            // An agent's only way of saying "I am here" is that it wrote.
+            if actor.kind == "agent" {
+                let payload = serde_json::json!({
+                    "actor_id": actor.id,
+                    "name": actor.display_name,
+                    "model": actor.model,
+                    "session": actor.session_id,
+                });
                 let _ = sender.send((
                     u64::MAX,
-                    Frame::Broadcast {
+                    Frame::Presence {
                         doc_id: doc_id.to_string(),
-                        update: update.to_vec(),
+                        actor: payload.to_string(),
                     },
                 ));
             }
@@ -310,6 +341,9 @@ fn handle(
         }
 
         // Server-to-client only; a client sending one is confused.
-        Frame::Sync { .. } | Frame::Broadcast { .. } | Frame::Error { .. } => vec![],
+        Frame::Sync { .. }
+        | Frame::Broadcast { .. }
+        | Frame::Error { .. }
+        | Frame::Presence { .. } => vec![],
     }
 }

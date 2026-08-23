@@ -19,6 +19,13 @@ const BACKGROUND_FLUSH_MS = 50;
 
 export type ProviderStatus = "connecting" | "connected" | "offline";
 
+export type AgentPresence = {
+  actor_id: string;
+  name: string;
+  model: string | null;
+  session: string | null;
+};
+
 export class SyncProvider {
   private socket: WebSocket | null = null;
   private inbound: Uint8Array[] = [];
@@ -35,6 +42,7 @@ export class SyncProvider {
     private readonly doc: Y.Doc,
     private readonly awareness: Awareness,
     private readonly onStatus: (status: ProviderStatus) => void = () => {},
+    private readonly onAgent: (agent: AgentPresence) => void = () => {},
   ) {
     this.doc.on("update", this.onLocalUpdate);
     this.awareness.on("update", this.onAwarenessChange);
@@ -67,6 +75,14 @@ export class SyncProvider {
           break;
         case Tag.Awareness:
           applyAwarenessUpdate(this.awareness, frame.body, REMOTE);
+          break;
+        case Tag.Presence:
+          try {
+            this.onAgent(JSON.parse(new TextDecoder().decode(frame.body)));
+          } catch {
+            // A presence frame we cannot read is not worth dropping the
+            // connection over.
+          }
           break;
         case Tag.Error:
           console.error("sync error:", new TextDecoder().decode(frame.body));
