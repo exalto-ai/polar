@@ -280,7 +280,9 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   max-width: var(--measure);
   margin: 0 auto;
   padding: 8px 24px 45vh;
-  /* The rails measure against this box, so it has to be the offset parent. */
+  /* The rail layer hangs off this box. It is *not* the blocks' offset parent —
+     ProseMirror positions its own DOM inside here — so the rails measure the
+     gap rather than assuming there is none. See railSpan in provenance.ts. */
   position: relative;
 }
 /* Deep bottom padding so the line being written sits mid-screen rather than

@@ -5,6 +5,7 @@ import {
   blockIdOf,
   installProvenanceRails,
   labelFor,
+  railSpan,
   runsOf,
 } from "./provenance";
 import type { BlockAttribution } from "./mcp";
@@ -87,6 +88,40 @@ describe("aligning the CRDT with the editor", () => {
 
   it("draws nothing rather than refusing for an empty document", () => {
     expect(alignBlocks([], ["paragraph"])).toEqual([]);
+  });
+});
+
+describe("where a bar is drawn", () => {
+  /**
+   * The rail layer and the blocks do not share an origin: ProseMirror sets
+   * `position: relative` on its own DOM, so the layer sits above the first
+   * block by the editor's padding plus whatever margin that block collapses
+   * out. Measured in a real window that is 13.77px under a leading heading and
+   * 8px under a leading paragraph — which is why nothing here is a constant.
+   */
+  it("places a bar against the layer's origin, not the document's", () => {
+    const span = railSpan({ top: 113.77, bottom: 149.77 }, { top: 113.77, bottom: 149.77 }, 100);
+    expect(span.top).toBeCloseTo(13.77);
+    expect(span.height).toBeCloseTo(36);
+  });
+
+  it("spans a run from the first block's top to the last block's bottom", () => {
+    const span = railSpan({ top: 20, bottom: 56 }, { top: 200, bottom: 284 }, 0);
+    expect(span).toEqual({ top: 20, height: 264 });
+  });
+
+  /** The gap differs per document, so subtracting a fixed 14 would be wrong. */
+  it("tracks an origin that moves with the leading block", () => {
+    const heading = railSpan({ top: 13.77, bottom: 49.77 }, { top: 13.77, bottom: 49.77 }, 0);
+    const paragraph = railSpan({ top: 8, bottom: 36 }, { top: 8, bottom: 36 }, 0);
+    expect(heading.top).toBeCloseTo(13.77);
+    expect(paragraph.top).toBe(8);
+  });
+
+  it("is unaffected by scrolling, because both sides move together", () => {
+    const unscrolled = railSpan({ top: 120, bottom: 156 }, { top: 300, bottom: 336 }, 100);
+    const scrolled = railSpan({ top: -380, bottom: -344 }, { top: -200, bottom: -164 }, -400);
+    expect(scrolled).toEqual(unscrolled);
   });
 });
 

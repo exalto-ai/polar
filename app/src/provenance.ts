@@ -89,6 +89,25 @@ export function runsOf(actorIds: (string | null)[]): Run[] {
   return runs;
 }
 
+/** Just enough of a `DOMRect` to place a bar with. */
+export type Span = { top: number; bottom: number };
+
+/**
+ * Where a run's bar goes, in the rail layer's own coordinates.
+ *
+ * Offsets cannot do this. ProseMirror sets `position: relative` on its own DOM,
+ * so a block's `offsetTop` is measured from the editor's box, while a rail is
+ * placed against the layer's — and the two are not the same box. The gap
+ * between them is the editor's padding plus whatever margin the first block
+ * collapses out of the document, which is 8px under a leading paragraph and
+ * 13.8px under a leading heading. So it is measured rather than assumed: a
+ * constant would be wrong for half the documents, and was wrong by 14px for
+ * the rest.
+ */
+export function railSpan(first: Span, last: Span, originTop: number) {
+  return { top: first.top - originTop, height: last.bottom - first.top };
+}
+
 function ago(timestamp: number): string {
   const seconds = Math.max(0, (Date.now() - timestamp) / 1000);
   if (seconds < 60) return "just now";
@@ -165,6 +184,9 @@ export function installProvenanceRails(
   function draw() {
     frame = null;
     const blocks = [...editor.view.dom.children] as HTMLElement[];
+    // Read once: every rail is placed against this, and asking per rail would
+    // put a layout read in a loop that already runs on every keystroke.
+    const originTop = layer.getBoundingClientRect().top;
     const kinds: string[] = [];
     editor.state.doc.forEach((node) => kinds.push(node.type.name));
 
@@ -196,8 +218,9 @@ export function installProvenanceRails(
       // so the two are told apart by how the bar is drawn as well.
       if (block.kind === "agent") rail.dataset.agent = "";
       rail.style.setProperty("--who", block.color || colorFor(seedFrom(run.actorId)));
-      rail.style.top = `${first.offsetTop}px`;
-      rail.style.height = `${last.offsetTop + last.offsetHeight - first.offsetTop}px`;
+      const span = railSpan(first.getBoundingClientRect(), last.getBoundingClientRect(), originTop);
+      rail.style.top = `${span.top}px`;
+      rail.style.height = `${span.height}px`;
 
       rail.addEventListener("mouseenter", () => {
         label.textContent = labelFor(block, selfId);
@@ -208,7 +231,8 @@ export function installProvenanceRails(
         // than a label. Clamped at the top of the document, where there is no
         // gap to sit in.
         const clear = label.offsetHeight + 4;
-        label.style.top = `${Math.max(first.offsetTop - clear, 0)}px`;
+        const top = first.getBoundingClientRect().top - layer.getBoundingClientRect().top;
+        label.style.top = `${Math.max(top - clear, 0)}px`;
         rail.dataset.hover = "";
       });
       rail.addEventListener("mouseleave", () => {
