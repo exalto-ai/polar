@@ -1754,6 +1754,7 @@ dependencies = [
  "thought-provenance",
  "thought-schema",
  "thought-store",
+ "unicode-segmentation",
  "uuid",
 ]
 

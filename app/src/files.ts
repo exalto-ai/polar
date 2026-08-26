@@ -46,7 +46,7 @@ export function suggestedMarkdownName(title: string): string {
 export async function importMarkdownDocument(
   bridge: FileBridge,
   documents: DocumentCreator,
-  openDocument: (docId: string) => Promise<void>,
+  openDocument: (docId: string) => Promise<boolean | void>,
 ): Promise<ImportedMarkdown | null> {
   const file = await bridge.importMarkdown();
   if (!file) return null;
@@ -55,7 +55,10 @@ export async function importMarkdownDocument(
     titleFromFileName(file.file_name),
     file.markdown,
   );
-  await openDocument(created.doc_id);
+  const opened = await openDocument(created.doc_id);
+  if (opened === false) {
+    throw new Error("the current document still has changes waiting to autosave");
+  }
   return file;
 }
 

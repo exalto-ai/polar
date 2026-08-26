@@ -9,8 +9,9 @@ use std::time::Duration;
 
 /// Discovery and local sync protocol understood by this daemon build.
 ///
-/// Version 2 adds sourced editor updates and separate MCP/editor capabilities.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Version 3 adds ordered anchored editor batches. Legacy sourced updates
+/// remain accepted as the unanchored fallback.
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const IDENTITY_PATH: &str = "/health/identity";
 pub const MCP_HEALTH_PATH: &str = "/health/mcp";
 pub const EDITOR_HEALTH_PATH: &str = "/health/editor";

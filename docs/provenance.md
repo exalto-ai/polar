@@ -1,8 +1,10 @@
 # Delta provenance and AI evidence
 
-**Status:** accepted product and architecture direction, 2026-08-26
+**Status:** accepted product and architecture direction; delta foundation and anchored-evidence
+prerequisites implemented, 2026-08-26
 
-**First provenance branch:** `codex/provenance-delta-foundation`
+**Provenance stack:** `codex/provenance-delta-foundation` (PR #10), followed by
+`codex/provenance-anchors`
 **Stack base:** `codex/tauri-ci-smoke`, after the separate
 `codex/editor-toolbar-branding`, `codex/brand-assets`, `codex/daemon-single-owner`,
 `codex/document-lifecycle`, `codex/sync-store-durability`, and
@@ -66,9 +68,15 @@ Version 1 has one explicit nonclaim. A before-and-after tree cannot reveal which
 survived when identical text from different sources admits several equally valid alignments.
 For example, deleting one `yes` from `yesyes` is ambiguous if each copy has a different source
 and no trusted transaction range was retained. Version 1 records its stable tie-break result as
-`deterministic_inference`, not an exact observation of user intent. User-visible contribution
-percentages remain gated until the editor and MCP envelopes carry validated semantic range hints;
-that anchored transport belongs in the next pull request.
+`deterministic_inference`, not an exact observation of user intent.
+
+Chain version 2 binds validated operation ranges to the event and uses them as exact alignment
+boundaries. Current wording is consumer-eligible only when every event still contributing a
+visible source uses V2. A document with surviving V1 and V2 sources reports `mixed`; a document
+whose surviving sources are all V2 reports `anchored`. A V1 event that contributes no surviving
+wording, such as a tombstone-only command or a fully deleted insertion, does not permanently
+poison the document. Consumer percentages remain hidden until the separate real-WKWebView IME
+gate is complete, even when the stored lineage is otherwise eligible.
 
 ## 3. Claims and labels
 
@@ -140,17 +148,29 @@ The normalized ProseMirror tree is flattened into visible Unicode grapheme clust
 
 ### Alignment
 
-Stable block IDs are preferred anchors. Between stable anchors, a deterministic diff aligns
-the neighboring text region so paragraph splits, merges, and block-type changes can preserve
-equal wording. Repeated text uses deterministic nearest-position tie-breaking. An operation
-with a trusted exact range, such as a future suggestion decision, can supply that range as an
-additional anchor in a later algorithm version.
+Stable block IDs partition unchanged structure. Within changed regions, the semantic engine
+aligns extended Unicode grapheme clusters. Version 1 uses deterministic LCS-style alignment and
+nearest-position tie-breaking. It does not infer user intent when identical text is ambiguous.
+That behavior is frozen and remains available for old and fallback evidence.
 
-Version 1 uses deterministic LCS-style alignment over grapheme clusters, with stable unchanged
-blocks partitioning the work. It does not persist editor selection ranges or infer user intent
-when identical text is ambiguous. Its deterministic tie-breaking is part of the evidence format;
-adding trusted range anchors or changing the algorithm requires a new version and the old
-verifier must remain available for recorded evidence.
+For each local TipTap dispatch, the webview combines the root ProseMirror transaction and every
+appended plugin transaction, then records all changed ranges in the complete input and output
+documents. Those positions use ProseMirror's UTF-16 coordinate space. The daemon
+validates each boundary against the exact before and after trees, rejects positions inside a
+grapheme, and converts valid positions into global grapheme ranges. The ranges must remain
+ordered and non-overlapping. The reconciler also verifies that visible text outside the ranges is
+identical. Only then does the event use chain V2 and `anchored` alignment.
+
+Each persisted anchor records its basis, ordered before and after grapheme ranges, and
+domain-separated hashes of the corresponding text slices. The ordered anchor list is also part
+of the event hash. Initial document creation and native Markdown import use one exact
+`server_operation` anchor from the empty document to the full initial snapshot. Editor changes
+use `editor_transaction` anchors.
+
+Missing, empty, malformed, out-of-range, mid-grapheme, incomplete, or semantically inconsistent
+editor hints do not block the CRDT mutation. The event falls back as a whole to frozen V1, stores
+no anchors, and makes any wording it contributes ineligible for exact consumer percentages. The
+implementation never records a partially trusted V2 event.
 
 ### Applying lineage
 
@@ -176,13 +196,26 @@ restart or later actor rename cannot change the consumer breakdown.
 
 ### Performance boundary
 
-Version 1 is correctness-first. Each durable mutation currently snapshots and aligns the complete
-visible tree, hashes the complete before and after snapshots, serializes the current projection,
-and replaces the complete live-span cache. Cold hydration verifies the full update/event history.
-The editor queue can combine adjacent unsent updates only when their source is identical, but this
-foundation makes no interactive latency or large-history startup claim. Before consumer lineage
-or suggestions ship, realistic document and history benchmarks must set budgets and drive safe
-batching, incremental alignment, incremental span updates, or checkpointed verification.
+The implementation remains correctness-first. Each durable mutation currently snapshots and
+aligns the complete visible tree, hashes the complete before and after snapshots, serializes the
+current projection, and replaces the complete live-span cache. Normal hydration can trust and
+verify the persisted lineage cache; deleting that cache intentionally exercises a much more
+expensive full-history recovery path.
+
+An opt-in release benchmark uses a 10,000-word document and a 100-event anchored history. On the
+reference Apple M4 Max development machine it measured a 60.86 ms anchored interactive commit,
+a 51.84 ms cached cold open, and a 5.72 s 101-event cache-recovery replay. The reference budgets
+are 100 ms, 150 ms, and 10 s respectively. These are a regression gate for that machine, not a
+universal end-user latency claim or a shared-CI wall-clock assertion. Run it with:
+
+```text
+cargo test --release -p thought-mcp --test provenance_performance -- --ignored --nocapture
+```
+
+The editor may transport up to 128 immutable mutations in one ordered batch, but batching never
+coalesces their provenance events. Each complete editor dispatch keeps its own source, client
+event ID, range list, Yjs update, and retry identity. The daemon acknowledges only after the
+complete batch has been processed durably.
 
 ## 6. Durable and derived data
 
@@ -198,12 +231,13 @@ temporarily for the M2 rails and is compatibility data, not the new source of tr
 crate retains low-level compatibility helpers that do not create provenance events; production
 document mutations must go through `Workspace` to receive the atomic evidence guarantees below.
 
-The V2 schema separates five responsibilities:
+Schema V2 separates five responsibilities, and schema V3 adds the immutable anchor evidence:
 
 | Table | Role | Mutation rule |
 | --- | --- | --- |
 | `provenance_events` | Event envelope, frozen actor/model/source labels, input and assurance, document hashes, cumulative Yjs update-log root, prior-event hash, and canonical event hash | Append only |
 | `provenance_changes` | Ordered insert, delete, format, and structure deltas with typed locations and source-event references | Append only |
+| `provenance_anchors` | Ordered V2 anchor basis, before and after grapheme ranges, and hashes of the anchored text slices | Append only |
 | `provenance_receipts` | Later MCP, provider, device, or Seal evidence that strengthens an event without rewriting it | Append only |
 | `lineage_spans` | Current surviving UTF-16 ranges and their source events | Replaceable derived cache |
 | `lineage_state` | Algorithm version, rebuild watermarks, readiness, and digest for one complete span generation | Replaceable derived cache |
@@ -231,13 +265,20 @@ entire chain can rewrite it. Device signing and optional live Seal anchoring are
 the product may claim resistance to that attacker.
 
 SQLite migrations are ordered, transactional, and versioned with `PRAGMA user_version`.
-Version 1 adopts the released schema without rewriting user data; version 2 creates the
-evidence ledger and derived lineage tables. A newer database is refused explicitly. The exact
-DDL is the review authority in [`crates/thought-store/src/schema.rs`](../crates/thought-store/src/schema.rs).
-Chain version 1 freezes the complete evidence encoding and semantic reconciliation suite. This
-build rejects every other chain version. A future version must first add a schema migration and
-version-dispatched verifier and reconciler so old evidence remains readable; the individual
-internal digest constants are not independent compatibility promises.
+Schema V1 adopts the released schema without rewriting user data. Schema V2 creates the event
+ledger and derived lineage tables. Schema V3 adds anchors and rebuilds the affected evidence
+tables with their foreign-key relationships while preserving V2 rows and SQLite sequences. A
+newer database is refused explicitly. The exact DDL is the review authority in
+[`crates/thought-store/src/schema.rs`](../crates/thought-store/src/schema.rs).
+
+Database schema versions and event-chain versions are intentionally separate. Chain V1 freezes
+the original evidence byte encoding and deterministic reconciler. Chain V2 adds a
+domain-separated ordered anchor list to that encoding and dispatches to the anchored reconciler.
+The V1 regression digest is frozen in tests. Hydration verifies and replays V1 and V2 event by
+event, so a migrated document may contain both. This build rejects every other chain version.
+Any future evidence version must add version-dispatched hashing, validation, and reconciliation
+while leaving both old suites readable; individual internal digest constants are not independent
+compatibility promises.
 
 The V1 digest root and domain separators use the machine namespace `thought`, including
 `thought/canonical-evidence`, `thought/document`, `thought/event-chain`,
@@ -263,16 +304,23 @@ pasted, or AI history from old block-level attribution.
 
 ## 7. Trusted ingress metadata
 
-The editor captures input source at the ProseMirror transaction boundary. Paste detection is
+The editor captures input source at the complete TipTap dispatch boundary. Paste detection is
 event-based, not a content heuristic. Direct input, paste, undo, toolbar command, and import
 map to their current source categories even if two produce identical text. Drag-and-drop is
 conservatively `unknown` in V1 because the closed wire vocabulary does not yet represent it.
 Any other unobserved current update is also `unknown`; `legacy_unknown` is reserved for history
 created before this feature.
 
-That metadata travels with the Yjs update through the sync envelope. The outbound queue may
-merge adjacent updates only when their provenance metadata is identical. Retries preserve the
-original metadata and acknowledgement ordering.
+That metadata travels with the Yjs update through the sync envelope. One transport frame may
+batch several queued editor dispatches, but it never merges them into one evidence event. Each
+dispatch retains its original source, UTF-8 client event ID, ordered range hints, and exact
+Yjs update. Retries resend the same immutable ordered batch until one acknowledgement confirms
+that the daemon durably processed the whole batch. Strict limits allow 1 to 128 mutations per
+batch, 0 to 64 ranges per mutation, a 1 to 64 byte client event ID, and a nonempty update.
+Repeated subscriptions are idempotent. If a window falls behind the bounded live broadcast
+buffer, the daemon first subscribes it at the current channel tail, sends a full authoritative
+Yjs snapshot, and then resumes live delivery. Any overlap is safe because Yjs updates are
+idempotent.
 
 The daemon assigns assurance from the trusted ingress path:
 
@@ -295,13 +343,18 @@ against a hostile process running as the same operating-system user that can rea
 Thought's private application state or inject code into its webview. Stronger device claims need
 the signing and anchoring work described below.
 
-The current native File > Open and document-lifecycle controls inherited from PR #9 still call
-the public `create_document` tool. The foundation therefore records visible text from that
-existing import path conservatively as MCP and reported AI activity. The `Imported` sync
-classification is implemented and tested, but a following consumer UI pull request must move
-native import onto the editor-only capability before showing `Imported` to people. This pull
-request also does not ship onboarding, the reviewer sidebar, suggestions, API keys, or a new
-provenance visualization.
+Native creation, File > Open, trash, and restore now use a narrow editor-only HTTP surface:
+`POST /editor/documents` and `POST /editor/documents/{doc_id}/deleted`. The app authenticates
+with the editor capability and sends no caller-selected actor or model identity. Document titles
+are capped at 4 KiB and Markdown import at 2 MiB after JSON decoding. Imported initial text
+receives observed `Imported` metadata and one whole-snapshot `server_operation` anchor. The
+public MCP capability is rejected on these routes, while the editor capability remains unable to
+call public MCP tools.
+
+This pull request still does not ship onboarding, reviewer connections, the reviewer sidebar,
+suggestions, API keys, or a new provenance visualization. MCP block mutations that do not yet
+carry exact semantic operation ranges remain V1 reported evidence. They can still support a
+weaker activity proof, but their surviving wording is not eligible for exact percentages.
 
 ## 8. Suggestions and multiple reviewers
 
@@ -369,19 +422,26 @@ from publication onward, not contemporaneous recording.
 - Proof publication is always explicit. Connecting a reviewer never publishes a document.
 - A connected app receives only the permissions granted to that connection. Multiple reviewer
   identities must not share one undifferentiated external credential.
+- The development preview returns daemon capabilities only to a loopback socket, even if Vite is
+  explicitly bound to a LAN interface for other assets.
 
 ## 11. Stacked delivery plan
 
 The work is intentionally split because each layer has a different failure and rollback
 boundary.
 
-1. **Delta provenance foundation:** versioned migrations, immutable events and semantic
+1. **Delta provenance foundation, PR #10:** versioned migrations, immutable events and semantic
    deltas, derived live spans, trusted ingress propagation, legacy seeding, and tests.
-2. **Reviewer suggestions:** consumer onboarding, connected reviewer identities, inline
-   suggestions, Accept and Reject, conflicts, and concrete delta visualization.
-3. **Pro provider path:** secure keys, built-in chat, model and reasoning controls, files, and
+2. **Anchored evidence prerequisites, this branch:** schema V3 anchors, chain V2 hashing and
+   replay, validated editor ranges, immutable batched transport, editor-only native lifecycle,
+   mixed-history compatibility, concurrency coverage, and a reference benchmark.
+3. **Reviewer connection and onboarding:** simple Basic and recommended Connect choices,
+   multiple reported reviewer identities, transparent guarantees, and the sidebar shell.
+4. **Replicated suggestions:** proposal state, inline visualization, Accept and Reject,
+   conflict handling, and exact proposal-to-delta attribution.
+5. **Pro provider path:** secure keys, built-in chat, model and reasoning controls, files, and
    provider trace binding.
-4. **Seal bundle:** deterministic bundle, signing and optional live anchoring, publish flow,
+6. **Seal bundle:** deterministic bundle, signing and optional live anchoring, publish flow,
    and the Seal page/verifier changes in the appropriate repository.
 
 Planned consumer UI is not rendered or shipped until its corresponding pull request is ready.
@@ -390,17 +450,20 @@ onto `main` as predecessors merge.
 
 ## 12. Acceptance contract and current coverage
 
-The foundation pull request automates the claims it currently exposes:
+The foundation and anchored-evidence pull requests automate the claims they expose:
 
 1. A grammar replacement attributes only the replacement and preserves every untouched
    grapheme source.
-2. Duplicate text alignment is deterministic, including its documented cross-source ambiguity.
+2. V1 duplicate text alignment is deterministic, including its documented cross-source
+   ambiguity. V2 validated ranges disambiguate the selected occurrence.
 3. Heading or paragraph type changes, paragraph split and merge, formatting-only changes,
    deletion, and later replacement preserve or change lineage according to the V1 rules.
 4. Emoji, combining marks, grapheme boundaries, and UTF-16 offsets round-trip in the semantic
    engine. This is not a claim that a real IME interaction has been tested end to end.
-5. Entered and pasted updates remain separate through the editor queue; all source values and
-   legacy source-less updates cross the daemon wire without promotion.
+5. Entered and pasted updates remain separate through the editor queue. Each complete editor
+   dispatch retains its own immutable range hints and client event ID through batching, retry, and
+   one durable ACK.
+   All source values and legacy source-less updates cross the daemon wire without promotion.
 6. An MCP caller cannot promote reported provenance by claiming a human actor.
 7. Restart, cache deletion and rebuild, legacy seeding, empty documents, and failed persistence
    produce deterministic results without invented or partial evidence.
@@ -410,19 +473,28 @@ The foundation pull request automates the claims it currently exposes:
 10. Actor registration, document state, semantic evidence, and derived projections either commit
     together or remain unchanged.
 11. Trash and restore use distinct event actions, and restart verification rejects a changed
-    update payload, immutable update metadata, or unsupported event-chain version.
+    update payload, immutable update metadata, anchor material, or unsupported event-chain
+    version.
+12. A 100-word anchored grammar scenario changes only the requested wording. Cross-source
+    repeated occurrences use the supplied range, and restart preserves the same result.
+13. Actual concurrent Yjs inserts from two replica clients and two provenance sources remain
+    distinct in live spans before and after restart.
+14. Valid V1-only, V2-only, and mixed V1/V2 histories verify and rebuild event by event. Invalid
+    ranges fall back atomically to V1 and disable exact consumer output only while their source
+    still contributes wording.
+15. Native create, import, trash, and restore use the editor-only capability. A public MCP token
+    cannot invoke that path, and native import produces observed, anchored `Imported` lineage.
+16. The opt-in 10,000-word, 100-event benchmark passes the documented reference-machine budgets.
 
-The following remain acceptance gates for the next pull request that enables consumer
-percentages and suggestions:
+The following gates remain before their corresponding consumer features ship:
 
-1. Validated semantic range hints travel with editor and MCP updates and remain ordered across
-   queue coalescing and retry.
-2. The 100-word grammar scenario and cross-source repeated-occurrence edits use those anchors.
-3. Actual concurrent Yjs inserts from different provenance actors remain distinct in live spans.
-4. A real IME transaction passes from WKWebView through the sourced envelope and restart.
-5. Suggestion acceptance keeps the proposing source; rejection changes no live span.
-6. Interactive typing and cold-open benchmarks pass agreed budgets for realistic large documents
-   and histories; correctness-preserving batching or incremental work lands where required.
+1. A real Japanese or Pinyin IME transaction passes from WKWebView through the anchored envelope
+   and restart. Automated composition-guard coverage is necessary but is not this manual claim.
+2. Consumer contribution percentages remain hidden until that real IME pass is recorded.
+3. Suggestion acceptance keeps the proposing source; rejection changes no live span. This lands
+   with the replicated-suggestions pull request rather than being simulated in the anchor layer.
+4. Reviewer connection identities and their permissions are exercised through onboarding before
+   Connect is presented as configured.
 
 Manual review must additionally confirm that public language says what the evidence establishes,
 and no more.

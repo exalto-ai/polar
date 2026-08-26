@@ -1,5 +1,6 @@
 use rusqlite::{Connection, params};
 use thought_core::{Document, Position};
+use thought_mcp::lineage::ProseMirrorRangeHint;
 use thought_mcp::{
     ActorRef, Assurance, DocumentLineage, Ingress, LiveLineageSpan, MutationContext,
     SourceContribution, TextEdit, Workspace,
@@ -37,8 +38,334 @@ fn contribution<'a>(lineage: &'a DocumentLineage, label: &str) -> &'a SourceCont
 fn assert_same_lineage(left: &DocumentLineage, right: &DocumentLineage) {
     assert_eq!(left.algorithm_version, right.algorithm_version);
     assert_eq!(left.alignment, right.alignment);
+    assert_eq!(left.consumer_eligible, right.consumer_eligible);
     assert_eq!(left.summary, right.summary);
     assert_eq!(left.spans, right.spans);
+}
+
+fn replace_local_paragraph(local: &Document, block_id: &str, text: &str) -> Vec<u8> {
+    let before = local.state_vector();
+    local
+        .replace_block(
+            block_id,
+            &Node::element("paragraph", vec![Node::text(text, vec![])]),
+        )
+        .unwrap();
+    local.diff_since(&before)
+}
+
+fn create_two_anchor_editor_event(path: &std::path::Path) -> (String, i64) {
+    let doc_id = {
+        let workspace = Workspace::open(path).unwrap();
+        let created = workspace
+            .create_document_from_markdown_with_context(
+                "Anchors bound",
+                "abcd",
+                &editor(),
+                &MutationContext::imported(),
+            )
+            .unwrap();
+        let local = Document::new();
+        local
+            .apply_update(&workspace.sync_since(&created.doc_id, &[]).unwrap())
+            .unwrap();
+        let block_id = local.blocks()[0].block_id.clone();
+        let update = replace_local_paragraph(&local, &block_id, "aXbcYd");
+        workspace
+            .apply_anchored_peer_update_with_context(
+                &created.doc_id,
+                &update,
+                &editor(),
+                &MutationContext::command().with_client_event_id("two-anchor-edit".into()),
+                &[
+                    ProseMirrorRangeHint {
+                        before_from: 2,
+                        before_to: 2,
+                        after_from: 2,
+                        after_to: 3,
+                    },
+                    ProseMirrorRangeHint {
+                        before_from: 4,
+                        before_to: 4,
+                        after_from: 5,
+                        after_to: 6,
+                    },
+                ],
+            )
+            .unwrap();
+        created.doc_id
+    };
+
+    let connection = Connection::open(path).unwrap();
+    let event_id: i64 = connection
+        .query_row(
+            "SELECT event_id FROM provenance_events
+             WHERE doc_id = ?1 AND client_event_id = 'two-anchor-edit'",
+            [&doc_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let anchor_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM provenance_anchors WHERE event_id = ?1",
+            [event_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(anchor_count, 2);
+    (doc_id, event_id)
+}
+
+#[test]
+fn anchored_editor_ranges_disambiguate_repeated_text_and_rebuild_after_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("thought.db");
+    let (doc_id, expected) = {
+        let workspace = Workspace::open(&path).unwrap();
+        let created = workspace.create_document("", &editor()).unwrap();
+        let local = Document::new();
+        local
+            .apply_update(&workspace.sync_since(&created.doc_id, &[]).unwrap())
+            .unwrap();
+        let block_id = local.blocks()[0].block_id.clone();
+
+        let first = replace_local_paragraph(&local, &block_id, "yes");
+        workspace
+            .apply_anchored_peer_update_with_context(
+                &created.doc_id,
+                &first,
+                &editor(),
+                &MutationContext::entered().with_client_event_id("entered-1".into()),
+                &[ProseMirrorRangeHint {
+                    before_from: 1,
+                    before_to: 1,
+                    after_from: 1,
+                    after_to: 4,
+                }],
+            )
+            .unwrap();
+
+        let second = replace_local_paragraph(&local, &block_id, "yesyes");
+        workspace
+            .apply_anchored_peer_update_with_context(
+                &created.doc_id,
+                &second,
+                &editor(),
+                &MutationContext::pasted().with_client_event_id("paste-2".into()),
+                &[ProseMirrorRangeHint {
+                    before_from: 4,
+                    before_to: 4,
+                    after_from: 4,
+                    after_to: 7,
+                }],
+            )
+            .unwrap();
+
+        let third = replace_local_paragraph(&local, &block_id, "yes");
+        workspace
+            .apply_anchored_peer_update_with_context(
+                &created.doc_id,
+                &third,
+                &editor(),
+                &MutationContext::command().with_client_event_id("delete-3".into()),
+                &[ProseMirrorRangeHint {
+                    before_from: 4,
+                    before_to: 7,
+                    after_from: 4,
+                    after_to: 4,
+                }],
+            )
+            .unwrap();
+
+        let lineage = workspace.document_lineage(&created.doc_id).unwrap();
+        assert_eq!(lineage.alignment, "anchored");
+        assert!(lineage.consumer_eligible);
+        assert_eq!(lineage.summary.contributions.len(), 1);
+        assert_eq!(
+            lineage.summary.contributions[0].source.label,
+            "Written here"
+        );
+        assert_eq!(lineage.summary.contributions[0].graphemes, 3);
+        (created.doc_id, lineage)
+    };
+
+    let connection = Connection::open(&path).unwrap();
+    let versions = connection
+        .prepare("SELECT chain_version FROM provenance_events WHERE doc_id = ?1 ORDER BY event_id")
+        .unwrap()
+        .query_map([&doc_id], |row| row.get::<_, i64>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(versions, vec![2, 2, 2, 2]);
+    let anchors: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM provenance_anchors a
+             JOIN provenance_events e ON e.event_id = a.event_id
+             WHERE e.doc_id = ?1",
+            [&doc_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(anchors, 4);
+    let deleted_spans = connection
+        .execute("DELETE FROM lineage_spans WHERE doc_id = ?1", [&doc_id])
+        .unwrap();
+    assert!(deleted_spans > 0);
+    assert_eq!(
+        connection
+            .execute("DELETE FROM lineage_state WHERE doc_id = ?1", [&doc_id])
+            .unwrap(),
+        1
+    );
+    drop(connection);
+
+    {
+        let reopened = Workspace::open(&path).unwrap();
+        assert_same_lineage(&expected, &reopened.document_lineage(&doc_id).unwrap());
+    }
+
+    let connection = Connection::open(&path).unwrap();
+    let (state, rebuilt_spans): (String, i64) = connection
+        .query_row(
+            "SELECT
+               (SELECT state FROM lineage_state WHERE doc_id = ?1),
+               (SELECT COUNT(*) FROM lineage_spans WHERE doc_id = ?1)",
+            [&doc_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "ready");
+    assert_eq!(rebuilt_spans as usize, expected.spans.len());
+}
+
+#[test]
+fn invalid_editor_ranges_fall_back_without_unlocking_consumer_percentages() {
+    let workspace = Workspace::open_in_memory().unwrap();
+    let created = workspace.create_document("", &editor()).unwrap();
+    let local = Document::new();
+    local
+        .apply_update(&workspace.sync_since(&created.doc_id, &[]).unwrap())
+        .unwrap();
+    let block_id = local.blocks()[0].block_id.clone();
+    let update = replace_local_paragraph(&local, &block_id, "fallback");
+
+    workspace
+        .apply_anchored_peer_update_with_context(
+            &created.doc_id,
+            &update,
+            &editor(),
+            &MutationContext::entered().with_client_event_id("invalid-range".into()),
+            &[ProseMirrorRangeHint {
+                before_from: 999,
+                before_to: 999,
+                after_from: 999,
+                after_to: 999,
+            }],
+        )
+        .unwrap();
+
+    let lineage = workspace.document_lineage(&created.doc_id).unwrap();
+    assert_eq!(lineage.alignment, "deterministic_inference");
+    assert!(!lineage.consumer_eligible);
+}
+
+#[test]
+fn active_v1_and_v2_sources_report_mixed_alignment() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("thought.db");
+    let (doc_id, expected) = {
+        let workspace = Workspace::open(&path).unwrap();
+        let created = workspace
+            .create_document_from_markdown_with_context(
+                "",
+                "Human",
+                &editor(),
+                &MutationContext::imported(),
+            )
+            .unwrap();
+        workspace
+            .replace_block_with_context(
+                &created.doc_id,
+                &created.blocks[0].block_id,
+                "Human plus AI",
+                None,
+                &claude(),
+                &claude_context(),
+            )
+            .unwrap();
+        let lineage = workspace.document_lineage(&created.doc_id).unwrap();
+        assert_eq!(lineage.alignment, "mixed");
+        assert!(!lineage.consumer_eligible);
+        (created.doc_id, lineage)
+    };
+
+    let reopened = Workspace::open(&path).unwrap();
+    assert_same_lineage(&expected, &reopened.document_lineage(&doc_id).unwrap());
+}
+
+#[test]
+fn concurrent_yjs_actor_inserts_remain_distinct_live_sources() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("thought.db");
+    let (doc_id, expected) = {
+        let workspace = Workspace::open(&path).unwrap();
+        let created = workspace.create_document("", &editor()).unwrap();
+        let base = workspace.sync_since(&created.doc_id, &[]).unwrap();
+        let alice = Document::new();
+        let bob = Document::new();
+        alice.apply_update(&base).unwrap();
+        bob.apply_update(&base).unwrap();
+        let block_id = alice.blocks()[0].block_id.clone();
+        assert_eq!(block_id, bob.blocks()[0].block_id);
+
+        let alice_before = alice.state_vector();
+        alice.append_text(&block_id, "A").unwrap();
+        let alice_update = alice.diff_since(&alice_before);
+        let bob_before = bob.state_vector();
+        bob.append_text(&block_id, "B").unwrap();
+        let bob_update = bob.diff_since(&bob_before);
+
+        let insertion = [ProseMirrorRangeHint {
+            before_from: 1,
+            before_to: 1,
+            after_from: 1,
+            after_to: 2,
+        }];
+        workspace
+            .apply_anchored_peer_update_with_context(
+                &created.doc_id,
+                &alice_update,
+                &ActorRef::human("alice"),
+                &MutationContext::entered().with_client_event_id("alice-concurrent".into()),
+                &insertion,
+            )
+            .unwrap();
+        workspace
+            .apply_anchored_peer_update_with_context(
+                &created.doc_id,
+                &bob_update,
+                &ActorRef::human("bob"),
+                &MutationContext::pasted().with_client_event_id("bob-concurrent".into()),
+                &insertion,
+            )
+            .unwrap();
+
+        let view = workspace.read_document(&created.doc_id).unwrap();
+        assert_eq!(view.markdown.chars().count(), 2);
+        assert!(view.markdown.contains('A'));
+        assert!(view.markdown.contains('B'));
+        let lineage = workspace.document_lineage(&created.doc_id).unwrap();
+        let written = contribution(&lineage, "Written here");
+        let pasted = contribution(&lineage, "Pasted");
+        assert_eq!(written.graphemes, 1);
+        assert_eq!(pasted.graphemes, 1);
+        assert_ne!(written.source.id, pasted.source.id);
+        (created.doc_id, lineage)
+    };
+
+    let reopened = Workspace::open(&path).unwrap();
+    assert_same_lineage(&expected, &reopened.document_lineage(&doc_id).unwrap());
 }
 
 #[test]
@@ -897,6 +1224,118 @@ fn restart_rejects_an_update_origin_changed_to_unknown_raw_text() {
 }
 
 #[test]
+fn restart_rejects_tampered_anchor_material() {
+    for tamper in ["altered", "removed", "reordered"] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("thought.db");
+        let (doc_id, event_id) = create_two_anchor_editor_event(&path);
+        let connection = Connection::open(&path).unwrap();
+
+        match tamper {
+            "altered" => {
+                // A same-size digest passes the table CHECK, so bypass only the
+                // append-only guard and let replay detect the changed evidence.
+                connection
+                    .execute_batch("DROP TRIGGER provenance_anchors_reject_update;")
+                    .unwrap();
+                connection
+                    .execute(
+                        "UPDATE provenance_anchors
+                         SET after_text_hash = zeroblob(32)
+                         WHERE event_id = ?1 AND ordinal = 0",
+                        [event_id],
+                    )
+                    .unwrap();
+            }
+            "removed" => {
+                // Removing one row preserves the V2 nonempty shape and foreign
+                // keys. Verification must still reject the shortened hash input.
+                connection
+                    .execute_batch("DROP TRIGGER provenance_anchors_reject_delete;")
+                    .unwrap();
+                assert_eq!(
+                    connection
+                        .execute(
+                            "DELETE FROM provenance_anchors
+                             WHERE event_id = ?1 AND ordinal = 1",
+                            [event_id],
+                        )
+                        .unwrap(),
+                    1
+                );
+            }
+            "reordered" => {
+                // Ordinals cannot be swapped directly because the composite
+                // primary key and insertion-order trigger reject that shape.
+                // Swap the complete material behind ordinals 0 and 1 instead.
+                connection
+                    .execute_batch(
+                        "DROP TRIGGER provenance_anchors_reject_update;
+                         CREATE TEMP TABLE saved_anchor_material AS
+                         SELECT ordinal, basis,
+                                before_start_grapheme, before_end_grapheme,
+                                after_start_grapheme, after_end_grapheme,
+                                before_text_hash, after_text_hash
+                         FROM provenance_anchors WHERE 0;",
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO saved_anchor_material
+                         SELECT ordinal, basis,
+                                before_start_grapheme, before_end_grapheme,
+                                after_start_grapheme, after_end_grapheme,
+                                before_text_hash, after_text_hash
+                         FROM provenance_anchors WHERE event_id = ?1",
+                        [event_id],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "UPDATE provenance_anchors AS target
+                         SET (
+                           basis,
+                           before_start_grapheme, before_end_grapheme,
+                           after_start_grapheme, after_end_grapheme,
+                           before_text_hash, after_text_hash
+                         ) = (
+                           SELECT basis,
+                                  before_start_grapheme, before_end_grapheme,
+                                  after_start_grapheme, after_end_grapheme,
+                                  before_text_hash, after_text_hash
+                           FROM saved_anchor_material AS source
+                           WHERE source.ordinal = 1 - target.ordinal
+                         )
+                         WHERE target.event_id = ?1 AND target.ordinal IN (0, 1)",
+                        [event_id],
+                    )
+                    .unwrap();
+                connection
+                    .execute_batch("DROP TABLE saved_anchor_material;")
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        drop(connection);
+
+        let reopened = Workspace::open(&path).unwrap();
+        for _ in 0..2 {
+            let error = reopened.read_document(&doc_id).unwrap_err().to_string();
+            let expected = match tamper {
+                "altered" => "invalid event hash",
+                "removed" => "invalid event hash",
+                "reordered" => "unordered or overlapping",
+                _ => unreachable!(),
+            };
+            assert!(
+                error.contains(expected),
+                "{tamper} anchor material produced an unexpected verification error: {error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn restart_rejects_an_unsupported_event_chain_version() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("thought.db");
@@ -917,7 +1356,7 @@ fn restart_rejects_an_unsupported_event_chain_version() {
         .unwrap();
     connection
         .execute(
-            "UPDATE provenance_events SET chain_version = 2 WHERE doc_id = ?1",
+            "UPDATE provenance_events SET chain_version = 3 WHERE doc_id = ?1",
             [&doc_id],
         )
         .unwrap();
@@ -929,6 +1368,6 @@ fn restart_rejects_an_unsupported_event_chain_version() {
     let reopened = Workspace::open(&path).unwrap();
     for _ in 0..2 {
         let error = reopened.read_document(&doc_id).unwrap_err().to_string();
-        assert!(error.contains("unsupported chain version 2"));
+        assert!(error.contains("unsupported chain version 3"));
     }
 }

@@ -10,6 +10,8 @@ pub mod sync;
 /// escape one input byte as six ASCII bytes, so the MCP envelope is given a
 /// larger independently enforced ceiling.
 pub const MAX_MARKDOWN_IMPORT_BYTES: usize = 2 * 1024 * 1024;
+/// Lifecycle titles are metadata, not a second unbounded content channel.
+pub const MAX_DOCUMENT_TITLE_BYTES: usize = 4 * 1024;
 pub const MAX_MCP_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[cfg(test)]

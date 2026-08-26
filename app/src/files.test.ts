@@ -54,6 +54,21 @@ describe("Markdown file actions", () => {
     );
   });
 
+  it("does not report an import as opened when switching is blocked", async () => {
+    const file = { file_name: "Research.md", markdown: "# Research" };
+    const bridge = {
+      importMarkdown: vi.fn().mockResolvedValue(file),
+      exportMarkdown: vi.fn(),
+    } satisfies FileBridge;
+    const createDocument = vi.fn().mockResolvedValue({ doc_id: "doc-imported" });
+    const openDocument = vi.fn().mockResolvedValue(false);
+
+    await expect(
+      importMarkdownDocument(bridge, { createDocument }, openDocument),
+    ).rejects.toThrow("changes waiting to autosave");
+    expect(openDocument).toHaveBeenCalledWith("doc-imported");
+  });
+
   it("exports the live editor tree with a suggested Markdown name", async () => {
     const exported = { file_name: "Plan.md" };
     const bridge = {

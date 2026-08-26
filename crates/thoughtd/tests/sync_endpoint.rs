@@ -9,8 +9,9 @@ mod harness;
 use futures_util::{SinkExt, StreamExt};
 use harness::{Daemon, Frame};
 use thought_core::Document;
+use thought_mcp::lineage::ProseMirrorRangeHint;
 use thought_schema::{Node, normalize};
-use thoughtd::sync::LocalInputSource;
+use thoughtd::sync::{AnchoredMutation, LocalInputSource};
 use tokio_tungstenite::tungstenite::Message;
 
 type Socket =
@@ -85,6 +86,25 @@ async fn recv_ack(socket: &mut Socket, doc_id: &str) {
             _ => continue,
         }
     }
+}
+
+async fn assert_no_additional_frame(socket: &mut Socket, context: &str) {
+    if let Ok(frame) =
+        tokio::time::timeout(std::time::Duration::from_millis(250), recv(socket)).await
+    {
+        panic!("{context}: unexpected additional frame {frame:?}");
+    }
+}
+
+fn editor_edit_count(daemon: &Daemon, doc_id: &str) -> i64 {
+    let actors = daemon.call("document_actors", serde_json::json!({ "doc_id": doc_id }));
+    actors["actors"]
+        .as_array()
+        .expect("actors")
+        .iter()
+        .find(|actor| actor["actor_id"] == thoughtd::EDITOR_ACTOR_ID)
+        .and_then(|actor| actor["edits"].as_i64())
+        .expect("local editor activity")
 }
 
 #[tokio::test]
@@ -166,6 +186,7 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
         Frame::Broadcast { update, .. } => remote.apply_update(&update).expect("valid update"),
         other => panic!("expected BROADCAST, got {other:?}"),
     }
+    assert_no_additional_frame(&mut b, "one committed update must fan out exactly once").await;
     assert_eq!(
         remote.block_text(&block).expect("block"),
         "typed in the window"
@@ -183,6 +204,290 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
     )
     .await;
     recv_ack(&mut a, &doc_id).await;
+}
+
+#[tokio::test]
+async fn an_anchored_batch_commits_every_mutation_before_one_ack() {
+    let daemon = Daemon::start();
+    let doc_id = daemon.create_document("");
+    let mut socket = connect(&daemon).await;
+    send(
+        &mut socket,
+        Frame::Subscribe {
+            doc_id: doc_id.clone(),
+            state_vector: vec![],
+        },
+    )
+    .await;
+
+    let local = Document::new();
+    match recv(&mut socket).await {
+        Frame::Sync { update, .. } => local.apply_update(&update).expect("valid sync"),
+        other => panic!("expected SYNC, got {other:?}"),
+    }
+    let block = local.blocks()[0].block_id.clone();
+
+    let before_first = local.state_vector();
+    local
+        .replace_block(
+            &block,
+            &normalize(&Node::element(
+                "paragraph",
+                vec![Node::text("first", vec![])],
+            )),
+        )
+        .expect("first replacement");
+    let first = local.diff_since(&before_first);
+
+    let before_second = local.state_vector();
+    local
+        .replace_block(
+            &block,
+            &normalize(&Node::element(
+                "paragraph",
+                vec![Node::text("second", vec![])],
+            )),
+        )
+        .expect("second replacement");
+    let second = local.diff_since(&before_second);
+
+    send(
+        &mut socket,
+        Frame::AnchoredBatch {
+            doc_id: doc_id.clone(),
+            mutations: vec![
+                AnchoredMutation {
+                    source: LocalInputSource::Written,
+                    client_event_id: "keyboard-1".into(),
+                    hints: vec![ProseMirrorRangeHint {
+                        before_from: 1,
+                        before_to: 1,
+                        after_from: 1,
+                        after_to: 6,
+                    }],
+                    update: first,
+                },
+                AnchoredMutation {
+                    source: LocalInputSource::Paste,
+                    client_event_id: "paste-2".into(),
+                    hints: vec![ProseMirrorRangeHint {
+                        before_from: 1,
+                        before_to: 6,
+                        after_from: 1,
+                        after_to: 7,
+                    }],
+                    update: second,
+                },
+            ],
+        },
+    )
+    .await;
+
+    let mut ack_count = 0;
+    let mut broadcast_count = 0;
+    while ack_count < 1 || broadcast_count < 2 {
+        match recv(&mut socket).await {
+            Frame::Ack { doc_id: acked } if acked == doc_id => ack_count += 1,
+            Frame::Broadcast {
+                doc_id: broadcast_doc,
+                ..
+            } if broadcast_doc == doc_id => broadcast_count += 1,
+            Frame::Error { message, .. } => {
+                panic!("anchored batch failed instead of being acked: {message}")
+            }
+            other => panic!("unexpected anchored-batch response: {other:?}"),
+        }
+    }
+    assert_eq!(ack_count, 1, "one batch must produce exactly one ACK");
+    assert_eq!(
+        broadcast_count, 2,
+        "each committed mutation must use the observer fanout exactly once"
+    );
+    assert_no_additional_frame(
+        &mut socket,
+        "anchored batch must not produce duplicate ACKs or broadcasts",
+    )
+    .await;
+    let view = daemon.read_document(&doc_id);
+    assert_eq!(view["markdown"].as_str(), Some("second"));
+    let lineage = daemon.call("document_lineage", serde_json::json!({ "doc_id": doc_id }));
+    assert_eq!(lineage["consumer_eligible"], true);
+}
+
+#[tokio::test]
+async fn retrying_an_anchored_batch_after_a_lost_ack_is_exactly_once() {
+    let daemon = Daemon::start();
+    let doc_id = daemon.create_document("");
+    let mut socket = connect(&daemon).await;
+    send(
+        &mut socket,
+        Frame::Subscribe {
+            doc_id: doc_id.clone(),
+            state_vector: vec![],
+        },
+    )
+    .await;
+
+    let local = Document::new();
+    match recv(&mut socket).await {
+        Frame::Sync { update, .. } => local.apply_update(&update).expect("valid sync"),
+        other => panic!("expected SYNC, got {other:?}"),
+    }
+    let block = local.blocks()[0].block_id.clone();
+    let before = local.state_vector();
+    local
+        .replace_block(
+            &block,
+            &normalize(&Node::element(
+                "paragraph",
+                vec![Node::text("retry", vec![])],
+            )),
+        )
+        .expect("replacement");
+    let batch = Frame::AnchoredBatch {
+        doc_id: doc_id.clone(),
+        mutations: vec![AnchoredMutation {
+            source: LocalInputSource::Written,
+            client_event_id: "lost-ack-retry".into(),
+            hints: vec![ProseMirrorRangeHint {
+                before_from: 1,
+                before_to: 1,
+                after_from: 1,
+                after_to: 6,
+            }],
+            update: local.diff_since(&before),
+        }],
+    };
+
+    send(&mut socket, batch.clone()).await;
+    // The transport delivered this ACK, but the application intentionally
+    // forgets it and reconnects. That models a disconnect after the durable
+    // commit but before the client records the acknowledgement.
+    recv_ack(&mut socket, &doc_id).await;
+    assert_eq!(editor_edit_count(&daemon, &doc_id), 1);
+    let lineage_before_retry =
+        daemon.call("document_lineage", serde_json::json!({ "doc_id": doc_id }));
+    drop(socket);
+
+    let mut retry = connect(&daemon).await;
+    send(
+        &mut retry,
+        Frame::Subscribe {
+            doc_id: doc_id.clone(),
+            state_vector: local.state_vector(),
+        },
+    )
+    .await;
+    match recv(&mut retry).await {
+        Frame::Sync { doc_id: synced, .. } => assert_eq!(synced, doc_id),
+        other => panic!("expected retry SYNC, got {other:?}"),
+    }
+    send(&mut retry, batch).await;
+    match recv(&mut retry).await {
+        Frame::Ack { doc_id: acked } => assert_eq!(acked, doc_id),
+        other => panic!("expected retry ACK, got {other:?}"),
+    }
+    assert_no_additional_frame(&mut retry, "a no-op retry must only be acknowledged once").await;
+
+    assert_eq!(
+        editor_edit_count(&daemon, &doc_id),
+        1,
+        "retry must not append another durable edit/provenance event"
+    );
+    assert_eq!(
+        daemon.call("document_lineage", serde_json::json!({ "doc_id": doc_id })),
+        lineage_before_retry,
+        "retry must not change the durable lineage"
+    );
+}
+
+#[tokio::test]
+async fn subscribing_twice_to_one_document_still_fans_out_once() {
+    let daemon = Daemon::start();
+    let doc_id = daemon.create_document("Subscribe once");
+    let mut observer = connect(&daemon).await;
+    let observer_doc = Document::new();
+
+    send(
+        &mut observer,
+        Frame::Subscribe {
+            doc_id: doc_id.clone(),
+            state_vector: vec![],
+        },
+    )
+    .await;
+    match recv(&mut observer).await {
+        Frame::Sync { update, .. } => observer_doc.apply_update(&update).expect("valid sync"),
+        other => panic!("expected first SYNC, got {other:?}"),
+    }
+    send(
+        &mut observer,
+        Frame::Subscribe {
+            doc_id: doc_id.clone(),
+            state_vector: observer_doc.state_vector(),
+        },
+    )
+    .await;
+    match recv(&mut observer).await {
+        Frame::Sync { doc_id: synced, .. } => assert_eq!(synced, doc_id),
+        other => panic!("expected repeated-subscribe SYNC, got {other:?}"),
+    }
+
+    let mut publisher = connect(&daemon).await;
+    send(
+        &mut publisher,
+        Frame::Subscribe {
+            doc_id: doc_id.clone(),
+            state_vector: vec![],
+        },
+    )
+    .await;
+    let publisher_doc = Document::new();
+    match recv(&mut publisher).await {
+        Frame::Sync { update, .. } => publisher_doc.apply_update(&update).expect("valid sync"),
+        other => panic!("expected publisher SYNC, got {other:?}"),
+    }
+    let before = publisher_doc.state_vector();
+    let block = publisher_doc.blocks()[1].block_id.clone();
+    publisher_doc
+        .replace_block(
+            &block,
+            &normalize(&Node::element(
+                "paragraph",
+                vec![Node::text("one fanout", vec![])],
+            )),
+        )
+        .expect("replacement");
+    send(
+        &mut publisher,
+        Frame::SourcedUpdate {
+            doc_id: doc_id.clone(),
+            source: LocalInputSource::Written,
+            update: publisher_doc.diff_since(&before),
+        },
+    )
+    .await;
+    recv_ack(&mut publisher, &doc_id).await;
+
+    match recv(&mut observer).await {
+        Frame::Broadcast {
+            doc_id: broadcast_doc,
+            update,
+        } => {
+            assert_eq!(broadcast_doc, doc_id);
+            observer_doc.apply_update(&update).expect("valid update");
+        }
+        other => panic!("expected one BROADCAST, got {other:?}"),
+    }
+    assert_no_additional_frame(
+        &mut observer,
+        "repeated SUBSCRIBE must not install a duplicate receiver",
+    )
+    .await;
+    assert_eq!(
+        observer_doc.block_text(&block).expect("observer block"),
+        "one fanout"
+    );
 }
 
 #[tokio::test]

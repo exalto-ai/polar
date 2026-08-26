@@ -5,8 +5,9 @@
 use rusqlite::Connection;
 use thought_store::{
     Actor, BlockTouchInput, InitialProvenanceDocumentInput, LineageRebuildInput, LineageSpanInput,
-    Origin, ProvenanceChangeInput, ProvenanceCommitInput, ProvenanceEventInput,
-    ProvenanceRecordInput, ProvenanceUpdateInput, ReadyLineageInput, Store, StoreError,
+    Origin, ProvenanceAnchorInput, ProvenanceChangeInput, ProvenanceCommitInput,
+    ProvenanceEventInput, ProvenanceRecordInput, ProvenanceUpdateInput, ReadyLineageInput, Store,
+    StoreError,
 };
 
 fn seed_actor(store: &Store) {
@@ -94,6 +95,25 @@ fn insert_change(source_event_id: i64, block_id: &str, text: &str) -> Provenance
     }
 }
 
+fn anchor(
+    basis: &str,
+    before_start: i64,
+    before_end: i64,
+    after_start: i64,
+    after_end: i64,
+    digest: u8,
+) -> ProvenanceAnchorInput {
+    ProvenanceAnchorInput {
+        basis: basis.into(),
+        before_start_grapheme: before_start,
+        before_end_grapheme: before_end,
+        after_start_grapheme: after_start,
+        after_end_grapheme: after_end,
+        before_text_hash: vec![digest; 32],
+        after_text_hash: vec![digest.wrapping_add(1); 32],
+    }
+}
+
 fn span(source_event_id: i64, block_id: &str, start: i64, end: i64) -> LineageSpanInput {
     LineageSpanInput {
         block_id: block_id.into(),
@@ -127,6 +147,7 @@ fn initial(doc_id: &str, event_id: i64, with_text: bool) -> InitialProvenanceDoc
             .then(|| insert_change(event_id, "block-old", text))
             .into_iter()
             .collect(),
+        anchors: vec![],
         spans: with_text
             .then(|| span(event_id, "block-old", 0, 5))
             .into_iter()
@@ -156,6 +177,7 @@ fn revision(doc_id: &str, event_id: i64, ingress: &str) -> ProvenanceCommitInput
             "block-current",
             &format!("revision {event_id}"),
         )],
+        anchors: vec![],
         spans: vec![span(event_id, "block-current", 0, 10)],
         lineage: lineage(1, event_id as u8),
         block_touches: vec![BlockTouchInput {
@@ -222,6 +244,167 @@ fn initial_document_and_revision_round_trip_as_complete_transactions() {
     assert_eq!(compatibility.len(), 1);
     assert_eq!(compatibility[0].block_id, "block-current");
     assert_eq!(compatibility[0].touched_by, "human:test");
+}
+
+#[test]
+fn mixed_chain_versions_round_trip_with_event_local_anchor_order() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .create_initial_document_with_provenance(&initial("doc", 1, true))
+        .unwrap();
+
+    let mut revision = revision("doc", 2, "command");
+    revision.event.chain_version = 2;
+    revision.anchors = vec![
+        anchor("editor_transaction", 1, 2, 1, 3, 10),
+        anchor("server_operation", 4, 5, 5, 5, 20),
+    ];
+    store.commit_update_with_provenance(&revision).unwrap();
+
+    let events = store.provenance_events("doc").unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.chain_version)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert!(store.provenance_anchors(1).unwrap().is_empty());
+    let anchors = store.provenance_anchors(2).unwrap();
+    assert_eq!(
+        anchors
+            .iter()
+            .map(|anchor| anchor.ordinal)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert_eq!(anchors[0].anchor, revision.anchors[0]);
+    assert_eq!(anchors[1].anchor, revision.anchors[1]);
+}
+
+#[test]
+fn chain_version_anchor_contract_is_validated_before_writes() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .create_initial_document_with_provenance(&initial("doc", 1, true))
+        .unwrap();
+
+    let mut v1_with_anchor = revision("doc", 2, "command");
+    v1_with_anchor.anchors = vec![anchor("editor_transaction", 0, 1, 0, 1, 1)];
+    assert!(matches!(
+        store.commit_update_with_provenance(&v1_with_anchor),
+        Err(StoreError::InvalidProvenanceAnchors { event_id: 2, .. })
+    ));
+
+    let mut v2_without_anchor = revision("doc", 2, "command");
+    v2_without_anchor.event.chain_version = 2;
+    assert!(matches!(
+        store.commit_update_with_provenance(&v2_without_anchor),
+        Err(StoreError::InvalidProvenanceAnchors { event_id: 2, .. })
+    ));
+
+    let mut unsupported = revision("doc", 2, "command");
+    unsupported.event.chain_version = 3;
+    assert!(matches!(
+        store.commit_update_with_provenance(&unsupported),
+        Err(StoreError::InvalidProvenanceAnchors { event_id: 2, .. })
+    ));
+
+    assert_eq!(store.provenance_events("doc").unwrap().len(), 1);
+    assert_eq!(store.updates_for_rebuild("doc").unwrap().len(), 1);
+}
+
+#[test]
+fn initial_and_provenance_only_writes_share_the_anchor_contract() {
+    let store = Store::open_in_memory().unwrap();
+
+    let mut missing_initial_anchor = initial("missing", 1, true);
+    missing_initial_anchor.event.chain_version = 2;
+    assert!(matches!(
+        store.create_initial_document_with_provenance(&missing_initial_anchor),
+        Err(StoreError::InvalidProvenanceAnchors { event_id: 1, .. })
+    ));
+    assert!(store.list_documents(true).unwrap().is_empty());
+
+    let mut anchored_initial = initial("doc", 1, true);
+    anchored_initial.event.chain_version = 2;
+    anchored_initial.anchors = vec![anchor("editor_transaction", 0, 0, 0, 5, 1)];
+    store
+        .create_initial_document_with_provenance(&anchored_initial)
+        .unwrap();
+
+    let mut missing_record_anchor = ProvenanceRecordInput {
+        doc_id: "doc".into(),
+        event: event(2, "unknown", None),
+        changes: vec![],
+        anchors: vec![],
+        spans: vec![span(1, "block-old", 0, 5)],
+        lineage: lineage(2, 2),
+        bind_to_latest_update: false,
+    };
+    missing_record_anchor.event.chain_version = 2;
+    assert!(matches!(
+        store.record_provenance_without_update(&missing_record_anchor),
+        Err(StoreError::InvalidProvenanceAnchors { event_id: 2, .. })
+    ));
+
+    missing_record_anchor.anchors = vec![anchor("server_operation", 0, 0, 0, 0, 2)];
+    store
+        .record_provenance_without_update(&missing_record_anchor)
+        .unwrap();
+    assert_eq!(store.provenance_anchors(1).unwrap().len(), 1);
+    assert_eq!(store.provenance_anchors(2).unwrap().len(), 1);
+}
+
+#[test]
+fn invalid_anchor_ranges_order_hashes_and_basis_roll_back_cleanly() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .create_initial_document_with_provenance(&initial("doc", 1, true))
+        .unwrap();
+
+    let mut invalid_inputs = Vec::new();
+
+    let mut negative = revision("doc", 2, "command");
+    negative.event.chain_version = 2;
+    negative.anchors = vec![anchor("editor_transaction", -1, 1, 0, 1, 1)];
+    invalid_inputs.push(negative);
+
+    let mut reversed = revision("doc", 2, "command");
+    reversed.event.chain_version = 2;
+    reversed.anchors = vec![anchor("editor_transaction", 2, 1, 0, 1, 1)];
+    invalid_inputs.push(reversed);
+
+    let mut overlapping = revision("doc", 2, "command");
+    overlapping.event.chain_version = 2;
+    overlapping.anchors = vec![
+        anchor("editor_transaction", 0, 3, 0, 1, 1),
+        anchor("editor_transaction", 2, 4, 1, 2, 2),
+    ];
+    invalid_inputs.push(overlapping);
+
+    let mut bad_hash = revision("doc", 2, "command");
+    bad_hash.event.chain_version = 2;
+    let mut short_hash = anchor("editor_transaction", 0, 1, 0, 1, 1);
+    short_hash.after_text_hash.pop();
+    bad_hash.anchors = vec![short_hash];
+    invalid_inputs.push(bad_hash);
+
+    let mut bad_basis = revision("doc", 2, "command");
+    bad_basis.event.chain_version = 2;
+    bad_basis.anchors = vec![anchor("inferred", 0, 1, 0, 1, 1)];
+    invalid_inputs.push(bad_basis);
+
+    for input in invalid_inputs {
+        assert!(matches!(
+            store.commit_update_with_provenance(&input),
+            Err(StoreError::InvalidProvenanceAnchors { event_id: 2, .. })
+        ));
+    }
+
+    assert_eq!(store.provenance_events("doc").unwrap().len(), 1);
+    assert_eq!(store.updates_for_rebuild("doc").unwrap().len(), 1);
+    assert!(store.provenance_anchors(2).unwrap().is_empty());
 }
 
 #[test]
@@ -333,6 +516,7 @@ fn provenance_change_sources_reject_later_events_from_the_same_document() {
         doc_id: "doc".into(),
         event: event(2, "unknown", None),
         changes: vec![insert_change(3, "block-current", "future")],
+        anchors: vec![],
         spans: vec![span(1, "block-current", 0, 5)],
         lineage: lineage(1, 2),
         bind_to_latest_update: false,
@@ -396,7 +580,9 @@ fn a_mid_transaction_lineage_failure_rolls_back_every_authoritative_row() {
     let before_spans = store.lineage_spans("doc").unwrap();
 
     let mut failed = revision("doc", 2, "unknown");
-    // The update, event, and change are inserted before lineage validation.
+    failed.event.chain_version = 2;
+    failed.anchors = vec![anchor("editor_transaction", 0, 1, 0, 2, 40)];
+    // The update, event, anchors, and change are inserted before lineage validation.
     // This invalid source forces a failure in the middle of the transaction.
     failed.spans = vec![span(999, "block-current", 0, 1)];
     failed.deleted_at = Some(999);
@@ -410,6 +596,7 @@ fn a_mid_transaction_lineage_failure_rolls_back_every_authoritative_row() {
 
     assert_eq!(store.updates_for_rebuild("doc").unwrap().len(), 1);
     assert_eq!(store.provenance_events("doc").unwrap().len(), 1);
+    assert!(store.provenance_anchors(2).unwrap().is_empty());
     assert!(store.provenance_changes(2).unwrap().is_empty());
     assert_eq!(store.lineage_spans("doc").unwrap(), before_spans);
     assert_eq!(
@@ -507,6 +694,7 @@ fn legacy_seed_binds_to_the_existing_update_and_empty_spans_are_ready() {
         doc_id: "legacy".into(),
         event: event(1, "legacy_unknown", Some("legacy-seed")),
         changes: vec![],
+        anchors: vec![],
         spans: vec![],
         lineage: lineage(1, 42),
         bind_to_latest_update: true,

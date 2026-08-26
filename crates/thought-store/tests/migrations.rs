@@ -281,6 +281,7 @@ fn a_fresh_database_reaches_the_current_version() {
         "updates",
         "provenance_events",
         "provenance_changes",
+        "provenance_anchors",
         "provenance_receipts",
         "lineage_spans",
         "lineage_state",
@@ -527,13 +528,27 @@ fn provenance_ledger_rows_reject_update_and_delete() {
         .execute(
             "INSERT INTO provenance_events (
                  doc_id, update_seq, action, ingress, assurance, actor_id,
-                 actor_label, source_label, before_hash, after_hash, update_log_root, event_hash,
-                 created_at, recorded_at
+                 actor_label, source_label, chain_version, before_hash, after_hash,
+                 update_log_root, event_hash, created_at, recorded_at
              ) VALUES (
                  'doc', 1, 'edit', 'entered', 'observed',
-                 'human:test', 'Test Writer', 'Written here', zeroblob(32), zeroblob(32),
+                 'human:test', 'Test Writer', 'Written here', 2, zeroblob(32), zeroblob(32),
                  zeroblob(32), X'0303030303030303030303030303030303030303030303030303030303030303',
                  1, 1
+             )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO provenance_anchors (
+                 event_id, ordinal, basis,
+                 before_start_grapheme, before_end_grapheme,
+                 after_start_grapheme, after_end_grapheme,
+                 before_text_hash, after_text_hash
+             ) VALUES (
+                 1, 0, 'editor_transaction', 0, 1, 0, 1,
+                 zeroblob(32), zeroblob(32)
              )",
             [],
         )
@@ -567,6 +582,8 @@ fn provenance_ledger_rows_reject_update_and_delete() {
         "DELETE FROM provenance_events WHERE event_id = 1",
         "UPDATE provenance_changes SET after_text = 'changed' WHERE event_id = 1",
         "DELETE FROM provenance_changes WHERE event_id = 1",
+        "UPDATE provenance_anchors SET basis = 'server_operation' WHERE event_id = 1",
+        "DELETE FROM provenance_anchors WHERE event_id = 1",
         "UPDATE provenance_receipts SET issuer = 'changed' WHERE seq = 1",
         "DELETE FROM provenance_receipts WHERE seq = 1",
     ] {
@@ -579,4 +596,192 @@ fn provenance_ledger_rows_reject_update_and_delete() {
     connection
         .execute("UPDATE updates SET synced_at = 2 WHERE seq = 1", [])
         .expect("relay acknowledgement remains mutable operational state");
+}
+
+#[test]
+fn anchor_schema_rejects_invalid_foreign_keys_ranges_order_hashes_and_basis() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("thought.db");
+    drop(Store::open(&path).unwrap());
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO actors (id, kind, display_name, color, first_seen)
+             VALUES ('human:test', 'human', 'Test Writer', '#123456', 1)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO documents (id, title, created_at, updated_at)
+             VALUES ('doc', 'Draft', 1, 1)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO provenance_events (
+                 event_id, doc_id, action, ingress, assurance, actor_id,
+                 actor_label, source_label, chain_version, before_hash, after_hash,
+                 update_log_root, event_hash, created_at, recorded_at
+             ) VALUES (
+                 1, 'doc', 'edit', 'entered', 'observed', 'human:test',
+                 'Test Writer', 'Written here', 2, zeroblob(32), zeroblob(32),
+                 zeroblob(32), X'0101010101010101010101010101010101010101010101010101010101010101',
+                 1, 1
+             )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO provenance_events (
+                 event_id, doc_id, action, ingress, assurance, actor_id,
+                 actor_label, source_label, chain_version, before_hash, after_hash,
+                 update_log_root, event_hash, created_at, recorded_at
+             ) VALUES (
+                 2, 'doc', 'edit', 'entered', 'observed', 'human:test',
+                 'Test Writer', 'Written here', 3, zeroblob(32), zeroblob(32),
+                 zeroblob(32), X'0202020202020202020202020202020202020202020202020202020202020202',
+                 2, 2
+             )",
+            [],
+        )
+        .expect_err("the schema admits only event-chain versions 1 and 2");
+
+    let anchor_values = |event_id: i64,
+                         ordinal: i64,
+                         basis: &str,
+                         before_start: i64,
+                         before_end: i64,
+                         after_start: i64,
+                         after_end: i64,
+                         before_hash: Vec<u8>,
+                         after_hash: Vec<u8>| {
+        connection.execute(
+            "INSERT INTO provenance_anchors (
+                 event_id, ordinal, basis,
+                 before_start_grapheme, before_end_grapheme,
+                 after_start_grapheme, after_end_grapheme,
+                 before_text_hash, after_text_hash
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                event_id,
+                ordinal,
+                basis,
+                before_start,
+                before_end,
+                after_start,
+                after_end,
+                before_hash,
+                after_hash
+            ],
+        )
+    };
+
+    for result in [
+        anchor_values(
+            999,
+            0,
+            "editor_transaction",
+            0,
+            1,
+            0,
+            1,
+            vec![0; 32],
+            vec![0; 32],
+        ),
+        anchor_values(1, 0, "inferred", 0, 1, 0, 1, vec![0; 32], vec![0; 32]),
+        anchor_values(
+            1,
+            0,
+            "editor_transaction",
+            -1,
+            1,
+            0,
+            1,
+            vec![0; 32],
+            vec![0; 32],
+        ),
+        anchor_values(
+            1,
+            0,
+            "editor_transaction",
+            2,
+            1,
+            0,
+            1,
+            vec![0; 32],
+            vec![0; 32],
+        ),
+        anchor_values(
+            1,
+            0,
+            "editor_transaction",
+            0,
+            1,
+            0,
+            1,
+            vec![0; 31],
+            vec![0; 32],
+        ),
+        anchor_values(
+            1,
+            2,
+            "editor_transaction",
+            0,
+            1,
+            0,
+            1,
+            vec![0; 32],
+            vec![0; 32],
+        ),
+    ] {
+        assert!(result.is_err());
+    }
+
+    anchor_values(
+        1,
+        0,
+        "server_operation",
+        0,
+        0,
+        0,
+        2,
+        vec![1; 32],
+        vec![2; 32],
+    )
+    .unwrap();
+    anchor_values(
+        1,
+        2,
+        "server_operation",
+        2,
+        2,
+        4,
+        4,
+        vec![3; 32],
+        vec![4; 32],
+    )
+    .expect_err("event-local anchor ordinals cannot skip a value");
+
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM provenance_anchors", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
 }

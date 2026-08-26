@@ -1,8 +1,11 @@
-use crate::lineage::{SnapshotError, block_snapshots};
+use crate::lineage::{
+    ProseMirrorRangeHint, SnapshotError, block_snapshots, semantic_range_anchors,
+};
 use crate::mutation::{MutationContext, action_name, assurance_name, ingress_name};
 use crate::provenance_hash::{
-    ActorEventMetadata, CURRENT_EVENT_CHAIN_VERSION, EventAction, EventHashInput, EventReferences,
-    LineageHashInput, UpdateLogEntry, document_digest, empty_update_log_digest, event_chain_digest,
+    ActorEventMetadata, CURRENT_EVENT_CHAIN_VERSION, EventAction, EventAnchorHashInput,
+    EventHashInput, EventReferences, LEGACY_EVENT_CHAIN_VERSION, LineageHashInput, UpdateLogEntry,
+    anchor_text_digest, document_digest, empty_update_log_digest, event_chain_digest,
     live_lineage_digest, update_log_digest,
 };
 use crate::provenance_store::{
@@ -15,13 +18,14 @@ use std::sync::{Arc, Mutex};
 use thought_core::{BlockError, Document, Position};
 use thought_markdown::{from_markdown, to_markdown_with_spans};
 use thought_provenance::{
-    Assurance, CurrentSourceSummary, Ingress, LineageState, ReconcileError, SourceId,
+    Assurance, CurrentSourceSummary, Ingress, LineageState, ReconcileError, SemanticRangeAnchor,
+    SourceId, visible_graphemes,
 };
 use thought_schema::{Node, Schema, normalize};
 use thought_store::{
     Actor, BlockTouchInput, InitialProvenanceDocumentInput, LineageRebuildInput, Origin,
-    ProvenanceCommitInput, ProvenanceEventInput, ProvenanceRecordInput, ProvenanceUpdateInput,
-    ReadyLineageInput, Store,
+    ProvenanceAnchorInput, ProvenanceAnchorRow, ProvenanceCommitInput, ProvenanceEventInput,
+    ProvenanceRecordInput, ProvenanceUpdateInput, ReadyLineageInput, Store,
 };
 
 /// The caller, as asserted by the MCP session. Not authenticated (AD-6) — this
@@ -115,10 +119,12 @@ pub struct SearchHit {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DocumentLineage {
     pub algorithm_version: u32,
-    /// V1 has no transaction-range anchors. Equal text is preserved through a
-    /// deterministic semantic alignment, but duplicate occurrences with
-    /// different sources can be observationally ambiguous.
+    /// `anchored`, `deterministic_inference`, or `mixed`, based only on event
+    /// sources that still contribute visible wording.
     pub alignment: &'static str,
+    /// Consumer contribution percentages are safe to expose only when every
+    /// currently contributing source was reconciled from validated anchors.
+    pub consumer_eligible: bool,
     pub summary: CurrentSourceSummary,
     pub spans: Vec<thought_provenance::LiveLineageSpan>,
 }
@@ -241,12 +247,9 @@ impl From<ProvenanceStoreError> for WorkspaceError {
 /// Compact updates into a snapshot after this many, per AD-13.
 const SNAPSHOT_EVERY: i64 = 200;
 
-/// Frozen V1 semantic reconciliation version.
-///
-/// Do not increment this independently. A future evidence-suite version needs
-/// a schema migration plus version-dispatched verification and reconciliation
-/// for already-recorded events before this value can change safely.
-const LINEAGE_ALGORITHM_VERSION: u32 = 1;
+/// V2 dispatches each event to its persisted reconciliation suite. Derived
+/// caches from V1 are rebuilt once and remain discardable.
+const LINEAGE_ALGORITHM_VERSION: u32 = 2;
 
 /// Store and document cache live under **one** mutex rather than two.
 ///
@@ -435,7 +438,21 @@ impl Workspace {
             let source_id = source_id(event_id)?;
             let source = context.source(source_id);
             let empty = LineageState::seed(vec![], source.clone())?;
-            let reconciled = empty.reconcile(snapshots.clone(), source)?;
+            // Creation and import are exact server operations. The before side
+            // is empty and the after side is the complete initial snapshot, so
+            // this anchor needs no inference and remains valid for blank docs.
+            let semantic_anchors = vec![SemanticRangeAnchor::new(
+                0..0,
+                0..visible_graphemes(&snapshots).len(),
+            )];
+            let reconciled =
+                empty.reconcile_anchored(snapshots.clone(), source, &semantic_anchors)?;
+            let anchors = persisted_anchors(
+                "server_operation",
+                empty.blocks(),
+                &snapshots,
+                &semantic_anchors,
+            )?;
             let at = now_ms();
             let update_log_root =
                 extend_update_log_root(None, &doc_id, update_seq, &state, actor, at)?;
@@ -451,6 +468,8 @@ impl Workspace {
                 update_log_root,
                 previous_hash: None,
                 deltas: &reconciled.deltas,
+                chain_version: CURRENT_EVENT_CHAIN_VERSION,
+                anchors: &anchors,
                 created_at: at,
                 recorded_at: at,
             })?;
@@ -480,6 +499,7 @@ impl Workspace {
                     },
                     event,
                     changes: deltas_to_store(source_id, &reconciled.deltas)?,
+                    anchors,
                     spans,
                     lineage,
                     block_ids,
@@ -796,6 +816,33 @@ impl Workspace {
         actor: &ActorRef,
         context: &MutationContext,
     ) -> Result<Option<String>, WorkspaceError> {
+        self.apply_peer_update_candidate(doc_id, update, actor, context, None)
+    }
+
+    /// Apply one complete editor dispatch with its observed ProseMirror ranges.
+    ///
+    /// Malformed or incomplete semantic hints never block the underlying CRDT
+    /// update. They fall back to the frozen V1 reconciler and therefore cannot
+    /// make the resulting wording consumer-eligible for exact percentages.
+    pub fn apply_anchored_peer_update_with_context(
+        &self,
+        doc_id: &str,
+        update: &[u8],
+        actor: &ActorRef,
+        context: &MutationContext,
+        hints: &[ProseMirrorRangeHint],
+    ) -> Result<Option<String>, WorkspaceError> {
+        self.apply_peer_update_candidate(doc_id, update, actor, context, Some(hints))
+    }
+
+    fn apply_peer_update_candidate(
+        &self,
+        doc_id: &str,
+        update: &[u8],
+        actor: &ActorRef,
+        context: &MutationContext,
+        hints: Option<&[ProseMirrorRangeHint]>,
+    ) -> Result<Option<String>, WorkspaceError> {
         self.with(|inner| {
             // Apply to a candidate first. If SQLite refuses the commit, the
             // cached authority must remain at its persisted state. Mutating the
@@ -818,7 +865,8 @@ impl Workspace {
                 return Ok(None);
             }
 
-            let version = inner.commit_candidate(doc_id, candidate, actor, context)?;
+            let version =
+                inner.commit_candidate_with_hints(doc_id, candidate, actor, context, hints)?;
             Ok(Some(version))
         })
     }
@@ -890,10 +938,54 @@ impl Workspace {
                 .lineages
                 .get(doc_id)
                 .expect("document hydration installs lineage");
+            let summary = lineage.current_source_summary()?;
+            let versions = inner
+                .store
+                .provenance_events(doc_id)?
+                .into_iter()
+                .map(|event| {
+                    Ok((
+                        SourceId(as_u64(event.event_id, "provenance event id")?),
+                        event.chain_version,
+                    ))
+                })
+                .collect::<Result<HashMap<_, _>, WorkspaceError>>()?;
+            let mut anchored = 0_usize;
+            let mut inferred = 0_usize;
+            for contribution in &summary.contributions {
+                match versions.get(&contribution.source.id).copied() {
+                    Some(version) if version == i64::from(CURRENT_EVENT_CHAIN_VERSION) => {
+                        anchored += 1;
+                    }
+                    Some(version) if version == i64::from(LEGACY_EVENT_CHAIN_VERSION) => {
+                        inferred += 1;
+                    }
+                    Some(version) => {
+                        return Err(WorkspaceError::NotFound(format!(
+                            "source {:?} uses unsupported chain version {version}",
+                            contribution.source.id
+                        )));
+                    }
+                    None => {
+                        return Err(WorkspaceError::NotFound(format!(
+                            "source {:?} has no provenance event",
+                            contribution.source.id
+                        )));
+                    }
+                }
+            }
+            let alignment = match (anchored > 0, inferred > 0) {
+                (true, true) => "mixed",
+                (false, true) => "deterministic_inference",
+                // Empty documents contain no consumer contribution to qualify.
+                // Treat that vacuous state as anchored until wording appears.
+                (_, false) => "anchored",
+            };
             Ok(DocumentLineage {
                 algorithm_version: LINEAGE_ALGORITHM_VERSION,
-                alignment: "deterministic_inference",
-                summary: lineage.current_source_summary()?,
+                alignment,
+                consumer_eligible: inferred == 0,
+                summary,
                 spans: lineage.spans().to_vec(),
             })
         })
@@ -1141,6 +1233,8 @@ impl Inner {
             update_log_root,
             previous_hash: None,
             deltas: &reconciled.deltas,
+            chain_version: LEGACY_EVENT_CHAIN_VERSION,
+            anchors: &[],
             created_at: at,
             recorded_at: at,
         })?;
@@ -1150,6 +1244,7 @@ impl Inner {
                 doc_id: doc_id.to_string(),
                 event,
                 changes: deltas_to_store(source_id, &reconciled.deltas)?,
+                anchors: vec![],
                 spans: spans_to_store(reconciled.state.spans())?,
                 lineage: ready_lineage(
                     doc_id,
@@ -1212,7 +1307,22 @@ impl Inner {
                 Some(state) => state,
                 None => LineageState::seed(vec![], source.clone())?,
             };
-            let reconciled = base.reconcile(after.clone(), source)?;
+            let chain_version = persisted_chain_version(event)?;
+            let anchor_rows = self.store.provenance_anchors(event.event_id)?;
+            validate_event_suite(event.event_id, chain_version, anchor_rows.len())?;
+            let reconciled = match chain_version {
+                LEGACY_EVENT_CHAIN_VERSION => base.reconcile(after.clone(), source)?,
+                CURRENT_EVENT_CHAIN_VERSION => {
+                    let anchors = validated_stored_anchors(
+                        event.event_id,
+                        base.blocks(),
+                        &after,
+                        &anchor_rows,
+                    )?;
+                    base.reconcile_anchored(after.clone(), source, &anchors)?
+                }
+                _ => unreachable!("validate_event_suite rejects unknown versions"),
+            };
             let after_hash = document_digest(&after, replay.deleted_at());
             let update_log_root = event
                 .update_seq
@@ -1337,6 +1447,17 @@ impl Inner {
         actor: &ActorRef,
         context: &MutationContext,
     ) -> Result<String, WorkspaceError> {
+        self.commit_candidate_with_hints(doc_id, candidate, actor, context, None)
+    }
+
+    fn commit_candidate_with_hints(
+        &mut self,
+        doc_id: &str,
+        candidate: Document,
+        actor: &ActorRef,
+        context: &MutationContext,
+        hints: Option<&[ProseMirrorRangeHint]>,
+    ) -> Result<String, WorkspaceError> {
         let current = self.docs.get(doc_id).expect("document is loaded");
         let before_vector = current.state_vector();
         let delta = candidate.diff_since(&before_vector);
@@ -1353,8 +1474,29 @@ impl Inner {
         let event_id = self.store.next_provenance_event_id()?;
         let update_seq = self.store.next_update_seq()?;
         let source_id = source_id(event_id)?;
-        let reconciled =
-            previous_lineage.reconcile(after_snapshots.clone(), context.source(source_id))?;
+        let source = context.source(source_id);
+        let anchored = hints.filter(|hints| !hints.is_empty()).and_then(|hints| {
+            let semantic = semantic_range_anchors(&before_tree, &after_tree, hints).ok()?;
+            let reconciled = previous_lineage
+                .reconcile_anchored(after_snapshots.clone(), source.clone(), &semantic)
+                .ok()?;
+            let persisted = persisted_anchors(
+                "editor_transaction",
+                &before_snapshots,
+                &after_snapshots,
+                &semantic,
+            )
+            .ok()?;
+            Some((reconciled, persisted))
+        });
+        let (reconciled, anchors, chain_version) = match anchored {
+            Some((reconciled, anchors)) => (reconciled, anchors, CURRENT_EVENT_CHAIN_VERSION),
+            None => (
+                previous_lineage.reconcile(after_snapshots.clone(), source)?,
+                vec![],
+                LEGACY_EVENT_CHAIN_VERSION,
+            ),
+        };
         let prior_event = self.store.latest_provenance_event(doc_id)?;
         let previous_hash = prior_event
             .as_ref()
@@ -1395,6 +1537,8 @@ impl Inner {
             update_log_root,
             previous_hash,
             deltas: &reconciled.deltas,
+            chain_version,
+            anchors: &anchors,
             created_at: at,
             recorded_at: at,
         })?;
@@ -1440,6 +1584,7 @@ impl Inner {
                 },
                 event,
                 changes: deltas_to_store(source_id, &reconciled.deltas)?,
+                anchors,
                 spans: spans_to_store(reconciled.state.spans())?,
                 lineage: ready_lineage(doc_id, update_seq, event_id, reconciled.state.spans(), at)?,
                 block_touches,
@@ -1481,6 +1626,8 @@ struct EventBuild<'a> {
     update_log_root: [u8; 32],
     previous_hash: Option<[u8; 32]>,
     deltas: &'a [thought_provenance::DeltaSegment],
+    chain_version: u32,
+    anchors: &'a [ProvenanceAnchorInput],
     created_at: i64,
     recorded_at: i64,
 }
@@ -1497,8 +1644,10 @@ fn event_input(build: EventBuild<'_>) -> Result<ProvenanceEventInput, WorkspaceE
         .context
         .reported_model()
         .or_else(|| build.actor.and_then(|actor| actor.model.as_deref()));
+    validate_event_suite(build.event_id, build.chain_version, build.anchors.len())?;
+    let hash_anchors = event_anchor_hash_inputs(build.event_id, build.anchors)?;
     let hash = event_chain_digest(&EventHashInput {
-        chain_version: CURRENT_EVENT_CHAIN_VERSION,
+        chain_version: build.chain_version,
         event_id: source_id,
         document_id: build.doc_id,
         update_seq: build
@@ -1530,6 +1679,7 @@ fn event_input(build: EventBuild<'_>) -> Result<ProvenanceEventInput, WorkspaceE
         update_log_root: build.update_log_root,
         previous_event_hash: build.previous_hash,
         deltas: build.deltas,
+        anchors: &hash_anchors,
     });
 
     Ok(ProvenanceEventInput {
@@ -1548,7 +1698,7 @@ fn event_input(build: EventBuild<'_>) -> Result<ProvenanceEventInput, WorkspaceE
         evidence_ref: build.context.evidence_ref().map(str::to_string),
         suggestion_id: build.context.suggestion_id().map(str::to_string),
         client_event_id: build.context.client_event_id().map(str::to_string),
-        chain_version: i64::from(CURRENT_EVENT_CHAIN_VERSION),
+        chain_version: i64::from(build.chain_version),
         before_hash: build.before_hash.to_vec(),
         after_hash: build.after_hash.to_vec(),
         update_log_root: build.update_log_root.to_vec(),
@@ -1556,6 +1706,225 @@ fn event_input(build: EventBuild<'_>) -> Result<ProvenanceEventInput, WorkspaceE
         event_hash: hash.to_vec(),
         created_at: build.created_at,
         recorded_at: build.recorded_at,
+    })
+}
+
+fn validate_event_suite(
+    event_id: i64,
+    chain_version: u32,
+    anchor_count: usize,
+) -> Result<(), WorkspaceError> {
+    match (chain_version, anchor_count) {
+        (LEGACY_EVENT_CHAIN_VERSION, 0) => Ok(()),
+        (LEGACY_EVENT_CHAIN_VERSION, _) => Err(WorkspaceError::NotFound(format!(
+            "provenance event {event_id} uses V1 with anchors"
+        ))),
+        (CURRENT_EVENT_CHAIN_VERSION, 0) => Err(WorkspaceError::NotFound(format!(
+            "provenance event {event_id} uses V2 without anchors"
+        ))),
+        (CURRENT_EVENT_CHAIN_VERSION, _) => Ok(()),
+        (version, _) => Err(WorkspaceError::NotFound(format!(
+            "provenance event {event_id} uses unsupported chain version {version}; this build supports 1 and 2"
+        ))),
+    }
+}
+
+fn event_anchor_hash_inputs<'a>(
+    event_id: i64,
+    anchors: &'a [ProvenanceAnchorInput],
+) -> Result<Vec<EventAnchorHashInput<'a>>, WorkspaceError> {
+    let mut previous_before_end = 0_u64;
+    let mut previous_after_end = 0_u64;
+    anchors
+        .iter()
+        .enumerate()
+        .map(|(ordinal, anchor)| {
+            if !matches!(
+                anchor.basis.as_str(),
+                "editor_transaction" | "server_operation"
+            ) {
+                return Err(WorkspaceError::NotFound(format!(
+                    "provenance event {event_id} anchor {ordinal} has unsupported basis `{}`",
+                    anchor.basis
+                )));
+            }
+            let before_start = as_u64(anchor.before_start_grapheme, "anchor before start")?;
+            let before_end = as_u64(anchor.before_end_grapheme, "anchor before end")?;
+            let after_start = as_u64(anchor.after_start_grapheme, "anchor after start")?;
+            let after_end = as_u64(anchor.after_end_grapheme, "anchor after end")?;
+            if before_start > before_end
+                || after_start > after_end
+                || (ordinal > 0
+                    && (before_start < previous_before_end || after_start < previous_after_end))
+            {
+                return Err(WorkspaceError::NotFound(format!(
+                    "provenance event {event_id} anchor {ordinal} is unordered or overlapping"
+                )));
+            }
+            previous_before_end = before_end;
+            previous_after_end = after_end;
+            Ok(EventAnchorHashInput {
+                basis: &anchor.basis,
+                before_start_grapheme: before_start,
+                before_end_grapheme: before_end,
+                after_start_grapheme: after_start,
+                after_end_grapheme: after_end,
+                before_text_hash: digest_from_bytes(
+                    &anchor.before_text_hash,
+                    "anchor before-text hash",
+                )?,
+                after_text_hash: digest_from_bytes(
+                    &anchor.after_text_hash,
+                    "anchor after-text hash",
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn persisted_anchors(
+    basis: &str,
+    before: &[thought_provenance::BlockSnapshot],
+    after: &[thought_provenance::BlockSnapshot],
+    anchors: &[SemanticRangeAnchor],
+) -> Result<Vec<ProvenanceAnchorInput>, WorkspaceError> {
+    if !matches!(basis, "editor_transaction" | "server_operation") {
+        return Err(WorkspaceError::NotFound(format!(
+            "unsupported provenance anchor basis `{basis}`"
+        )));
+    }
+    let before_text = visible_graphemes(before);
+    let after_text = visible_graphemes(after);
+    anchors
+        .iter()
+        .enumerate()
+        .map(|(ordinal, anchor)| {
+            let before_slice = before_text.get(anchor.before.clone()).ok_or_else(|| {
+                WorkspaceError::NotFound(format!("anchor {ordinal} is outside the before document"))
+            })?;
+            let after_slice = after_text.get(anchor.after.clone()).ok_or_else(|| {
+                WorkspaceError::NotFound(format!("anchor {ordinal} is outside the after document"))
+            })?;
+            Ok(ProvenanceAnchorInput {
+                basis: basis.to_string(),
+                before_start_grapheme: grapheme_index(anchor.before.start)?,
+                before_end_grapheme: grapheme_index(anchor.before.end)?,
+                after_start_grapheme: grapheme_index(anchor.after.start)?,
+                after_end_grapheme: grapheme_index(anchor.after.end)?,
+                before_text_hash: anchor_text_digest(before_slice).to_vec(),
+                after_text_hash: anchor_text_digest(after_slice).to_vec(),
+            })
+        })
+        .collect()
+}
+
+fn grapheme_index(value: usize) -> Result<i64, WorkspaceError> {
+    i64::try_from(value).map_err(|_| {
+        WorkspaceError::NotFound("document exceeds the supported grapheme range".into())
+    })
+}
+
+fn persisted_chain_version(
+    event: &thought_store::ProvenanceEventRow,
+) -> Result<u32, WorkspaceError> {
+    u32::try_from(event.chain_version).map_err(|_| {
+        WorkspaceError::NotFound(format!(
+            "provenance event {} has an invalid chain version",
+            event.event_id
+        ))
+    })
+}
+
+fn anchor_rows_as_inputs(
+    event_id: i64,
+    rows: &[ProvenanceAnchorRow],
+) -> Result<Vec<ProvenanceAnchorInput>, WorkspaceError> {
+    rows.iter()
+        .enumerate()
+        .map(|(ordinal, row)| {
+            if row.event_id != event_id || row.ordinal != ordinal as i64 {
+                return Err(WorkspaceError::NotFound(format!(
+                    "provenance event {event_id} has a noncanonical anchor ordinal"
+                )));
+            }
+            Ok(row.anchor.clone())
+        })
+        .collect()
+}
+
+fn validated_stored_anchors(
+    event_id: i64,
+    before: &[thought_provenance::BlockSnapshot],
+    after: &[thought_provenance::BlockSnapshot],
+    rows: &[ProvenanceAnchorRow],
+) -> Result<Vec<SemanticRangeAnchor>, WorkspaceError> {
+    let inputs = anchor_rows_as_inputs(event_id, rows)?;
+    // Reuse the canonical event-hash validation before interpreting ranges.
+    let _ = event_anchor_hash_inputs(event_id, &inputs)?;
+    let before_text = visible_graphemes(before);
+    let after_text = visible_graphemes(after);
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(ordinal, anchor)| {
+            let semantic = SemanticRangeAnchor::new(
+                stored_grapheme_index(
+                    event_id,
+                    ordinal,
+                    "before start",
+                    anchor.before_start_grapheme,
+                )?
+                    ..stored_grapheme_index(
+                        event_id,
+                        ordinal,
+                        "before end",
+                        anchor.before_end_grapheme,
+                    )?,
+                stored_grapheme_index(
+                    event_id,
+                    ordinal,
+                    "after start",
+                    anchor.after_start_grapheme,
+                )?
+                    ..stored_grapheme_index(
+                        event_id,
+                        ordinal,
+                        "after end",
+                        anchor.after_end_grapheme,
+                    )?,
+            );
+            let before_slice = before_text.get(semantic.before.clone()).ok_or_else(|| {
+                WorkspaceError::NotFound(format!(
+                    "provenance event {event_id} anchor {ordinal} is outside the before document"
+                ))
+            })?;
+            let after_slice = after_text.get(semantic.after.clone()).ok_or_else(|| {
+                WorkspaceError::NotFound(format!(
+                    "provenance event {event_id} anchor {ordinal} is outside the after document"
+                ))
+            })?;
+            if anchor.before_text_hash.as_slice() != anchor_text_digest(before_slice)
+                || anchor.after_text_hash.as_slice() != anchor_text_digest(after_slice)
+            {
+                return Err(WorkspaceError::NotFound(format!(
+                    "provenance event {event_id} anchor {ordinal} has an invalid text hash"
+                )));
+            }
+            Ok(semantic)
+        })
+        .collect()
+}
+
+fn stored_grapheme_index(
+    event_id: i64,
+    ordinal: usize,
+    field: &str,
+    value: i64,
+) -> Result<usize, WorkspaceError> {
+    usize::try_from(value).map_err(|_| {
+        WorkspaceError::NotFound(format!(
+            "provenance event {event_id} anchor {ordinal} has an invalid {field}"
+        ))
     })
 }
 
@@ -1631,14 +2000,18 @@ fn verify_stored_chain(
         }
         let event_id = source_id(event.event_id)?;
         let deltas = deltas_from_store(event_id, &store.provenance_changes(event.event_id)?)?;
+        let anchors = store.provenance_anchors(event.event_id)?;
         let computed = event_digest_from_row(
             event,
-            doc_id,
-            before_hash,
-            after_hash,
-            expected_update_root,
-            previous_event_hash,
-            &deltas,
+            &EventDigestMaterial {
+                document_id: doc_id,
+                before_hash,
+                after_hash,
+                update_log_root: expected_update_root,
+                previous_hash: previous_event_hash,
+                deltas: &deltas,
+                anchors: &anchors,
+            },
         )?;
         if event.event_hash.as_slice() != computed {
             return Err(WorkspaceError::NotFound(format!(
@@ -1687,14 +2060,18 @@ fn verify_rebuilt_event(
             event.event_id
         )));
     }
+    let anchors = store.provenance_anchors(event.event_id)?;
     let computed = event_digest_from_row(
         event,
-        doc_id,
-        state.before_hash,
-        state.after_hash,
-        state.update_log_root,
-        state.previous_hash,
-        deltas,
+        &EventDigestMaterial {
+            document_id: doc_id,
+            before_hash: state.before_hash,
+            after_hash: state.after_hash,
+            update_log_root: state.update_log_root,
+            previous_hash: state.previous_hash,
+            deltas,
+            anchors: &anchors,
+        },
     )?;
     if event.event_hash.as_slice() != computed {
         return Err(WorkspaceError::NotFound(format!(
@@ -1705,32 +2082,29 @@ fn verify_rebuilt_event(
     Ok(())
 }
 
-fn event_digest_from_row(
-    event: &thought_store::ProvenanceEventRow,
-    doc_id: &str,
+struct EventDigestMaterial<'a> {
+    document_id: &'a str,
     before_hash: [u8; 32],
     after_hash: [u8; 32],
     update_log_root: [u8; 32],
     previous_hash: Option<[u8; 32]>,
-    deltas: &[thought_provenance::DeltaSegment],
+    deltas: &'a [thought_provenance::DeltaSegment],
+    anchors: &'a [ProvenanceAnchorRow],
+}
+
+fn event_digest_from_row(
+    event: &thought_store::ProvenanceEventRow,
+    material: &EventDigestMaterial<'_>,
 ) -> Result<[u8; 32], WorkspaceError> {
     let event_id = source_id(event.event_id)?;
-    let chain_version = u32::try_from(event.chain_version).map_err(|_| {
-        WorkspaceError::NotFound(format!(
-            "provenance event {} has an invalid chain version",
-            event.event_id
-        ))
-    })?;
-    if chain_version != CURRENT_EVENT_CHAIN_VERSION {
-        return Err(WorkspaceError::NotFound(format!(
-            "provenance event {} uses unsupported chain version {}; this build supports {}",
-            event.event_id, chain_version, CURRENT_EVENT_CHAIN_VERSION
-        )));
-    }
+    let chain_version = persisted_chain_version(event)?;
+    validate_event_suite(event.event_id, chain_version, material.anchors.len())?;
+    let anchor_inputs = anchor_rows_as_inputs(event.event_id, material.anchors)?;
+    let hash_anchors = event_anchor_hash_inputs(event.event_id, &anchor_inputs)?;
     Ok(event_chain_digest(&EventHashInput {
         chain_version,
         event_id,
-        document_id: doc_id,
+        document_id: material.document_id,
         update_seq: event
             .update_seq
             .map(|seq| as_u64(seq, "update sequence"))
@@ -1755,11 +2129,12 @@ fn event_digest_from_row(
         },
         created_at_ms: event.created_at,
         recorded_at_ms: event.recorded_at,
-        before_document_hash: before_hash,
-        after_document_hash: after_hash,
-        update_log_root,
-        previous_event_hash: previous_hash,
-        deltas,
+        before_document_hash: material.before_hash,
+        after_document_hash: material.after_hash,
+        update_log_root: material.update_log_root,
+        previous_event_hash: material.previous_hash,
+        deltas: material.deltas,
+        anchors: &hash_anchors,
     }))
 }
 

@@ -6,7 +6,8 @@
 //! asserts against it, and CI fails if the committed file is stale.
 
 use std::path::PathBuf;
-use thoughtd::sync::{Frame, LocalInputSource};
+use thought_mcp::lineage::ProseMirrorRangeHint;
+use thoughtd::sync::{AnchoredMutation, Frame, LocalInputSource};
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frames.json")
@@ -50,6 +51,39 @@ fn cases() -> Vec<(&'static str, Frame)> {
                 doc_id: "doc-source".into(),
                 source: LocalInputSource::Paste,
                 update: vec![42, 0, 255],
+            },
+        ),
+        (
+            "anchored-batch",
+            Frame::AnchoredBatch {
+                doc_id: "doc-anchor".into(),
+                mutations: vec![
+                    AnchoredMutation {
+                        source: LocalInputSource::Written,
+                        client_event_id: "keyboard-🌿".into(),
+                        hints: vec![
+                            ProseMirrorRangeHint {
+                                before_from: 1,
+                                before_to: 4,
+                                after_from: 1,
+                                after_to: 7,
+                            },
+                            ProseMirrorRangeHint {
+                                before_from: 20,
+                                before_to: 20,
+                                after_from: 23,
+                                after_to: 25,
+                            },
+                        ],
+                        update: vec![9, 8, 7],
+                    },
+                    AnchoredMutation {
+                        source: LocalInputSource::Paste,
+                        client_event_id: "paste-2".into(),
+                        hints: vec![],
+                        update: vec![0, 255, 1, 2],
+                    },
+                ],
             },
         ),
         (
@@ -142,6 +176,32 @@ fn describe(frame: &Frame) -> serde_json::Value {
             body.extend(update);
             ("sourced_update", doc_id, body)
         }
+        Frame::AnchoredBatch { doc_id, mutations } => {
+            let mut body = vec![1];
+            body.extend_from_slice(&(mutations.len() as u16).to_be_bytes());
+            for mutation in mutations {
+                let source = match mutation.source {
+                    LocalInputSource::Unknown => 0,
+                    LocalInputSource::Written => 1,
+                    LocalInputSource::Paste => 2,
+                    LocalInputSource::Import => 3,
+                    LocalInputSource::Command => 4,
+                };
+                body.push(source);
+                body.push(mutation.client_event_id.len() as u8);
+                body.extend_from_slice(mutation.client_event_id.as_bytes());
+                body.extend_from_slice(&(mutation.hints.len() as u16).to_be_bytes());
+                for hint in &mutation.hints {
+                    body.extend_from_slice(&hint.before_from.to_be_bytes());
+                    body.extend_from_slice(&hint.before_to.to_be_bytes());
+                    body.extend_from_slice(&hint.after_from.to_be_bytes());
+                    body.extend_from_slice(&hint.after_to.to_be_bytes());
+                }
+                body.extend_from_slice(&(mutation.update.len() as u32).to_be_bytes());
+                body.extend_from_slice(&mutation.update);
+            }
+            ("anchored_batch", doc_id, body)
+        }
         Frame::Broadcast { doc_id, update } => ("broadcast", doc_id, update.clone()),
         Frame::Awareness { doc_id, payload } => ("awareness", doc_id, payload.clone()),
         Frame::Error { doc_id, message } => ("error", doc_id, message.as_bytes().to_vec()),
@@ -213,6 +273,29 @@ fn every_local_input_source_round_trips() {
     }
 }
 
+#[test]
+fn anchored_batch_round_trips_every_field_in_order() {
+    let (_, frame) = cases()
+        .into_iter()
+        .find(|(name, _)| *name == "anchored-batch")
+        .expect("anchored fixture case");
+    let decoded = Frame::decode(&frame.encode()).expect("anchored batch decodes");
+    match decoded {
+        Frame::AnchoredBatch { doc_id, mutations } => {
+            assert_eq!(doc_id, "doc-anchor");
+            assert_eq!(mutations.len(), 2);
+            assert_eq!(mutations[0].client_event_id, "keyboard-🌿");
+            assert_eq!(mutations[0].hints.len(), 2);
+            assert_eq!(mutations[0].hints[1].after_from, 23);
+            assert_eq!(mutations[0].update, vec![9, 8, 7]);
+            assert_eq!(mutations[1].source, LocalInputSource::Paste);
+            assert!(mutations[1].hints.is_empty());
+            assert_eq!(mutations[1].update, vec![0, 255, 1, 2]);
+        }
+        other => panic!("expected anchored batch, got {other:?}"),
+    }
+}
+
 /// A truncated or hostile frame must return None, never panic — it arrives on
 /// a connection task that would take the endpoint down with it.
 #[test]
@@ -242,4 +325,82 @@ fn malformed_frames_are_refused_rather_than_panicking() {
         Frame::decode(&[0x09, 0, 0, 0, 0, 0x7f]).is_none(),
         "unknown source"
     );
+}
+
+fn anchored_wire(body: &[u8]) -> Vec<u8> {
+    let mut frame = vec![0x0a, 0, 0, 0, 0];
+    frame.extend_from_slice(body);
+    frame
+}
+
+#[test]
+fn malformed_anchored_batches_are_refused_rather_than_panicking() {
+    let valid = Frame::AnchoredBatch {
+        doc_id: String::new(),
+        mutations: vec![AnchoredMutation {
+            source: LocalInputSource::Written,
+            client_event_id: "x".into(),
+            hints: vec![],
+            update: vec![1],
+        }],
+    }
+    .encode();
+    let valid_body = &valid[5..];
+
+    let cases = [
+        vec![],
+        vec![2, 0, 1],
+        vec![1, 0, 0],
+        vec![1, 0, 129],
+        vec![1, 0, 1],
+        vec![1, 0, 1, 0x7f, 1, b'x', 0, 0, 0, 0, 0, 1, 1],
+        vec![1, 0, 1, 1, 0],
+        vec![1, 0, 1, 1, 1, 0xff, 0, 0, 0, 0, 0, 1, 1],
+        vec![1, 0, 1, 1, 1, b'x', 0, 65],
+        vec![
+            1, 0, 1, 1, 1, b'x', 0, 1, 0, 0, 0, 5, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
+        ],
+        vec![1, 0, 1, 1, 1, b'x', 0, 0, 0, 0, 0, 0],
+        vec![1, 0, 1, 1, 1, b'x', 0, 0, 0, 0, 0, 2, 1],
+        vec![1, 0, 1, 1, 1, b'x', 0, 0, 0xff, 0xff, 0xff, 0xff],
+        {
+            let mut trailing = valid_body.to_vec();
+            trailing.push(0);
+            trailing
+        },
+    ];
+
+    for (index, body) in cases.into_iter().enumerate() {
+        assert!(
+            Frame::decode(&anchored_wire(&body)).is_none(),
+            "malformed anchored case {index} decoded"
+        );
+    }
+}
+
+#[test]
+fn every_truncation_of_an_anchored_batch_is_refused() {
+    let frame = Frame::AnchoredBatch {
+        doc_id: String::new(),
+        mutations: vec![AnchoredMutation {
+            source: LocalInputSource::Command,
+            client_event_id: "event-🌿".into(),
+            hints: vec![ProseMirrorRangeHint {
+                before_from: 1,
+                before_to: 2,
+                after_from: 3,
+                after_to: 4,
+            }],
+            update: vec![1, 2, 3, 4],
+        }],
+    }
+    .encode();
+
+    for len in 0..frame.len() {
+        assert!(
+            Frame::decode(&frame[..len]).is_none(),
+            "truncation at byte {len} decoded"
+        );
+    }
+    assert!(Frame::decode(&frame).is_some());
 }

@@ -229,6 +229,16 @@ impl MutationContext {
     pub fn client_event_id(&self) -> Option<&str> {
         self.client_event_id.as_deref()
     }
+
+    /// Bind one transport-generated idempotency key to this mutation.
+    ///
+    /// The editor capability owns this value. Public MCP tool arguments never
+    /// select it, because reusing another event's key could otherwise turn a
+    /// different mutation into a misleading retry.
+    pub fn with_client_event_id(mut self, client_event_id: String) -> Self {
+        self.client_event_id = Some(client_event_id);
+        self
+    }
 }
 
 pub(crate) fn source_group_key(
@@ -380,5 +390,13 @@ mod tests {
 
         assert_eq!(first.group_key(), renamed.group_key());
         assert_ne!(first.group_key(), second.group_key());
+    }
+
+    #[test]
+    fn client_event_ids_do_not_change_source_identity() {
+        let context = MutationContext::entered().with_client_event_id("window-1:42".into());
+        assert_eq!(context.client_event_id(), Some("window-1:42"));
+        assert_eq!(context.group_key(), "local:written");
+        assert_eq!(context.assurance(), Assurance::Observed);
     }
 }

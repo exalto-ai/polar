@@ -171,6 +171,51 @@ fn the_mcp_endpoint_rejects_the_editor_capability() {
 }
 
 #[test]
+fn editor_lifecycle_routes_require_the_editor_capability_and_record_imports() {
+    let daemon = Daemon::start();
+    let endpoint = daemon.url.strip_suffix("/mcp").unwrap();
+    let editor_url = format!("{endpoint}/editor/documents");
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .max_idle_connections(0)
+            .build(),
+    );
+
+    let unauthorized = agent
+        .post(&editor_url)
+        .header("Authorization", &format!("Bearer {}", daemon.token))
+        .send_json(serde_json::json!({
+            "title": "Wrong capability",
+            "initial_markdown": "should not exist"
+        }));
+    assert!(matches!(unauthorized, Err(ureq::Error::StatusCode(401))));
+
+    let mut response = agent
+        .post(&editor_url)
+        .header("Authorization", &format!("Bearer {}", daemon.editor_token))
+        .send_json(serde_json::json!({
+            "title": "Imported notes",
+            "initial_markdown": "# Imported notes\n\nExact local file."
+        }))
+        .expect("editor import succeeds");
+    let created: serde_json::Value = response.body_mut().read_json().expect("document JSON");
+    let doc_id = created["doc_id"].as_str().expect("document id");
+
+    daemon.connect();
+    let lineage = daemon.call("document_lineage", serde_json::json!({ "doc_id": doc_id }));
+    assert_eq!(lineage["alignment"], "anchored");
+    assert_eq!(lineage["consumer_eligible"], true);
+    assert_eq!(
+        lineage["summary"]["contributions"][0]["source"]["ingress"],
+        "imported"
+    );
+    assert_eq!(
+        lineage["summary"]["contributions"][0]["source"]["assurance"],
+        "observed"
+    );
+}
+
+#[test]
 fn discovery_probe_verifies_the_published_capabilities() {
     let daemon = Daemon::start();
     let published = PublishedDaemon {

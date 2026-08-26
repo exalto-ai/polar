@@ -8,6 +8,12 @@ import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { Editor } from "@tiptap/core";
 import { createEditor } from "./editor";
+import { EditorApi } from "./editor-api";
+import {
+  canExportEditor,
+  lockEditorInteraction,
+  runFrozenDestructiveAction,
+} from "./editor-lifecycle";
 import {
   exportMarkdownDocument,
   importMarkdownDocument,
@@ -54,6 +60,7 @@ const els = {
 
 let connection: Connection;
 let mcp: Mcp;
+let editorApi: EditorApi;
 let open: {
   doc: Y.Doc;
   awareness: Awareness;
@@ -67,7 +74,7 @@ type CloseChoice = "export" | "close" | "cancel";
 let closePromptResolver: ((choice: CloseChoice) => void) | null = null;
 const closeBlockedElements = new Set<HTMLElement>();
 
-const DAEMON_PROTOCOL_VERSION = 2;
+const DAEMON_PROTOCOL_VERSION = 3;
 function settleClosePrompt(choice: CloseChoice) {
   const resolve = closePromptResolver;
   if (!resolve) return;
@@ -316,16 +323,27 @@ async function canLeaveCurrentDocument(): Promise<boolean> {
   return false;
 }
 
+function destroyOpenDocument() {
+  const current = open;
+  open = null;
+  openDocId = "";
+  current?.rails.destroy();
+  current?.provider.destroy();
+  current?.editor.destroy();
+  current?.awareness.destroy();
+  current?.doc.destroy();
+  els.editor.replaceChildren();
+  els.presence.replaceChildren();
+  activeAgents.clear();
+}
+
 async function openDocument(docId: string): Promise<boolean> {
   if (open && openDocId === docId) {
     open.editor.commands.focus();
     return true;
   }
   if (!(await canLeaveCurrentDocument())) return false;
-  open?.rails.destroy();
-  open?.provider.destroy();
-  open?.editor.destroy();
-  els.editor.replaceChildren();
+  destroyOpenDocument();
 
   const doc = new Y.Doc();
   const awareness = new Awareness(doc);
@@ -624,7 +642,7 @@ async function trashSelected() {
   // In the trash the same key means the opposite thing: put it back.
   if (trashMode) {
     try {
-      await mcp.setDocumentDeleted(row.doc_id, false);
+      await editorApi.setDocumentDeleted(row.doc_id, false);
       notify(`Restored "${row.title || "Untitled"}"`);
       await refreshResults();
     } catch (error) {
@@ -635,23 +653,45 @@ async function trashSelected() {
 
   const wasOpen = row.doc_id === openDocId;
   if (wasOpen && !(await canLeaveCurrentDocument())) return;
+
+  if (wasOpen && open) {
+    const target = open;
+    try {
+      const next = await runFrozenDestructiveAction(
+        target,
+        () => open === target && openDocId === row.doc_id,
+        async () => {
+          await editorApi.setDocumentDeleted(row.doc_id, true);
+          notify(
+            `Moved "${row.title || "Untitled"}" to the trash · ${ACCEL_LABEL}⇧⌫ to find it`,
+          );
+        },
+        async () => {
+          await refreshResults();
+          return results[0] ?? (await mcp.listDocuments())[0] ?? null;
+        },
+        destroyOpenDocument,
+      );
+      // A concurrent navigation owns its new editor. Only fill the intentional
+      // empty state left by destroying the document that was actually trashed.
+      if (next && !open) {
+        closeSwitcher();
+        await openDocument(next.doc_id);
+      }
+    } catch (error) {
+      notify(`Could not trash: ${reason(error)}`, "error");
+    }
+    return;
+  }
+
   try {
-    await mcp.setDocumentDeleted(row.doc_id, true);
+    await editorApi.setDocumentDeleted(row.doc_id, true);
     notify(`Moved "${row.title || "Untitled"}" to the trash · ${ACCEL_LABEL}⇧⌫ to find it`);
   } catch (error) {
     notify(`Could not trash: ${reason(error)}`, "error");
     return;
   }
   await refreshResults();
-
-  // Do not leave the window staring at something that is no longer listed.
-  if (wasOpen) {
-    const next = results[0] ?? (await mcp.listDocuments())[0];
-    if (next) {
-      closeSwitcher();
-      await openDocument(next.doc_id);
-    }
-  }
 }
 
 async function createDocumentInNewWindow(title: string) {
@@ -659,11 +699,13 @@ async function createDocumentInNewWindow(title: string) {
   // its preview editor, so it still needs the same durability guard.
   if (!isTauri() && !(await canLeaveCurrentDocument())) return;
   try {
-    const created = await mcp.createDocument(title);
+    const created = await editorApi.createDocument(title);
     els.scrim.hidden = true;
     toggleConnections(false);
     try {
-      await showDocumentInNewWindow(created.doc_id);
+      if (!(await showDocumentInNewWindow(created.doc_id))) {
+        throw new Error("the current document still has changes waiting to autosave");
+      }
     } catch (error) {
       notify(
         `Document was created, but its window could not open: ${reason(error)}`,
@@ -684,12 +726,16 @@ async function createFromQuery() {
 }
 
 async function importMarkdownFile() {
+  // Browser development replaces the current editor instead of opening a new
+  // native window. Check first so a blocked leave cannot create an unreachable
+  // document or claim that it was imported successfully.
+  if (!isTauri() && !(await canLeaveCurrentDocument())) return;
   els.scrim.hidden = true;
   toggleConnections(false);
   try {
     const file = await importMarkdownDocument(
       nativeFileBridge,
-      mcp,
+      editorApi,
       showDocumentInNewWindow,
     );
     if (file) notify(`Imported “${file.file_name}” as a new document`);
@@ -700,6 +746,10 @@ async function importMarkdownFile() {
 
 async function exportMarkdownFile(target = open): Promise<boolean> {
   if (!target) return false;
+  if (!canExportEditor(target)) {
+    notify("Wait for this document to finish loading before exporting.", "error");
+    return false;
+  }
   try {
     // The live editor tree is the exact visible state. Exporting through it
     // also keeps the native file command independent from daemon transport.
@@ -721,12 +771,12 @@ async function exportMarkdownFile(target = open): Promise<boolean> {
  * Native windows are document-scoped. Browser development has no window API,
  * so it deliberately falls back to replacing the one preview editor.
  */
-async function showDocumentInNewWindow(docId: string): Promise<void> {
+async function showDocumentInNewWindow(docId: string): Promise<boolean> {
   if (isTauri()) {
     await invoke("new_window", { docId });
-    return;
+    return true;
   }
-  await openDocument(docId);
+  return openDocument(docId);
 }
 
 // ---------------------------------------------------------------- keys
@@ -831,6 +881,7 @@ async function boot() {
     );
   }
   mcp = new Mcp(connection.mcp_url, connection.mcp_token);
+  editorApi = new EditorApi(connection.mcp_url, connection.editor_token);
   els.stdioCommand.textContent = connection.stdio_command;
   await mcp.connect();
 
@@ -847,7 +898,7 @@ async function boot() {
     targetId =
       documents.find((document) => document.doc_id === last)?.doc_id ??
       documents[0]?.doc_id ??
-      (await mcp.createDocument("")).doc_id;
+      (await editorApi.createDocument("")).doc_id;
   }
 
   await openDocument(targetId);
@@ -886,10 +937,11 @@ async function installNativeCloseGuard(): Promise<void> {
     event.preventDefault();
     if (closingNativeWindow) return;
     closingNativeWindow = true;
-    const wasEditable = target?.editor.isEditable ?? false;
+    const releaseEditorLock = target
+      ? lockEditorInteraction(target)
+      : () => {};
     let destroyed = false;
     setCloseInteractionBlocked(true);
-    target?.editor.setEditable(false);
     try {
       if (offersExport) {
         const choice = await askToExportBeforeClosing();
@@ -930,8 +982,10 @@ async function installNativeCloseGuard(): Promise<void> {
         await invoke("cancel_quit").catch(() => undefined);
         setCloseInteractionBlocked(false);
         if (target && open === target) {
-          target.editor.setEditable(wasEditable);
-          target.editor.commands.focus();
+          releaseEditorLock();
+          if (target.editor.isEditable) target.editor.commands.focus();
+        } else {
+          releaseEditorLock(false);
         }
       }
       closingNativeWindow = false;

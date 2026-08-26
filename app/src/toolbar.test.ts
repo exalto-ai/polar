@@ -239,6 +239,37 @@ describe("installed toolbar", () => {
     cleanup();
   });
 
+  it("keeps formatting controls inert while the editor is read-only", () => {
+    const actions = toolbarOptions();
+    const { editor, element } = makeEditor();
+    editor.setEditable(false);
+    const cleanup = installToolbar(editor, element, actions);
+    const block = document.querySelector<HTMLSelectElement>(
+      '[aria-label="Text style"]',
+    )!;
+    const bold = document.querySelector<HTMLButtonElement>('[aria-label="Bold"]')!;
+    const exportCopy = document.querySelector<HTMLButtonElement>(
+      '[aria-label="Export Markdown copy"]',
+    )!;
+
+    expect(block.disabled).toBe(true);
+    expect(bold.disabled).toBe(true);
+    expect(exportCopy.disabled).toBe(true);
+    block.value = "h1";
+    block.dispatchEvent(new Event("change"));
+    bold.click();
+    exportCopy.click();
+    expect(editor.getJSON().content?.[0].type).toBe("paragraph");
+    expect(editor.isActive("bold")).toBe(false);
+    expect(actions.exportMarkdown).not.toHaveBeenCalled();
+
+    editor.setEditable(true);
+    expect(block.disabled).toBe(false);
+    expect(bold.disabled).toBe(false);
+    expect(exportCopy.disabled).toBe(false);
+    cleanup();
+  });
+
   it("routes the link command to the link controller", () => {
     const openLink = vi.fn(() => true);
     const { editor, element } = makeEditor();

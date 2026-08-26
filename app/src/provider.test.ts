@@ -8,10 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
   decode,
-  decodeSourcedUpdate,
+  decodeAnchoredBatch,
   encode,
   LocalInputSource,
   Tag,
+  type AnchoredMutation,
+  type AnchoredRangeHint,
 } from "./protocol";
 import {
   MAX_PENDING_OUTBOUND_BYTES,
@@ -71,33 +73,38 @@ function updateFor(text: string): Uint8Array {
   return Y.encodeStateAsUpdate(doc, before);
 }
 
+function emptyUpdate(): Uint8Array {
+  return Y.encodeStateAsUpdate(new Y.Doc());
+}
+
 function appendParagraph(target: Y.Doc, text: string) {
   const element = new Y.XmlElement("paragraph");
   element.push([new Y.XmlText(text)]);
   target.getXmlFragment("content").push([element]);
 }
 
-function sentUpdates(target: FakeSocket): Uint8Array[] {
-  return target.sent.filter((frame) => frame[0] === Tag.SourcedUpdate);
+function sentBatches(target: FakeSocket): Uint8Array[] {
+  return target.sent.filter((frame) => frame[0] === Tag.AnchoredBatch);
 }
 
-function updateBody(frame: Uint8Array): Uint8Array {
+function batchMutations(frame: Uint8Array): AnchoredMutation[] {
   const decoded = decode(frame);
-  const sourced = decoded && decodeSourcedUpdate(decoded);
-  if (!sourced) throw new Error("expected a SourcedUpdate frame");
-  return sourced.update;
+  const batch = decoded && decodeAnchoredBatch(decoded);
+  if (!batch) throw new Error("expected an AnchoredBatch frame");
+  return batch.mutations;
 }
 
-function updateSource(frame: Uint8Array) {
-  const decoded = decode(frame);
-  const sourced = decoded && decodeSourcedUpdate(decoded);
-  if (!sourced) throw new Error("expected a SourcedUpdate frame");
-  return sourced.source;
+function sentMutations(target: FakeSocket): AnchoredMutation[] {
+  return sentBatches(target).flatMap(batchMutations);
 }
 
 function replicaFrom(frames: Uint8Array[]): Y.Doc {
   const replica = new Y.Doc();
-  for (const frame of frames) Y.applyUpdate(replica, updateBody(frame));
+  for (const frame of frames) {
+    for (const mutation of batchMutations(frame)) {
+      Y.applyUpdate(replica, mutation.update);
+    }
+  }
   return replica;
 }
 
@@ -122,6 +129,7 @@ beforeEach(() => {
   provider.connect();
   socket = FakeSocket.instances[0];
   socket.open();
+  socket.deliver(encode(Tag.Sync, "doc-1", emptyUpdate()));
 });
 
 afterEach(() => {
@@ -148,7 +156,9 @@ describe("connecting", () => {
     expect(seen).toEqual(["connecting"]);
 
     other.connect();
-    FakeSocket.instances[FakeSocket.instances.length - 1].open();
+    const otherSocket = FakeSocket.instances[FakeSocket.instances.length - 1];
+    otherSocket.open();
+    otherSocket.deliver(encode(Tag.Sync, "doc-connecting", emptyUpdate()));
     expect(seen).toEqual(["connecting", "saved"]);
     other.destroy();
   });
@@ -164,6 +174,78 @@ describe("connecting", () => {
   it("announces what it already has, so the daemon sends only the difference", () => {
     expect(socket.sent).toHaveLength(1);
     expect(socket.sent[0][0]).toBe(Tag.Subscribe);
+  });
+});
+
+describe("initial sync barrier", () => {
+  it("keeps a blank document queued and unsent until its first Sync is applied", () => {
+    const blank = new Y.Doc();
+    const blankAwareness = new Awareness(blank);
+    const gated = new SyncProvider(
+      "ws://test/sync",
+      "tok",
+      "doc-blank",
+      blank,
+      blankAwareness,
+    );
+    gated.connect();
+    const gatedSocket = FakeSocket.instances[FakeSocket.instances.length - 1];
+    gatedSocket.open();
+
+    appendParagraph(blank, "queued before sync");
+    expect(gated.isHydrated).toBe(false);
+    expect(sentBatches(gatedSocket)).toHaveLength(0);
+    expect(gatedSocket.sent.map((frame) => frame[0])).toEqual([Tag.Subscribe]);
+
+    gatedSocket.deliver(encode(Tag.Sync, "doc-blank", updateFor("")));
+    expect(gated.isHydrated).toBe(true);
+    // The daemon-created empty paragraph is present before the queued direct
+    // Yjs change is allowed onto the wire. Real editor input cannot create the
+    // second root because createEditor remains read-only at this point.
+    expect(blank.getXmlFragment("content").length).toBe(2);
+    expect(sentBatches(gatedSocket)).toHaveLength(1);
+    expect(batchMutations(sentBatches(gatedSocket)[0])).toHaveLength(1);
+
+    gated.destroy();
+    blankAwareness.destroy();
+    blank.destroy();
+  });
+
+  it("applies imported content before releasing the editor barrier", () => {
+    const imported = new Y.Doc();
+    const importedAwareness = new Awareness(imported);
+    const gated = new SyncProvider(
+      "ws://test/sync",
+      "tok",
+      "doc-imported",
+      imported,
+      importedAwareness,
+    );
+    const observations: string[] = [];
+    gated.subscribeHydration((hydrated) => {
+      observations.push(
+        `${hydrated}:${imported.getXmlFragment("content").toString()}`,
+      );
+    });
+    gated.connect();
+    const gatedSocket = FakeSocket.instances[FakeSocket.instances.length - 1];
+    gatedSocket.open();
+
+    expect(observations).toEqual(["false:"]);
+    gatedSocket.deliver(
+      encode(Tag.Sync, "doc-imported", updateFor("Imported body")),
+    );
+
+    expect(gated.isHydrated).toBe(true);
+    expect(observations).toEqual([
+      "false:",
+      "true:<paragraph>Imported body</paragraph>",
+    ]);
+    expect(sentBatches(gatedSocket)).toHaveLength(0);
+
+    gated.destroy();
+    importedAwareness.destroy();
+    imported.destroy();
   });
 });
 
@@ -244,8 +326,10 @@ describe("echo and origin", () => {
     const element = new Y.XmlElement("paragraph");
     doc.getXmlFragment("content").push([element]);
     await settle();
-    expect(socket.sent.some((f) => f[0] === Tag.SourcedUpdate)).toBe(true);
-    expect(updateSource(sentUpdates(socket)[0])).toBe(LocalInputSource.Unknown);
+    expect(socket.sent.some((f) => f[0] === Tag.AnchoredBatch)).toBe(true);
+    expect(sentMutations(socket)).toMatchObject([
+      { source: LocalInputSource.Unknown, hints: [] },
+    ]);
   });
 
   it("ignores frames for other documents", async () => {
@@ -256,36 +340,42 @@ describe("echo and origin", () => {
   });
 });
 
-describe("outbound coalescing", () => {
-  it("coalesces adjacent equal sources without crossing source boundaries", () => {
+describe("anchored outbound batching", () => {
+  it("merges Yjs emissions inside one dispatch but preserves transaction boundaries", () => {
     socket.sent.length = 0;
+    const pasteHints: AnchoredRangeHint[] = [
+      { beforeFrom: 2, beforeTo: 2, afterFrom: 2, afterTo: 12 },
+    ];
 
-    provider.withLocalInputSource(LocalInputSource.Written, () => {
+    provider.withLocalTransaction(LocalInputSource.Written, [], () => {
       appendParagraph(doc, "written head");
     });
-    provider.withLocalInputSource(LocalInputSource.Paste, () => {
+    provider.withLocalTransaction(LocalInputSource.Paste, pasteHints, () => {
       appendParagraph(doc, "pasted one");
       appendParagraph(doc, "pasted two");
     });
-    provider.withLocalInputSource(LocalInputSource.Written, () => {
+    provider.withLocalTransaction(LocalInputSource.Written, [], () => {
       appendParagraph(doc, "written tail");
     });
 
-    // The first source run is immutable in flight. The two adjacent paste
-    // updates merge, while the later written run remains a separate entry.
+    // Two internal Yjs emissions from the paste dispatch are one mutation.
+    // The later written transaction remains distinct even though its source
+    // matches the in-flight head.
     expect(provider.pendingOutbound).toBe(3);
-    expect(sentUpdates(socket)).toHaveLength(1);
-    expect(updateSource(sentUpdates(socket)[0])).toBe(LocalInputSource.Written);
+    expect(sentBatches(socket)).toHaveLength(1);
+    expect(sentMutations(socket)[0].source).toBe(LocalInputSource.Written);
 
     socket.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
-    expect(sentUpdates(socket)).toHaveLength(2);
-    expect(updateSource(sentUpdates(socket)[1])).toBe(LocalInputSource.Paste);
+    expect(sentBatches(socket)).toHaveLength(2);
+    const tail = batchMutations(sentBatches(socket)[1]);
+    expect(tail.map((item) => item.source)).toEqual([
+      LocalInputSource.Paste,
+      LocalInputSource.Written,
+    ]);
+    expect(tail[0].hints).toEqual(pasteHints);
+    expect(new Set(sentMutations(socket).map((item) => item.clientEventId)).size).toBe(3);
 
-    socket.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
-    expect(sentUpdates(socket)).toHaveLength(3);
-    expect(updateSource(sentUpdates(socket)[2])).toBe(LocalInputSource.Written);
-
-    const replica = replicaFrom(sentUpdates(socket));
+    const replica = replicaFrom(sentBatches(socket));
     const content = replica.getXmlFragment("content").toString();
     expect(content).toContain("written head");
     expect(content).toContain("pasted one");
@@ -293,60 +383,64 @@ describe("outbound coalescing", () => {
     expect(content).toContain("written tail");
   });
 
-  it("merges an interrupted head only with an adjacent run of the same source", async () => {
+  it("retries the identical in-flight batch before later edits after a lost ACK", async () => {
     vi.useFakeTimers();
     socket.sent.length = 0;
 
-    provider.withLocalInputSource(LocalInputSource.Written, () => {
+    provider.withLocalTransaction(LocalInputSource.Written, [], () => {
       appendParagraph(doc, "head");
+    });
+    const original = sentBatches(socket)[0].slice();
+    const originalMutation = batchMutations(original)[0];
+
+    provider.withLocalTransaction(LocalInputSource.Written, [], () => {
       appendParagraph(doc, "same-source tail");
     });
-    provider.withLocalInputSource(LocalInputSource.Paste, () => {
+    provider.withLocalTransaction(LocalInputSource.Paste, [], () => {
       appendParagraph(doc, "different-source tail");
     });
     expect(provider.pendingOutbound).toBe(3);
 
     socket.close();
-    // The unacknowledged written head and adjacent written tail are both
-    // unsent now, so they become one run. Paste remains separate.
-    expect(provider.pendingOutbound).toBe(2);
+    expect(provider.pendingOutbound).toBe(3);
 
     await vi.advanceTimersByTimeAsync(250);
     const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
     reconnected.open();
-    expect(sentUpdates(reconnected)).toHaveLength(1);
-    expect(updateSource(sentUpdates(reconnected)[0])).toBe(LocalInputSource.Written);
+    expect(sentBatches(reconnected)).toHaveLength(1);
+    expect(sentBatches(reconnected)[0]).toEqual(original);
+    expect(batchMutations(sentBatches(reconnected)[0])[0].clientEventId).toBe(
+      originalMutation.clientEventId,
+    );
 
     reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
-    expect(sentUpdates(reconnected)).toHaveLength(2);
-    expect(updateSource(sentUpdates(reconnected)[1])).toBe(LocalInputSource.Paste);
+    expect(sentBatches(reconnected)).toHaveLength(2);
+    expect(batchMutations(sentBatches(reconnected)[1]).map((item) => item.source)).toEqual([
+      LocalInputSource.Written,
+      LocalInputSource.Paste,
+    ]);
   });
 
-  it("preserves the in-flight head and merges every later edit into one tail", () => {
-    const emitted: Uint8Array[] = [];
-    doc.on("update", (update) => emitted.push(update.slice()));
+  it("keeps the sent head immutable while batching the next 128 mutations", () => {
     socket.sent.length = 0;
 
     appendParagraph(doc, "head");
-    expect(sentUpdates(socket)).toHaveLength(1);
-    expect(updateBody(sentUpdates(socket)[0])).toEqual(emitted[0]);
+    const head = sentBatches(socket)[0].slice();
+    expect(batchMutations(head)).toHaveLength(1);
     expect(provider.pendingOutbound).toBe(1);
 
     for (let index = 0; index < 128; index++) {
       appendParagraph(doc, `tail ${index}`);
     }
 
-    // The first frame is already on the wire and its positional ACK can only
-    // consume that exact head. The other 128 updates occupy one merged tail.
-    expect(sentUpdates(socket)).toHaveLength(1);
-    expect(updateBody(sentUpdates(socket)[0])).toEqual(emitted[0]);
-    expect(provider.pendingOutbound).toBe(2);
+    expect(sentBatches(socket)).toEqual([head]);
+    expect(provider.pendingOutbound).toBe(129);
 
     socket.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
-    const frames = sentUpdates(socket);
+    const frames = sentBatches(socket);
     expect(frames).toHaveLength(2);
-    expect(updateBody(frames[1])).toEqual(Y.mergeUpdates(emitted.slice(1)));
-    expect(provider.pendingOutbound).toBe(1);
+    expect(batchMutations(frames[1])).toHaveLength(128);
+    expect(provider.pendingOutbound).toBe(128);
 
     const replica = replicaFrom(frames);
     expect(replica.getXmlFragment("content").length).toBe(129);
@@ -357,41 +451,37 @@ describe("outbound coalescing", () => {
     expect(provider.hasPendingChanges).toBe(false);
   });
 
-  it("bounds a long offline session and drains it in one reconnect round-trip", async () => {
+  it("drains the largest retained offline session in ordered batches", async () => {
     vi.useFakeTimers();
     const seen: string[] = [];
     provider.subscribeSaveStatus((status) => seen.push(status));
     socket.sent.length = 0;
-
-    appendParagraph(doc, "sent before disconnect");
-    appendParagraph(doc, "queued before disconnect");
-    expect(provider.pendingOutbound).toBe(2);
-
     socket.close();
-    expect(provider.pendingOutbound).toBe(1);
-    for (let index = 0; index < 256; index++) {
+    for (let index = 0; index < MAX_PENDING_OUTBOUND_RUNS; index++) {
       appendParagraph(doc, `offline ${index}`);
-      expect(provider.pendingOutbound).toBe(1);
     }
+    expect(provider.pendingOutbound).toBe(MAX_PENDING_OUTBOUND_RUNS);
     expect(seen[seen.length - 1]).toBe("offline");
 
     await vi.advanceTimersByTimeAsync(250);
     const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
     reconnected.open();
-    const frames = sentUpdates(reconnected);
-    expect(frames).toHaveLength(1);
-    expect(provider.pendingOutbound).toBe(1);
+    expect(batchMutations(sentBatches(reconnected)[0])).toHaveLength(128);
+    expect(provider.pendingOutbound).toBe(MAX_PENDING_OUTBOUND_RUNS);
     expect(seen[seen.length - 1]).toBe("saving");
 
+    reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
+    expect(batchMutations(sentBatches(reconnected)[1])).toHaveLength(128);
+    expect(provider.pendingOutbound).toBe(128);
+
+    const frames = sentBatches(reconnected);
+    const ids = frames.flatMap(batchMutations).map((item) => item.clientEventId);
+    expect(new Set(ids).size).toBe(MAX_PENDING_OUTBOUND_RUNS);
     const replica = replicaFrom(frames);
-    expect(replica.getXmlFragment("content").length).toBe(258);
-    const content = replica.getXmlFragment("content").toString();
-    expect(content).toContain("sent before disconnect");
-    expect(content).toContain("queued before disconnect");
-    expect(content).toContain("offline 255");
+    expect(replica.getXmlFragment("content").length).toBe(MAX_PENDING_OUTBOUND_RUNS);
+    expect(replica.getXmlFragment("content").toString()).toContain("offline 255");
 
     reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
-    expect(sentUpdates(reconnected)).toHaveLength(1);
     expect(provider.pendingOutbound).toBe(0);
     expect(provider.hasPendingChanges).toBe(false);
     expect(seen[seen.length - 1]).toBe("saved");
@@ -415,9 +505,11 @@ describe("outbound coalescing", () => {
     await vi.advanceTimersByTimeAsync(250);
     const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
     reconnected.open();
-    const frames = sentUpdates(reconnected);
+    const frames = sentBatches(reconnected);
     expect(frames).toHaveLength(1);
-    expect(updateSource(frames[0])).toBe(LocalInputSource.Unknown);
+    expect(batchMutations(frames[0])).toMatchObject([
+      { source: LocalInputSource.Unknown, hints: [] },
+    ]);
     expect(replicaFrom(frames).getXmlFragment("content").length).toBe(10_000);
 
     reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
@@ -437,29 +529,29 @@ describe("outbound coalescing", () => {
     await vi.advanceTimersByTimeAsync(250);
     const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
     reconnected.open();
-    const frames = sentUpdates(reconnected);
+    const frames = sentBatches(reconnected);
     expect(frames).toHaveLength(1);
-    expect(updateSource(frames[0])).toBe(LocalInputSource.Unknown);
+    expect(batchMutations(frames[0])).toMatchObject([
+      { source: LocalInputSource.Unknown, hints: [] },
+    ]);
     expect(replicaFrom(frames).getXmlFragment("content").toString()).toContain(text);
   });
 
-  it("stays bounded when a snapshot retry is interrupted by more local edits", async () => {
+  it("stays bounded when an oversized snapshot retry includes more local edits", async () => {
     vi.useFakeTimers();
     socket.sent.length = 0;
-    provider.withLocalInputSource(LocalInputSource.Written, () => appendParagraph(doc, "head"));
     socket.close();
 
-    for (let index = 0; index < 256; index++) {
-      const source = index % 2 === 0 ? LocalInputSource.Written : LocalInputSource.Paste;
-      provider.withLocalInputSource(source, () => appendParagraph(doc, `before retry ${index}`));
-    }
-    expect(provider.pendingOutbound).toBeLessThanOrEqual(MAX_PENDING_OUTBOUND_RUNS);
-    expect(provider.pendingOutboundBytes).toBeLessThanOrEqual(MAX_PENDING_OUTBOUND_BYTES);
+    const head = "x".repeat(MAX_PENDING_OUTBOUND_BYTES * 2);
+    provider.withLocalInputSource(LocalInputSource.Paste, () => appendParagraph(doc, head));
+    expect(provider.pendingOutbound).toBe(1);
+    expect(provider.pendingOutboundBytes).toBe(0);
 
     await vi.advanceTimersByTimeAsync(250);
     const firstRetry = FakeSocket.instances[FakeSocket.instances.length - 1];
     firstRetry.open();
-    expect(updateSource(sentUpdates(firstRetry)[0])).toBe(LocalInputSource.Unknown);
+    const firstMutation = batchMutations(sentBatches(firstRetry)[0])[0];
+    expect(firstMutation.source).toBe(LocalInputSource.Unknown);
 
     for (let index = 0; index < 256; index++) {
       provider.withLocalInputSource(LocalInputSource.Paste, () =>
@@ -475,11 +567,14 @@ describe("outbound coalescing", () => {
     await vi.advanceTimersByTimeAsync(500);
     const secondRetry = FakeSocket.instances[FakeSocket.instances.length - 1];
     secondRetry.open();
-    const frames = sentUpdates(secondRetry);
+    const frames = sentBatches(secondRetry);
     expect(frames).toHaveLength(1);
-    expect(updateSource(frames[0])).toBe(LocalInputSource.Unknown);
+    const secondMutation = batchMutations(frames[0])[0];
+    expect(secondMutation.source).toBe(LocalInputSource.Unknown);
+    expect(secondMutation.clientEventId).not.toBe(firstMutation.clientEventId);
     const replica = replicaFrom(frames);
-    expect(replica.getXmlFragment("content").length).toBe(513);
+    expect(replica.getXmlFragment("content").length).toBe(257);
+    expect(replica.getXmlFragment("content").toString()).toContain(head);
     expect(replica.getXmlFragment("content").toString()).toContain("during retry 255");
   });
 });
@@ -497,13 +592,13 @@ describe("durable save status", () => {
 
     // Keep exactly one update in flight. This makes an Error or ACK refer to a
     // known queue entry instead of relying on every response being successful.
-    expect(sentUpdates(socket)).toHaveLength(1);
+    expect(sentBatches(socket)).toHaveLength(1);
     expect(provider.hasPendingChanges).toBe(true);
     expect(seen).toEqual(["saved", "saving"]);
 
     socket.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
     expect(seen[seen.length - 1]).toBe("saving");
-    expect(sentUpdates(socket)).toHaveLength(2);
+    expect(sentBatches(socket)).toHaveLength(2);
 
     socket.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
     expect(seen[seen.length - 1]).toBe("saved");
@@ -531,7 +626,7 @@ describe("durable save status", () => {
     socket.sent.length = 0;
 
     doc.getXmlFragment("content").push([new Y.XmlElement("paragraph")]);
-    expect(sentUpdates(socket)).toHaveLength(1);
+    expect(sentBatches(socket)).toHaveLength(1);
 
     socket.close();
     doc.getXmlFragment("content").push([new Y.XmlElement("paragraph")]);
@@ -541,11 +636,14 @@ describe("durable save status", () => {
     const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
     reconnected.open();
     expect(reconnected.sent[0][0]).toBe(Tag.Subscribe);
-    expect(sentUpdates(reconnected)).toHaveLength(1);
+    expect(sentBatches(reconnected)).toHaveLength(1);
     expect(seen[seen.length - 1]).toBe("saving");
 
     reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
-    expect(sentUpdates(reconnected)).toHaveLength(1);
+    expect(sentBatches(reconnected)).toHaveLength(2);
+    expect(seen[seen.length - 1]).toBe("saving");
+
+    reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
     expect(seen[seen.length - 1]).toBe("saved");
   });
 
@@ -558,21 +656,24 @@ describe("durable save status", () => {
 
     doc.getXmlFragment("content").push([new Y.XmlElement("paragraph")]);
     doc.getXmlFragment("content").push([new Y.XmlElement("paragraph")]);
-    expect(sentUpdates(socket)).toHaveLength(1);
+    expect(sentBatches(socket)).toHaveLength(1);
 
     socket.deliver(encode(Tag.Error, "doc-1", new TextEncoder().encode("disk full")));
     socket.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
     expect(seen[seen.length - 1]).toBe("error");
     expect(provider.hasPendingChanges).toBe(true);
-    expect(sentUpdates(socket)).toHaveLength(1);
+    expect(sentBatches(socket)).toHaveLength(1);
 
     await vi.advanceTimersByTimeAsync(1_000);
     const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
     reconnected.open();
-    expect(sentUpdates(reconnected)).toHaveLength(1);
+    expect(sentBatches(reconnected)).toHaveLength(1);
 
     reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
-    expect(sentUpdates(reconnected)).toHaveLength(1);
+    expect(sentBatches(reconnected)).toHaveLength(2);
+    expect(provider.hasPendingChanges).toBe(true);
+
+    reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
     expect(provider.hasPendingChanges).toBe(false);
     expect(seen[seen.length - 1]).toBe("saved");
   });
@@ -590,7 +691,7 @@ describe("durable save status", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
     reconnected.open();
-    expect(sentUpdates(reconnected)).toHaveLength(1);
+    expect(sentBatches(reconnected)).toHaveLength(1);
   });
 
   it("keeps a persistence error visible when more edits arrive during backoff", () => {

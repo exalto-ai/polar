@@ -8,12 +8,18 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  ANCHORED_BATCH_VERSION,
   decode,
+  decodeAnchoredBatch,
   decodeSourcedUpdate,
   encode,
+  encodeAnchoredBatch,
   encodeSourcedUpdate,
   LocalInputSource,
+  MAX_ANCHORED_HINTS,
+  MAX_ANCHORED_MUTATIONS,
   Tag,
+  type AnchoredMutation,
 } from "./protocol";
 
 type Fixture = {
@@ -41,6 +47,7 @@ const TAG_BY_KIND: Record<string, number> = {
   presence: Tag.Presence,
   ack: Tag.Ack,
   sourced_update: Tag.SourcedUpdate,
+  anchored_batch: Tag.AnchoredBatch,
 };
 
 describe("wire format agrees with the daemon", () => {
@@ -122,5 +129,200 @@ describe("source-aware updates", () => {
   it("does not reinterpret a legacy update as sourced", () => {
     const legacy = decode(encode(Tag.Update, "doc-1", new Uint8Array([1, 2, 3])));
     expect(decodeSourcedUpdate(legacy!)).toBeNull();
+  });
+});
+
+const mutation = (
+  overrides: Partial<AnchoredMutation> = {},
+): AnchoredMutation => ({
+  source: LocalInputSource.Written,
+  clientEventId: "event-1",
+  hints: [],
+  update: new Uint8Array([9, 8, 7]),
+  ...overrides,
+});
+
+function anchoredFrame(body: Uint8Array) {
+  return decode(encode(Tag.AnchoredBatch, "doc-1", body))!;
+}
+
+describe("anchored batches", () => {
+  it("round-trips ordered mutations, Unicode IDs, hints, and raw updates", () => {
+    const mutations: AnchoredMutation[] = [
+      mutation({
+        clientEventId: "keyboard-🌿",
+        hints: [
+          { beforeFrom: 1, beforeTo: 4, afterFrom: 1, afterTo: 7 },
+          { beforeFrom: 20, beforeTo: 20, afterFrom: 23, afterTo: 25 },
+        ],
+      }),
+      mutation({
+        source: LocalInputSource.Paste,
+        clientEventId: "paste-2",
+        update: new Uint8Array([0, 255, 1, 2]),
+      }),
+    ];
+
+    const frame = decode(encodeAnchoredBatch("doc-1", mutations));
+    expect(frame?.tag).toBe(Tag.AnchoredBatch);
+    expect(decodeAnchoredBatch(frame!)).toEqual({
+      version: ANCHORED_BATCH_VERSION,
+      mutations,
+    });
+  });
+
+  it("uses big-endian integers in the documented field order", () => {
+    const frame = decode(
+      encodeAnchoredBatch("d", [
+        mutation({
+          source: LocalInputSource.Command,
+          clientEventId: "x",
+          hints: [
+            {
+              beforeFrom: 0x01020304,
+              beforeTo: 0x11121314,
+              afterFrom: 0x21222324,
+              afterTo: 0x31323334,
+            },
+          ],
+          update: new Uint8Array([0xaa, 0xbb]),
+        }),
+      ]),
+    )!;
+
+    expect([...frame.body]).toEqual([
+      1,
+      0, 1,
+      4,
+      1, 120,
+      0, 1,
+      1, 2, 3, 4,
+      17, 18, 19, 20,
+      33, 34, 35, 36,
+      49, 50, 51, 52,
+      0, 0, 0, 2,
+      0xaa, 0xbb,
+    ]);
+  });
+
+  it("keeps zero hints valid for updates without a ProseMirror classification", () => {
+    const frame = decode(
+      encodeAnchoredBatch("doc-1", [
+        mutation({ source: LocalInputSource.Unknown, hints: [] }),
+      ]),
+    )!;
+    expect(decodeAnchoredBatch(frame)?.mutations[0].hints).toEqual([]);
+  });
+
+  it("rejects unsupported versions, empty and oversized mutation counts", () => {
+    expect(decodeAnchoredBatch(anchoredFrame(new Uint8Array([2, 0, 1])))).toBeNull();
+    expect(decodeAnchoredBatch(anchoredFrame(new Uint8Array([1, 0, 0])))).toBeNull();
+    expect(
+      decodeAnchoredBatch(
+        anchoredFrame(
+          new Uint8Array([
+            1,
+            (MAX_ANCHORED_MUTATIONS + 1) >>> 8,
+            (MAX_ANCHORED_MUTATIONS + 1) & 0xff,
+          ]),
+        ),
+      ),
+    ).toBeNull();
+  });
+
+  it("rejects malformed source, ID, hint, update, and trailing fields", () => {
+    const valid = decode(encodeAnchoredBatch("doc-1", [mutation()]))!;
+    const cases = [
+      new Uint8Array([1, 0, 1, 0x7f, 1, 120, 0, 0, 0, 0, 0, 1, 1]),
+      new Uint8Array([1, 0, 1, 1, 0]),
+      new Uint8Array([1, 0, 1, 1, 1, 0xff, 0, 0, 0, 0, 0, 1, 1]),
+      new Uint8Array([
+        1, 0, 1, 1, 1, 120,
+        (MAX_ANCHORED_HINTS + 1) >>> 8,
+        (MAX_ANCHORED_HINTS + 1) & 0xff,
+      ]),
+      new Uint8Array([
+        1, 0, 1, 1, 1, 120, 0, 1,
+        0, 0, 0, 5,
+        0, 0, 0, 4,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 1, 1,
+      ]),
+      new Uint8Array([1, 0, 1, 1, 1, 120, 0, 0, 0, 0, 0, 0]),
+      new Uint8Array([1, 0, 1, 1, 1, 120, 0, 0, 0xff, 0xff, 0xff, 0xff]),
+      new Uint8Array([...valid.body, 0]),
+    ];
+
+    for (const body of cases) {
+      expect(() => decodeAnchoredBatch(anchoredFrame(body))).not.toThrow();
+      expect(decodeAnchoredBatch(anchoredFrame(body))).toBeNull();
+    }
+  });
+
+  it("is total for every truncation and reads from the frame body's byte offset", () => {
+    const valid = decode(
+      encodeAnchoredBatch("doc-1", [
+        mutation({
+          hints: [{ beforeFrom: 1, beforeTo: 2, afterFrom: 3, afterTo: 5 }],
+        }),
+      ]),
+    )!;
+
+    for (let length = 0; length < valid.body.length; length++) {
+      const truncated = anchoredFrame(valid.body.slice(0, length));
+      expect(() => decodeAnchoredBatch(truncated)).not.toThrow();
+      expect(decodeAnchoredBatch(truncated)).toBeNull();
+    }
+
+    const backing = new Uint8Array(valid.body.length + 32);
+    backing.set(valid.body, 17);
+    const offsetFrame = {
+      ...valid,
+      body: backing.subarray(17, 17 + valid.body.length),
+    };
+    expect(decodeAnchoredBatch(offsetFrame)).toEqual(decodeAnchoredBatch(valid));
+  });
+
+  it("rejects invalid encoder inputs before producing a frame", () => {
+    expect(() => encodeAnchoredBatch("doc-1", [])).toThrow(RangeError);
+    expect(() =>
+      encodeAnchoredBatch(
+        "doc-1",
+        Array.from({ length: MAX_ANCHORED_MUTATIONS + 1 }, (_, index) =>
+          mutation({ clientEventId: `event-${index}` }),
+        ),
+      ),
+    ).toThrow(RangeError);
+    expect(() =>
+      encodeAnchoredBatch("doc-1", [mutation({ clientEventId: "x".repeat(65) })]),
+    ).toThrow(RangeError);
+    expect(() =>
+      encodeAnchoredBatch("doc-1", [
+        mutation({ hints: Array.from({ length: MAX_ANCHORED_HINTS + 1 }, () => ({
+          beforeFrom: 0,
+          beforeTo: 0,
+          afterFrom: 0,
+          afterTo: 0,
+        })) }),
+      ]),
+    ).toThrow(RangeError);
+    expect(() =>
+      encodeAnchoredBatch("doc-1", [
+        mutation({
+          hints: [{ beforeFrom: 2, beforeTo: 1, afterFrom: 0, afterTo: 0 }],
+        }),
+      ]),
+    ).toThrow(RangeError);
+    expect(() =>
+      encodeAnchoredBatch("doc-1", [mutation({ update: new Uint8Array() })]),
+    ).toThrow(RangeError);
+  });
+
+  it("does not reinterpret legacy sourced updates as anchored batches", () => {
+    const legacy = decode(
+      encodeSourcedUpdate("doc-1", LocalInputSource.Written, new Uint8Array([1])),
+    );
+    expect(decodeAnchoredBatch(legacy!)).toBeNull();
   });
 });

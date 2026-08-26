@@ -12,9 +12,12 @@ import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protoc
 import {
   decode,
   encode,
-  encodeSourcedUpdate,
+  encodeAnchoredBatch,
   LocalInputSource,
+  MAX_ANCHORED_MUTATIONS,
   Tag,
+  type AnchoredMutation,
+  type AnchoredRangeHint,
   type LocalInputSource as LocalInputSourceValue,
 } from "./protocol";
 
@@ -34,34 +37,33 @@ export type AgentPresence = {
   session: string | null;
 };
 
-type OutboundUpdate = {
+type OutboundMutation = AnchoredMutation & {
   kind: "update";
-  source: LocalInputSourceValue;
-  update: Uint8Array;
 };
 
 type OutboundSnapshot = {
   kind: "snapshot";
+  clientEventId: string;
 };
 
-type OutboundWork = OutboundUpdate | OutboundSnapshot;
+type OutboundWork = OutboundMutation | OutboundSnapshot;
 
-/** Strict bounds for source-labelled update bytes retained by the outbox. */
-export const MAX_PENDING_OUTBOUND_RUNS = 64;
+/** Strict bounds for semantic mutations and update bytes retained by the outbox. */
+export const MAX_PENDING_OUTBOUND_RUNS = MAX_ANCHORED_MUTATIONS * 2;
 export const MAX_PENDING_OUTBOUND_BYTES = 256 * 1024;
 
 /**
- * Acknowledgements are positional, so the update already sent must remain
- * unchanged until its ACK arrives. Unsent updates may coalesce only when their
- * sources match and they are adjacent. Crossing a written/paste boundary would
- * permanently erase the distinction because Yjs updates carry no origin.
+ * Acknowledgements are positional, so the exact batch already sent remains
+ * unchanged until its ACK arrives. New work waits behind it and is grouped in
+ * ordered batches of at most 128 semantic editor dispatches.
  */
 class OutboundQueue {
-  private inFlight: OutboundWork | null = null;
+  private inFlight: readonly OutboundWork[] | null = null;
+  private retryPending = false;
   private queued: OutboundWork[] = [];
 
   get length(): number {
-    return this.queued.length + (this.inFlight === null ? 0 : 1);
+    return this.queued.length + (this.inFlight?.length ?? 0);
   }
 
   get hasPending(): boolean {
@@ -69,100 +71,147 @@ class OutboundQueue {
   }
 
   get bytes(): number {
-    return (
-      this.workBytes(this.inFlight) +
-      this.queued.reduce((sum, item) => sum + this.workBytes(item), 0)
-    );
+    return this.batchBytes(this.inFlight) + this.batchBytes(this.queued);
   }
 
-  enqueue(update: Uint8Array, source: LocalInputSourceValue) {
+  enqueue(
+    update: Uint8Array,
+    source: LocalInputSourceValue,
+    hints: readonly AnchoredRangeHint[],
+  ) {
     // A queued snapshot is generated from the live Y.Doc only when it is sent,
     // so it already covers every later edit without retaining another update.
     if (this.queued.some((item) => item.kind === "snapshot")) return;
 
     // The in-flight snapshot represents only the state at its send boundary.
     // One queued snapshot captures edits made while that ACK is outstanding.
-    if (this.inFlight?.kind === "snapshot") {
-      this.queued = [{ kind: "snapshot" }];
-      return;
-    }
-
-    const incoming: OutboundUpdate = { kind: "update", source, update: update.slice() };
-    const tail = this.queued[this.queued.length - 1];
-    if (tail?.kind === "update" && tail.source === incoming.source) {
-      const merged = Y.mergeUpdates([tail.update, incoming.update]);
-      const prospectiveBytes = this.bytes - tail.update.byteLength + merged.byteLength;
-      if (prospectiveBytes <= MAX_PENDING_OUTBOUND_BYTES) {
-        tail.update = merged;
-        return;
-      }
-      this.collapseQueuedToSnapshot();
+    if (this.inFlight?.some((item) => item.kind === "snapshot")) {
+      this.queued = [this.snapshotWork()];
       return;
     }
 
     if (
       this.length + 1 > MAX_PENDING_OUTBOUND_RUNS ||
-      this.bytes + incoming.update.byteLength > MAX_PENDING_OUTBOUND_BYTES
+      this.bytes + update.byteLength > MAX_PENDING_OUTBOUND_BYTES
     ) {
       this.collapseQueuedToSnapshot();
       return;
     }
-    this.queued.push(incoming);
+    this.queued.push({
+      kind: "update",
+      source,
+      clientEventId: randomClientEventId(),
+      hints: hints.map((hint) => ({ ...hint })),
+      update: update.slice(),
+    });
   }
 
-  /** Move the oldest unsent source run into the in-flight position. */
-  beginSend(): OutboundWork | null {
-    if (this.inFlight !== null) return null;
-    this.inFlight = this.queued.shift() ?? null;
-    return this.inFlight;
+  /** Select the oldest batch, or return the exact batch marked for retry. */
+  beginSend(doc: Y.Doc): readonly AnchoredMutation[] | null {
+    if (this.inFlight !== null) {
+      if (!this.retryPending) return null;
+      this.retryPending = false;
+      return this.materialize(this.inFlight, doc);
+    }
+    if (this.queued.length === 0) return null;
+    this.inFlight = this.queued.splice(0, MAX_ANCHORED_MUTATIONS);
+    return this.materialize(this.inFlight, doc);
   }
 
   /** Consume exactly the head that the peer has durably acknowledged. */
   acknowledge(): boolean {
     if (this.inFlight === null) return false;
     this.inFlight = null;
+    this.retryPending = false;
     return true;
   }
 
   /**
-   * Once the socket is gone, no ACK from it can be accepted. The old head and
-   * queued work are both unsent for the next connection. They become one run
-   * only if their adjacent source labels agree.
+   * Once the socket is gone, no ACK from it can be accepted. Retry the same
+   * immutable batch first, with the same event IDs, hints, ordering, and bytes.
    */
   retryInFlight() {
     if (this.inFlight === null) return;
-    const head = this.inFlight;
-    this.inFlight = null;
-    const next = this.queued[0];
-
-    // Once an ACK is lost across an evidence overflow, the safe retry is one
-    // current-document snapshot labelled Unknown. Retaining the old strong
-    // source would overclaim which bytes the daemon still needs.
-    if (head.kind === "snapshot" || next?.kind === "snapshot") {
+    if (this.inFlight.some((item) => item.kind === "snapshot")) {
+      // An oversized snapshot was deliberately not retained. A retry gets a
+      // new event ID so a changed current document cannot conflict with a
+      // snapshot the daemon may already have committed under the old ID.
+      this.inFlight = null;
       this.collapseQueuedToSnapshot();
       return;
     }
-
-    if (next?.kind === "update" && next.source === head.source) {
-      const merged = Y.mergeUpdates([head.update, next.update]);
-      if (this.bytes - next.update.byteLength + merged.byteLength <= MAX_PENDING_OUTBOUND_BYTES) {
-        next.update = merged;
-        return;
-      }
-      this.collapseQueuedToSnapshot();
-      return;
-    }
-    this.queued.unshift(head);
+    this.retryPending = true;
   }
 
   private collapseQueuedToSnapshot() {
-    this.queued = [{ kind: "snapshot" }];
+    this.queued = [this.snapshotWork()];
   }
 
-  private workBytes(item: OutboundWork | null): number {
-    return item?.kind === "update" ? item.update.byteLength : 0;
+  private snapshotWork(): OutboundSnapshot {
+    return { kind: "snapshot", clientEventId: randomClientEventId() };
+  }
+
+  private materialize(
+    work: readonly OutboundWork[],
+    doc: Y.Doc,
+  ): readonly AnchoredMutation[] {
+    if (work.length === 1 && work[0].kind === "snapshot") {
+      const snapshot = work[0];
+      const mutation: AnchoredMutation = {
+        source: LocalInputSource.Unknown,
+        clientEventId: snapshot.clientEventId,
+        hints: [],
+        update: Y.encodeStateAsUpdate(doc),
+      };
+      if (this.bytes + mutation.update.byteLength <= MAX_PENDING_OUTBOUND_BYTES) {
+        this.inFlight = [{ kind: "update", ...mutation }];
+      }
+      return [mutation];
+    }
+    return work.map((item) => {
+      if (item.kind === "snapshot") {
+        throw new Error("a snapshot must be the only outbound mutation");
+      }
+      return {
+        source: item.source,
+        clientEventId: item.clientEventId,
+        hints: item.hints,
+        update: item.update,
+      };
+    });
+  }
+
+  private workBytes(item: OutboundWork): number {
+    return item.kind === "update" ? item.update.byteLength : 0;
+  }
+
+  private batchBytes(items: readonly OutboundWork[] | null): number {
+    return items?.reduce((sum, item) => sum + this.workBytes(item), 0) ?? 0;
   }
 }
+
+function randomClientEventId(): string {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === "function") return cryptoApi.randomUUID();
+
+  const bytes = new Uint8Array(16);
+  if (typeof cryptoApi?.getRandomValues === "function") {
+    cryptoApi.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index++) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  // A compact 128-bit identifier stays comfortably inside the wire's 64-byte
+  // UTF-8 limit even in runtimes without randomUUID().
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+type LocalTransactionCapture = {
+  source: LocalInputSourceValue;
+  hints: readonly AnchoredRangeHint[];
+  updates: Uint8Array[];
+};
 
 export class SyncProvider {
   private socket: WebSocket | null = null;
@@ -179,8 +228,12 @@ export class SyncProvider {
   private saveError = false;
   private saveStatus: SaveStatus = "connecting";
   private readonly saveListeners = new Set<(status: SaveStatus) => void>();
-  /** Source scoped around a TipTap dispatch; Yjs emits its update synchronously. */
-  private activeLocalSource: LocalInputSourceValue | null = null;
+  /** No local mutation may leave until the daemon's first snapshot is applied. */
+  private hydrated = false;
+  private initialSyncPending = false;
+  private readonly hydrationListeners = new Set<(hydrated: boolean) => void>();
+  /** Yjs updates emitted synchronously inside the current TipTap dispatch. */
+  private activeLocalTransaction: LocalTransactionCapture | null = null;
   /**
    * A DOM event can cause Yjs work without a TipTap dispatch, notably undo.
    * Keep the observation for the current browser task as a narrow fallback.
@@ -217,10 +270,9 @@ export class SyncProvider {
 
     this.onStatus("connecting");
     this.setSaveStatus("connecting");
-    // A new connection returns the in-flight head to the source-run queue.
-    // Adjacent runs with the same source may merge, but distinct source
-    // boundaries remain separate. Resending is safe when only the ACK was lost
-    // because Yjs updates are idempotent.
+    // A new connection makes the exact in-flight batch eligible for retry.
+    // Later transactions remain queued behind it. Stable client event IDs make
+    // a lost acknowledgement safe even after the daemon committed the batch.
     this.outbound.retryInFlight();
     this.saveError = false;
     // The browser WebSocket API cannot set headers, so the editor capability
@@ -242,8 +294,10 @@ export class SyncProvider {
       this.onStatus("connected");
       // Announce what we already have; the daemon replies with the difference.
       socket.send(encode(Tag.Subscribe, this.docId, Y.encodeStateVector(this.doc)));
-      this.flushOutbound();
-      if (!this.outbound.hasPending) this.setSaveStatus("saved");
+      if (this.hydrated) {
+        this.flushOutbound();
+        if (!this.outbound.hasPending) this.setSaveStatus("saved");
+      }
     };
 
     socket.onmessage = (event) => {
@@ -253,6 +307,12 @@ export class SyncProvider {
 
       switch (frame.tag) {
         case Tag.Sync:
+          if (!this.hydrated) this.initialSyncPending = true;
+          this.queue(frame.body);
+          // The first snapshot is the editing barrier, not part of the normal
+          // display coalescer. Apply it before any UI can become editable.
+          if (!this.hydrated) this.flush();
+          break;
         case Tag.Broadcast:
           this.queue(frame.body);
           break;
@@ -272,9 +332,9 @@ export class SyncProvider {
           break;
         case Tag.Error:
           console.error("sync error:", new TextDecoder().decode(frame.body));
-          // Updates are sent one at a time, so this error belongs to the current
-          // head of the queue. Keep it there and ignore later ACKs until a fresh
-          // connection retries it.
+          // Only one batch is in flight, so this error belongs to that exact
+          // head. Keep it there and ignore later ACKs until a fresh connection
+          // retries it.
           this.saveError = true;
           this.setSaveStatus("error");
           // Retry the same queue head on a fresh connection. Persistence
@@ -319,18 +379,36 @@ export class SyncProvider {
   }
 
   /**
-   * Scope the next synchronous Yjs update to the transaction that produced it.
-   * Nested scopes restore the outer source, which keeps plugin composition
-   * deterministic.
+   * Capture every Yjs update emitted inside one TipTap dispatch and enqueue
+   * them as one semantic mutation. y-prosemirror can emit more than once while
+   * reconciling a transaction, but those internal updates must not invent new
+   * semantic editor-dispatch boundaries.
    */
-  withLocalInputSource<T>(source: LocalInputSourceValue, run: () => T): T {
-    const previous = this.activeLocalSource;
-    this.activeLocalSource = source;
+  withLocalTransaction<T>(
+    source: LocalInputSourceValue,
+    hints: readonly AnchoredRangeHint[],
+    run: () => T,
+  ): T {
+    const previous = this.activeLocalTransaction;
+    const capture: LocalTransactionCapture = { source, hints, updates: [] };
+    this.activeLocalTransaction = capture;
     try {
       return run();
     } finally {
-      this.activeLocalSource = previous;
+      this.activeLocalTransaction = previous;
+      if (capture.updates.length > 0) {
+        const update =
+          capture.updates.length === 1
+            ? capture.updates[0]
+            : Y.mergeUpdates(capture.updates);
+        this.enqueueLocalMutation(update, capture.source, capture.hints);
+      }
     }
+  }
+
+  /** Compatibility for callers that can classify source but have no ranges. */
+  withLocalInputSource<T>(source: LocalInputSourceValue, run: () => T): T {
+    return this.withLocalTransaction(source, [], run);
   }
 
   /**
@@ -356,6 +434,18 @@ export class SyncProvider {
     this.saveListeners.add(listener);
     listener(this.saveStatus);
     return () => this.saveListeners.delete(listener);
+  }
+
+  /** Whether the daemon's initial Sync snapshot has been applied to this Y.Doc. */
+  get isHydrated(): boolean {
+    return this.hydrated;
+  }
+
+  /** Observe the initial-sync editing barrier. The current value is immediate. */
+  subscribeHydration(listener: (hydrated: boolean) => void): () => void {
+    this.hydrationListeners.add(listener);
+    listener(this.hydrated);
+    return () => this.hydrationListeners.delete(listener);
   }
 
   /** True until every local update has a durable daemon acknowledgement. */
@@ -402,6 +492,7 @@ export class SyncProvider {
     if (this.timer !== null) clearTimeout(this.timer);
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    this.hydrationListeners.clear();
     const socket = this.socket;
     this.socket = null;
     socket?.close();
@@ -411,12 +502,27 @@ export class SyncProvider {
 
   private onLocalUpdate = (update: Uint8Array, origin: unknown) => {
     if (origin === REMOTE) return;
-    const source =
-      this.activeLocalSource ?? this.pendingLocalSource ?? LocalInputSource.Unknown;
+    const capture = this.activeLocalTransaction;
+    if (capture !== null) {
+      capture.updates.push(update.slice());
+      this.pendingLocalSource = null;
+      this.pendingSourceGeneration += 1;
+      return;
+    }
+
+    const source = this.pendingLocalSource ?? LocalInputSource.Unknown;
     this.pendingLocalSource = null;
     this.pendingSourceGeneration += 1;
-    this.outbound.enqueue(update, source);
-    if (this.socket?.readyState === WebSocket.OPEN) {
+    this.enqueueLocalMutation(update, source, []);
+  };
+
+  private enqueueLocalMutation(
+    update: Uint8Array,
+    source: LocalInputSourceValue,
+    hints: readonly AnchoredRangeHint[],
+  ) {
+    this.outbound.enqueue(update, source, hints);
+    if (this.hydrated && this.socket?.readyState === WebSocket.OPEN) {
       this.flushOutbound();
     } else if (
       this.saveStatus !== "connecting" &&
@@ -424,7 +530,7 @@ export class SyncProvider {
     ) {
       this.setSaveStatus("offline");
     }
-  };
+  }
 
   private onAwarenessChange = (
     changes: { added: number[]; updated: number[]; removed: number[] },
@@ -443,18 +549,16 @@ export class SyncProvider {
     const socket = this.socket;
     if (
       socket?.readyState !== WebSocket.OPEN ||
+      !this.hydrated ||
       this.saveError ||
       !this.outbound.hasPending
     ) {
       return;
     }
 
-    const update = this.outbound.beginSend();
-    if (update === null) return;
-    const source = update.kind === "snapshot" ? LocalInputSource.Unknown : update.source;
-    const body =
-      update.kind === "snapshot" ? Y.encodeStateAsUpdate(this.doc) : update.update;
-    socket.send(encodeSourcedUpdate(this.docId, source, body));
+    const mutations = this.outbound.beginSend(this.doc);
+    if (mutations === null) return;
+    socket.send(encodeAnchoredBatch(this.docId, mutations));
     this.setSaveStatus("saving");
   }
 
@@ -513,9 +617,17 @@ export class SyncProvider {
    */
   private flush() {
     if (this.composing || this.inbound.length === 0) return;
+    const completesInitialSync = this.initialSyncPending;
     const merged = this.inbound.length === 1 ? this.inbound[0] : Y.mergeUpdates(this.inbound);
     this.inbound = [];
     Y.applyUpdate(this.doc, merged, REMOTE);
+    if (completesInitialSync && !this.hydrated) {
+      this.initialSyncPending = false;
+      this.hydrated = true;
+      for (const listener of this.hydrationListeners) listener(true);
+      this.flushOutbound();
+      if (!this.outbound.hasPending) this.setSaveStatus("saved");
+    }
   }
 
   /** Pending inbound updates. Exposed so tests can observe the buffer. */

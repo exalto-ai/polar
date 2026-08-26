@@ -155,6 +155,38 @@ impl BlockSnapshot {
     }
 }
 
+/// Return the visible extended grapheme clusters in document order.
+///
+/// Blocks and their text leaves are concatenated in snapshot order without
+/// synthetic separators. The returned slices borrow the leaf text, so callers
+/// can deterministically slice or hash the same global sequence used by
+/// [`SemanticRangeAnchor`].
+pub fn visible_graphemes(blocks: &[BlockSnapshot]) -> Vec<&str> {
+    blocks
+        .iter()
+        .flat_map(|block| block.leaves.iter())
+        .flat_map(|leaf| leaf.text.graphemes(true))
+        .collect()
+}
+
+/// One caller-observed semantic replacement in the visible document.
+///
+/// Both ranges are half-open global indices into the extended grapheme
+/// sequence returned by [`visible_graphemes`]. Empty ranges represent an
+/// insertion or deletion. Anchors must be supplied in document order and may
+/// not overlap in either snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SemanticRangeAnchor {
+    pub before: Range<usize>,
+    pub after: Range<usize>,
+}
+
+impl SemanticRangeAnchor {
+    pub fn new(before: Range<usize>, after: Range<usize>) -> Self {
+        Self { before, after }
+    }
+}
+
 /// A current text range. Offsets are UTF-16 code units, matching Yjs and
 /// ProseMirror positions in the webview.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -284,6 +316,21 @@ impl LineageState {
         event_source: SourceDescriptor,
     ) -> Result<Reconciliation, ReconcileError> {
         reconcile(self, after, event_source)
+    }
+
+    /// Reconcile using caller-observed semantic replacement ranges.
+    ///
+    /// Unlike [`Self::reconcile`], this method does not infer matches inside a
+    /// changed anchor beyond an equal prefix and suffix. This lets a caller
+    /// disambiguate repeated text while preserving unchanged text captured by
+    /// a broad replacement range.
+    pub fn reconcile_anchored(
+        &self,
+        after: Vec<BlockSnapshot>,
+        event_source: SourceDescriptor,
+        anchors: &[SemanticRangeAnchor],
+    ) -> Result<Reconciliation, ReconcileError> {
+        reconcile_anchored(self, after, event_source, anchors)
     }
 
     pub fn current_source_summary(&self) -> Result<CurrentSourceSummary, ReconcileError> {
@@ -451,6 +498,22 @@ pub struct CurrentSourceSummary {
     pub grouped_contributions: Vec<GroupedSourceContribution>,
 }
 
+/// Which document snapshot made an anchor range invalid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorSnapshot {
+    Before,
+    After,
+}
+
+impl fmt::Display for AnchorSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Before => f.write_str("before"),
+            Self::After => f.write_str("after"),
+        }
+    }
+}
+
 fn grouped_contributions(contributions: &[SourceContribution]) -> Vec<GroupedSourceContribution> {
     let mut grouped = BTreeMap::<String, (SourceId, GroupedSourceContribution)>::new();
     for contribution in contributions {
@@ -499,12 +562,35 @@ fn grouped_contributions(contributions: &[SourceContribution]) -> Vec<GroupedSou
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReconcileError {
     DuplicateBlockId(String),
-    DuplicateLeafPath { block_id: String, path: Vec<u32> },
+    DuplicateLeafPath {
+        block_id: String,
+        path: Vec<u32>,
+    },
     SourceConflict(SourceId),
     UnknownSource(SourceId),
     InvalidSpan(TextLocation),
     OverlappingSpans(TextLocation, TextLocation),
     UncoveredText(TextLocation),
+    InvalidAnchorRange {
+        anchor_index: usize,
+        snapshot: AnchorSnapshot,
+        range: Range<usize>,
+        document_len: usize,
+    },
+    UnsortedAnchors {
+        previous_index: usize,
+        anchor_index: usize,
+        snapshot: AnchorSnapshot,
+    },
+    OverlappingAnchors {
+        previous_index: usize,
+        anchor_index: usize,
+        snapshot: AnchorSnapshot,
+    },
+    UnanchoredTextMismatch {
+        before: Range<usize>,
+        after: Range<usize>,
+    },
 }
 
 impl fmt::Display for ReconcileError {
@@ -523,6 +609,35 @@ impl fmt::Display for ReconcileError {
             Self::UncoveredText(location) => {
                 write!(f, "visible grapheme has no lineage at {location:?}")
             }
+            Self::InvalidAnchorRange {
+                anchor_index,
+                snapshot,
+                range,
+                document_len,
+            } => write!(
+                f,
+                "anchor {anchor_index} has invalid {snapshot} range {range:?} for a document with {document_len} visible graphemes"
+            ),
+            Self::UnsortedAnchors {
+                previous_index,
+                anchor_index,
+                snapshot,
+            } => write!(
+                f,
+                "anchor {anchor_index} is before anchor {previous_index} in the {snapshot} document"
+            ),
+            Self::OverlappingAnchors {
+                previous_index,
+                anchor_index,
+                snapshot,
+            } => write!(
+                f,
+                "anchors {previous_index} and {anchor_index} overlap in the {snapshot} document"
+            ),
+            Self::UnanchoredTextMismatch { before, after } => write!(
+                f,
+                "visible text outside anchors differs between before range {before:?} and after range {after:?}"
+            ),
         }
     }
 }
@@ -615,6 +730,212 @@ pub fn reconcile(
         },
         deltas,
     })
+}
+
+/// Reconcile `after` against `before` using caller-observed change ranges.
+///
+/// Every anchor maps one half-open global grapheme range in `before` to its
+/// replacement range in `after`. The ranges must be sorted, nonoverlapping,
+/// and in bounds in both snapshots. Visible graphemes outside corresponding
+/// anchors must be exactly equal. Within each anchor, an equal prefix and
+/// suffix retain their existing lineage; all remaining old graphemes are
+/// deleted and all remaining new graphemes belong to `event_source`.
+///
+/// This is an opt-in V2 path. [`reconcile`] retains its deterministic inferred
+/// matching behavior for callers that do not have observed semantic ranges.
+pub fn reconcile_anchored(
+    before: &LineageState,
+    after: Vec<BlockSnapshot>,
+    event_source: SourceDescriptor,
+    anchors: &[SemanticRangeAnchor],
+) -> Result<Reconciliation, ReconcileError> {
+    validate_blocks(&after)?;
+    let old_flat = FlatDocument::new(&before.blocks);
+    let new_flat = FlatDocument::new(&after);
+    let old_sources = before.token_sources()?;
+    validate_semantic_anchors(anchors, old_flat.tokens.len(), new_flat.tokens.len())?;
+    let matches = anchored_matches(&old_flat.tokens, &new_flat.tokens, anchors)?;
+
+    let mut descriptors = before.sources.clone();
+    if let Some(existing) = descriptors.get(&event_source.id) {
+        if existing != &event_source {
+            return Err(ReconcileError::SourceConflict(event_source.id));
+        }
+    } else {
+        descriptors.insert(event_source.id, event_source.clone());
+    }
+
+    let mut new_sources = vec![event_source.id; new_flat.tokens.len()];
+    for &(old_index, new_index) in &matches {
+        new_sources[new_index] = old_sources[old_index];
+    }
+
+    let mut deltas = structure_deltas(&before.blocks, &after, event_source.id);
+    append_text_deltas(
+        &old_flat.tokens,
+        &old_sources,
+        &new_flat.tokens,
+        event_source.id,
+        &matches,
+        &mut deltas,
+    );
+    append_format_deltas(
+        &old_flat.tokens,
+        &old_sources,
+        &new_flat.tokens,
+        event_source.id,
+        &matches,
+        &mut deltas,
+    );
+
+    Ok(Reconciliation {
+        state: LineageState {
+            blocks: after,
+            spans: compress_spans(&new_flat.tokens, &new_sources),
+            sources: descriptors,
+        },
+        deltas,
+    })
+}
+
+fn validate_semantic_anchors(
+    anchors: &[SemanticRangeAnchor],
+    before_len: usize,
+    after_len: usize,
+) -> Result<(), ReconcileError> {
+    for (snapshot, document_len) in [
+        (AnchorSnapshot::Before, before_len),
+        (AnchorSnapshot::After, after_len),
+    ] {
+        for (anchor_index, anchor) in anchors.iter().enumerate() {
+            let range = anchor_range(anchor, snapshot);
+            if range.start > range.end || range.end > document_len {
+                return Err(ReconcileError::InvalidAnchorRange {
+                    anchor_index,
+                    snapshot,
+                    range: range.clone(),
+                    document_len,
+                });
+            }
+            let Some(previous_index) = anchor_index.checked_sub(1) else {
+                continue;
+            };
+            let previous = anchor_range(&anchors[previous_index], snapshot);
+            if range.start < previous.start {
+                return Err(ReconcileError::UnsortedAnchors {
+                    previous_index,
+                    anchor_index,
+                    snapshot,
+                });
+            }
+            if range.start < previous.end {
+                return Err(ReconcileError::OverlappingAnchors {
+                    previous_index,
+                    anchor_index,
+                    snapshot,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn anchor_range(anchor: &SemanticRangeAnchor, snapshot: AnchorSnapshot) -> &Range<usize> {
+    match snapshot {
+        AnchorSnapshot::Before => &anchor.before,
+        AnchorSnapshot::After => &anchor.after,
+    }
+}
+
+fn anchored_matches(
+    old: &[FlatToken],
+    new: &[FlatToken],
+    anchors: &[SemanticRangeAnchor],
+) -> Result<Vec<(usize, usize)>, ReconcileError> {
+    let mut matches = Vec::new();
+    let mut old_cursor = 0;
+    let mut new_cursor = 0;
+
+    for anchor in anchors {
+        append_equal_visible_matches(
+            old,
+            old_cursor..anchor.before.start,
+            new,
+            new_cursor..anchor.after.start,
+            &mut matches,
+        )?;
+        append_anchor_matches(old, new, anchor, &mut matches);
+        old_cursor = anchor.before.end;
+        new_cursor = anchor.after.end;
+    }
+
+    append_equal_visible_matches(
+        old,
+        old_cursor..old.len(),
+        new,
+        new_cursor..new.len(),
+        &mut matches,
+    )?;
+    Ok(matches)
+}
+
+fn append_equal_visible_matches(
+    old: &[FlatToken],
+    old_range: Range<usize>,
+    new: &[FlatToken],
+    new_range: Range<usize>,
+    matches: &mut Vec<(usize, usize)>,
+) -> Result<(), ReconcileError> {
+    let equal = old[old_range.clone()]
+        .iter()
+        .map(|token| token.text.as_str())
+        .eq(new[new_range.clone()]
+            .iter()
+            .map(|token| token.text.as_str()));
+    if !equal {
+        return Err(ReconcileError::UnanchoredTextMismatch {
+            before: old_range,
+            after: new_range,
+        });
+    }
+    matches.extend(old_range.zip(new_range));
+    Ok(())
+}
+
+fn append_anchor_matches(
+    old: &[FlatToken],
+    new: &[FlatToken],
+    anchor: &SemanticRangeAnchor,
+    matches: &mut Vec<(usize, usize)>,
+) {
+    let old_slice = &old[anchor.before.clone()];
+    let new_slice = &new[anchor.after.clone()];
+    let mut prefix = 0;
+    while prefix < old_slice.len()
+        && prefix < new_slice.len()
+        && old_slice[prefix].text == new_slice[prefix].text
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    while suffix < old_slice.len() - prefix
+        && suffix < new_slice.len() - prefix
+        && old_slice[old_slice.len() - 1 - suffix].text
+            == new_slice[new_slice.len() - 1 - suffix].text
+    {
+        suffix += 1;
+    }
+
+    matches.extend(
+        (0..prefix).map(|offset| (anchor.before.start + offset, anchor.after.start + offset)),
+    );
+    matches.extend((0..suffix).map(|offset| {
+        (
+            anchor.before.end - suffix + offset,
+            anchor.after.end - suffix + offset,
+        )
+    }));
 }
 
 #[derive(Debug, Clone)]
@@ -1217,7 +1538,44 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_duplicate_deletion_uses_the_documented_deterministic_inference() {
+    fn broad_anchored_grammar_replacement_preserves_a_hundred_word_context() {
+        let mut old_words = (0..100)
+            .map(|index| format!("word{index:03}"))
+            .collect::<Vec<_>>();
+        old_words[49] = "are".into();
+        let mut new_words = old_words.clone();
+        new_words[49] = "is".into();
+        let old_text = old_words.join(" ");
+        let new_text = new_words.join(" ");
+        assert_eq!(old_text.split_whitespace().count(), 100);
+
+        let before_blocks = vec![block("a", &old_text)];
+        let after_blocks = vec![block("a", &new_text)];
+        let before_len = visible_graphemes(&before_blocks).len();
+        let after_len = visible_graphemes(&after_blocks).len();
+        let before = LineageState::seed(before_blocks, human(1)).unwrap();
+        let change = reconcile_anchored(
+            &before,
+            after_blocks,
+            claude(2),
+            &[SemanticRangeAnchor::new(0..before_len, 0..after_len)],
+        )
+        .unwrap();
+
+        assert_eq!(count(&change.state, SourceId(2)), 2);
+        assert_eq!(count(&change.state, SourceId(1)), after_len - 2);
+        assert!(change.deltas.iter().any(|delta| matches!(
+            delta,
+            DeltaSegment::Delete { text, .. } if text == "are"
+        )));
+        assert!(change.deltas.iter().any(|delta| matches!(
+            delta,
+            DeltaSegment::Insert { text, .. } if text == "is"
+        )));
+    }
+
+    #[test]
+    fn v1_ambiguous_duplicate_deletion_keeps_its_documented_output() {
         let first = LineageState::seed(vec![block("a", "yes")], human(1)).unwrap();
         let both = first
             .reconcile(vec![block("a", "yesyes")], claude(2))
@@ -1234,6 +1592,56 @@ mod tests {
             delta,
             DeltaSegment::Delete { content_source_id: SourceId(2), text, .. } if text == "yes"
         )));
+        assert_eq!(once.state.spans(), &[span(0, 3, SourceId(1))]);
+        assert_eq!(
+            once.deltas,
+            vec![DeltaSegment::Delete {
+                event_source_id: SourceId(3),
+                content_source_id: SourceId(2),
+                before: TextLocation {
+                    block_id: "a".into(),
+                    path: vec![0],
+                    from_utf16: 3,
+                    to_utf16: 6,
+                },
+                text: "yes".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn anchored_duplicate_deletion_selects_the_observed_cross_source_occurrence() {
+        let first = LineageState::seed(vec![block("a", "yes")], human(1)).unwrap();
+        let both = first
+            .reconcile(vec![block("a", "yesyes")], claude(2))
+            .unwrap()
+            .state;
+
+        let once = both
+            .reconcile_anchored(
+                vec![block("a", "yes")],
+                human(3),
+                &[SemanticRangeAnchor::new(0..3, 0..0)],
+            )
+            .unwrap();
+
+        assert_eq!(count(&once.state, SourceId(1)), 0);
+        assert_eq!(count(&once.state, SourceId(2)), 3);
+        assert_eq!(once.state.spans(), &[span(0, 3, SourceId(2))]);
+        assert_eq!(
+            once.deltas,
+            vec![DeltaSegment::Delete {
+                event_source_id: SourceId(3),
+                content_source_id: SourceId(1),
+                before: TextLocation {
+                    block_id: "a".into(),
+                    path: vec![0],
+                    from_utf16: 0,
+                    to_utf16: 3,
+                },
+                text: "yes".into(),
+            }]
+        );
     }
 
     #[test]
@@ -1289,6 +1697,53 @@ mod tests {
     }
 
     #[test]
+    fn equal_full_anchor_preserves_text_for_formatting_and_structure_only_changes() {
+        let plain = BlockSnapshot::new(
+            "a",
+            "paragraph",
+            "",
+            vec![TextLeafSnapshot::new(vec![0], "important", "")],
+        );
+        let bold = BlockSnapshot::new(
+            "a",
+            "paragraph",
+            "",
+            vec![TextLeafSnapshot::new(vec![0], "important", "bold")],
+        );
+        let formatting_before = LineageState::seed(vec![plain], human(1)).unwrap();
+        let formatting = formatting_before
+            .reconcile_anchored(
+                vec![bold],
+                claude(2),
+                &[SemanticRangeAnchor::new(0..9, 0..9)],
+            )
+            .unwrap();
+
+        assert_eq!(count(&formatting.state, SourceId(1)), 9);
+        assert_eq!(count(&formatting.state, SourceId(2)), 0);
+        assert!(matches!(
+            formatting.deltas.as_slice(),
+            [DeltaSegment::Format { text, .. }] if text == "important"
+        ));
+
+        let structure_before = LineageState::seed(vec![block("a", "same")], human(3)).unwrap();
+        let structure = structure_before
+            .reconcile_anchored(
+                vec![BlockSnapshot::plain("a", "heading", "same")],
+                claude(4),
+                &[SemanticRangeAnchor::new(0..4, 0..4)],
+            )
+            .unwrap();
+
+        assert_eq!(count(&structure.state, SourceId(3)), 4);
+        assert_eq!(count(&structure.state, SourceId(4)), 0);
+        assert!(matches!(
+            structure.deltas.as_slice(),
+            [DeltaSegment::Structure { .. }]
+        ));
+    }
+
+    #[test]
     fn block_type_change_preserves_text_and_records_structure() {
         let before = LineageState::seed(vec![block("a", "Heading")], human(1)).unwrap();
         let after = BlockSnapshot::plain("a", "heading", "Heading");
@@ -1334,6 +1789,58 @@ mod tests {
             delta,
             DeltaSegment::Insert { after, text, .. }
                 if text == "!" && after.from_utf16 == 8 && after.to_utf16 == 9
+        )));
+    }
+
+    #[test]
+    fn anchored_ranges_use_grapheme_indices_across_combining_marks_and_emoji() {
+        let before_blocks = vec![block("a", "Ae\u{301}-👩‍💻Z")];
+        let after_blocks = vec![block("a", "Aé-🧑‍💻Z")];
+        assert_eq!(
+            visible_graphemes(&before_blocks),
+            vec!["A", "e\u{301}", "-", "👩‍💻", "Z"]
+        );
+        assert_eq!(
+            visible_graphemes(&after_blocks),
+            vec!["A", "é", "-", "🧑‍💻", "Z"]
+        );
+
+        let anchors = vec![
+            SemanticRangeAnchor::new(1..2, 1..2),
+            SemanticRangeAnchor::new(3..4, 3..4),
+        ];
+        let serialized = serde_json::to_string(&anchors).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<SemanticRangeAnchor>>(&serialized).unwrap(),
+            anchors
+        );
+
+        let before = LineageState::seed(before_blocks, human(1)).unwrap();
+        let change = before
+            .reconcile_anchored(after_blocks, claude(2), &anchors)
+            .unwrap();
+
+        assert_eq!(count(&change.state, SourceId(1)), 3);
+        assert_eq!(count(&change.state, SourceId(2)), 2);
+        assert!(change.deltas.iter().any(|delta| matches!(
+            delta,
+            DeltaSegment::Delete { before, text, .. }
+                if text == "e\u{301}" && before.from_utf16 == 1 && before.to_utf16 == 3
+        )));
+        assert!(change.deltas.iter().any(|delta| matches!(
+            delta,
+            DeltaSegment::Insert { after, text, .. }
+                if text == "é" && after.from_utf16 == 1 && after.to_utf16 == 2
+        )));
+        assert!(change.deltas.iter().any(|delta| matches!(
+            delta,
+            DeltaSegment::Delete { before, text, .. }
+                if text == "👩‍💻" && before.from_utf16 == 4 && before.to_utf16 == 9
+        )));
+        assert!(change.deltas.iter().any(|delta| matches!(
+            delta,
+            DeltaSegment::Insert { after, text, .. }
+                if text == "🧑‍💻" && after.from_utf16 == 3 && after.to_utf16 == 8
         )));
     }
 
@@ -1520,6 +2027,82 @@ mod tests {
             split_grapheme,
             Err(ReconcileError::InvalidSpan(_))
         ));
+    }
+
+    #[test]
+    fn anchored_reconciliation_rejects_incomplete_hints() {
+        let before = LineageState::seed(vec![block("a", "abc def")], human(1)).unwrap();
+        let result = before.reconcile_anchored(
+            vec![block("a", "abc xyz")],
+            claude(2),
+            &[SemanticRangeAnchor::new(4..5, 4..5)],
+        );
+
+        assert_eq!(
+            result,
+            Err(ReconcileError::UnanchoredTextMismatch {
+                before: 5..7,
+                after: 5..7,
+            })
+        );
+    }
+
+    #[test]
+    fn anchored_reconciliation_rejects_overlap_unsorted_and_out_of_bounds_hints() {
+        let before = LineageState::seed(vec![block("a", "abcdef")], human(1)).unwrap();
+
+        let overlapping = before.reconcile_anchored(
+            vec![block("a", "abcdef")],
+            claude(2),
+            &[
+                SemanticRangeAnchor::new(1..4, 1..4),
+                SemanticRangeAnchor::new(3..5, 3..5),
+            ],
+        );
+        assert_eq!(
+            overlapping,
+            Err(ReconcileError::OverlappingAnchors {
+                previous_index: 0,
+                anchor_index: 1,
+                snapshot: AnchorSnapshot::Before,
+            })
+        );
+
+        let unsorted = before.reconcile_anchored(
+            vec![block("a", "abcdef")],
+            claude(3),
+            &[
+                SemanticRangeAnchor::new(4..5, 4..5),
+                SemanticRangeAnchor::new(1..2, 1..2),
+            ],
+        );
+        assert_eq!(
+            unsorted,
+            Err(ReconcileError::UnsortedAnchors {
+                previous_index: 0,
+                anchor_index: 1,
+                snapshot: AnchorSnapshot::Before,
+            })
+        );
+
+        let out_of_bounds = before.reconcile_anchored(
+            vec![block("a", "abcdef")],
+            claude(4),
+            &[SemanticRangeAnchor::new(2..7, 2..6)],
+        );
+        assert_eq!(
+            out_of_bounds,
+            Err(ReconcileError::InvalidAnchorRange {
+                anchor_index: 0,
+                snapshot: AnchorSnapshot::Before,
+                range: 2..7,
+                document_len: 6,
+            })
+        );
+        assert_eq!(
+            out_of_bounds.unwrap_err().to_string(),
+            "anchor 0 has invalid before range 2..7 for a document with 6 visible graphemes"
+        );
     }
 
     #[test]

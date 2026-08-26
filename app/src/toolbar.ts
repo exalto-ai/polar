@@ -257,6 +257,7 @@ export function installToolbar(
   applyZoom(initialZoom);
 
   const update = () => {
+    const canFormat = editor.isEditable;
     block.value = selectedBlockStyle(editor);
     const fontSize = selectedFontSize(editor);
     const supported = FONT_SIZES.some((pixels) => fontSize === `${pixels}px`);
@@ -266,17 +267,23 @@ export function installToolbar(
     bold.setAttribute("aria-pressed", String(editor.isActive("bold")));
     italic.setAttribute("aria-pressed", String(editor.isActive("italic")));
     link.setAttribute("aria-pressed", String(editor.isActive("link")));
-    link.disabled = editor.state.selection.empty && !editor.isActive("link");
+    block.disabled = !canFormat;
+    size.disabled = !canFormat;
+    bold.disabled = !canFormat;
+    italic.disabled = !canFormat;
+    exportMarkdown.disabled = !canFormat;
+    link.disabled =
+      !canFormat || (editor.state.selection.empty && !editor.isActive("link"));
   };
 
   zoom.addEventListener("change", () => applyZoom(safeZoom(zoom.value)));
   block.addEventListener("change", () => {
-    if (block.value === "mixed") return;
+    if (!editor.isEditable || block.value === "mixed") return;
     applyBlockStyle(editor, block.value as BlockStyle);
     update();
   });
   size.addEventListener("change", () => {
-    if (size.value === "mixed") return;
+    if (!editor.isEditable || size.value === "mixed") return;
     const chain = editor.chain().focus();
     if (size.value) chain.setMark("fontSize", { size: size.value }).run();
     else chain.unsetMark("fontSize").run();
@@ -284,19 +291,29 @@ export function installToolbar(
   });
   newDocument.addEventListener("click", () => void actions.newDocument());
   importMarkdown.addEventListener("click", () => void actions.importMarkdown());
-  exportMarkdown.addEventListener("click", () => void actions.exportMarkdown());
-  bold.addEventListener("click", () => editor.chain().focus().toggleBold().run());
-  italic.addEventListener("click", () => editor.chain().focus().toggleItalic().run());
-  link.addEventListener("click", () => actions.openLink());
+  exportMarkdown.addEventListener("click", () => {
+    if (editor.isEditable) void actions.exportMarkdown();
+  });
+  bold.addEventListener("click", () => {
+    if (editor.isEditable) editor.chain().focus().toggleBold().run();
+  });
+  italic.addEventListener("click", () => {
+    if (editor.isEditable) editor.chain().focus().toggleItalic().run();
+  });
+  link.addEventListener("click", () => {
+    if (editor.isEditable) actions.openLink();
+  });
 
   editor.on("selectionUpdate", update);
   editor.on("transaction", update);
+  editor.on("update", update);
   const unsubscribeSaveStatus = actions.subscribeSaveStatus(renderSaveStatus);
   update();
 
   return () => {
     editor.off("selectionUpdate", update);
     editor.off("transaction", update);
+    editor.off("update", update);
     unsubscribeSaveStatus();
     toolbar.remove();
   };

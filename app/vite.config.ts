@@ -2,8 +2,9 @@ import { defineConfig } from "vite";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isLoopbackAddress } from "./src/dev-connection";
 
-const DAEMON_PROTOCOL_VERSION = 2;
+const DAEMON_PROTOCOL_VERSION = 3;
 
 /**
  * Dev-only: serve the running daemon's connection details so the window can be
@@ -16,7 +17,12 @@ function thoughtConnection() {
   return {
     name: "thought-connection",
     configureServer(server: any) {
-      server.middlewares.use("/__thought/connection", (_req: any, res: any) => {
+      server.middlewares.use("/__thought/connection", (req: any, res: any) => {
+        if (!isLoopbackAddress(req.socket?.remoteAddress)) {
+          res.statusCode = 403;
+          res.end(JSON.stringify({ error: "connection details are local-only" }));
+          return;
+        }
         // Mirrors `support_dir` in crates/thoughtd/src/discovery.rs.
         const home =
           process.env.THOUGHT_HOME ??

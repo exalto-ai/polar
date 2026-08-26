@@ -52,12 +52,17 @@ impl Daemon {
         // daemon also logs to stderr, so anything else it has to say at startup
         // would otherwise be mistaken for a failure to start.
         let mut line = String::new();
+        let mut startup = String::new();
         loop {
             line.clear();
             let read = reader
                 .read_line(&mut line)
                 .expect("daemon stderr is readable");
-            assert!(read > 0, "daemon exited before reporting a port");
+            assert!(
+                read > 0,
+                "daemon exited before reporting a port:\n{startup}"
+            );
+            startup.push_str(&line);
             if line.contains("listening on") {
                 break;
             }

@@ -9,9 +9,10 @@
 //! evidence and reconciliation suite. They are not persisted and dispatched as
 //! independently upgradeable versions. [`EventHashInput::chain_version`] is
 //! the durable suite version, while [`LineageHashInput::algorithm_version`]
-//! binds the current derived read model. This build accepts only V1. Before any
-//! version changes, a schema migration and version-dispatched verifier and
-//! reconciler must retain support for already-recorded evidence.
+//! binds the current derived read model. V1 remains byte-for-byte frozen, while
+//! V2 adds validated operation anchors to the event envelope. Verification and
+//! reconciliation dispatch on the persisted event version so mixed histories
+//! remain readable.
 //!
 //! # Privacy
 //!
@@ -33,12 +34,15 @@ pub const DOCUMENT_DIGEST_VERSION: u32 = 1;
 pub const EVENT_DIGEST_ENCODING_VERSION: u32 = 1;
 pub const UPDATE_LOG_DIGEST_VERSION: u32 = 1;
 pub const LINEAGE_DIGEST_VERSION: u32 = 1;
-pub const CURRENT_EVENT_CHAIN_VERSION: u32 = 1;
+pub const ANCHOR_TEXT_DIGEST_VERSION: u32 = 1;
+pub const LEGACY_EVENT_CHAIN_VERSION: u32 = 1;
+pub const CURRENT_EVENT_CHAIN_VERSION: u32 = 2;
 
 const DOCUMENT_DOMAIN: &str = "thought/document";
 const EVENT_DOMAIN: &str = "thought/event-chain";
 const UPDATE_LOG_DOMAIN: &str = "thought/yjs-update-log";
 const LINEAGE_DOMAIN: &str = "thought/live-lineage";
+const ANCHOR_TEXT_DOMAIN: &str = "thought/anchor-text";
 
 /// The durable action represented by one provenance event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +77,22 @@ pub struct EventReferences<'a> {
     pub client_event_id: Option<&'a str>,
 }
 
+/// One validated operation range bound into a V2 event-chain digest.
+///
+/// Offsets count extended grapheme clusters in the canonical visible-text
+/// projection. The range text hashes let verification reject a stored anchor
+/// that was moved to a different equal-looking part of the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventAnchorHashInput<'a> {
+    pub basis: &'a str,
+    pub before_start_grapheme: u64,
+    pub before_end_grapheme: u64,
+    pub after_start_grapheme: u64,
+    pub after_end_grapheme: u64,
+    pub before_text_hash: EvidenceDigest,
+    pub after_text_hash: EvidenceDigest,
+}
+
 /// Typed input to the append-only event-chain hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventHashInput<'a> {
@@ -98,6 +118,9 @@ pub struct EventHashInput<'a> {
     pub update_log_root: EvidenceDigest,
     pub previous_event_hash: Option<EvidenceDigest>,
     pub deltas: &'a [DeltaSegment],
+    /// Empty for frozen V1 events. V2 requires one or more validated anchors;
+    /// callers enforce that invariant before hashing and persistence.
+    pub anchors: &'a [EventAnchorHashInput<'a>],
 }
 
 /// One immutable row folded into a document-local Yjs update-log root.
@@ -156,6 +179,18 @@ pub fn update_log_digest(
     encoder.digest()
 }
 
+/// Hash one exact canonical visible-text range for a persisted V2 anchor.
+pub fn anchor_text_digest(graphemes: &[&str]) -> EvidenceDigest {
+    let mut encoder = Encoder::root(ANCHOR_TEXT_DOMAIN, ANCHOR_TEXT_DIGEST_VERSION);
+    encoder.list(
+        10,
+        graphemes
+            .iter()
+            .map(|grapheme| grapheme.as_bytes().to_vec()),
+    );
+    encoder.digest()
+}
+
 /// Hash one event and bind it to the previous event digest.
 pub fn event_chain_digest(input: &EventHashInput<'_>) -> EvidenceDigest {
     let mut encoder = Encoder::root(EVENT_DOMAIN, EVENT_DIGEST_ENCODING_VERSION);
@@ -182,6 +217,11 @@ pub fn event_chain_digest(input: &EventHashInput<'_>) -> EvidenceDigest {
     );
     encoder.list(25, input.deltas.iter().map(encode_delta));
     encoder.string(26, input.source_label);
+    // Appending the field only for V2 is intentional. It preserves the exact
+    // V1 byte stream while binding every ordered anchor in the new suite.
+    if input.chain_version >= CURRENT_EVENT_CHAIN_VERSION {
+        encoder.list(27, input.anchors.iter().map(encode_anchor));
+    }
     encoder.digest()
 }
 
@@ -230,6 +270,18 @@ fn encode_references(references: EventReferences<'_>) -> Vec<u8> {
     encoder.optional_string(1, references.evidence_ref);
     encoder.optional_string(2, references.suggestion_id);
     encoder.optional_string(3, references.client_event_id);
+    encoder.into_bytes()
+}
+
+fn encode_anchor(anchor: &EventAnchorHashInput<'_>) -> Vec<u8> {
+    let mut encoder = Encoder::new();
+    encoder.string(1, anchor.basis);
+    encoder.u64(2, anchor.before_start_grapheme);
+    encoder.u64(3, anchor.before_end_grapheme);
+    encoder.u64(4, anchor.after_start_grapheme);
+    encoder.u64(5, anchor.after_end_grapheme);
+    encoder.fixed(6, &anchor.before_text_hash);
+    encoder.fixed(7, &anchor.after_text_hash);
     encoder.into_bytes()
 }
 
@@ -568,7 +620,7 @@ mod tests {
 
     fn event<'a>(deltas: &'a [DeltaSegment]) -> EventHashInput<'a> {
         EventHashInput {
-            chain_version: CURRENT_EVENT_CHAIN_VERSION,
+            chain_version: LEGACY_EVENT_CHAIN_VERSION,
             event_id: SourceId(7),
             document_id: "document-1",
             update_seq: Some(6),
@@ -597,7 +649,31 @@ mod tests {
             update_log_root: [4; 32],
             previous_event_hash: Some([3; 32]),
             deltas,
+            anchors: &[],
         }
+    }
+
+    fn anchors() -> Vec<EventAnchorHashInput<'static>> {
+        vec![
+            EventAnchorHashInput {
+                basis: "editor_transaction",
+                before_start_grapheme: 4,
+                before_end_grapheme: 5,
+                after_start_grapheme: 4,
+                after_end_grapheme: 5,
+                before_text_hash: [5; 32],
+                after_text_hash: [6; 32],
+            },
+            EventAnchorHashInput {
+                basis: "editor_transaction",
+                before_start_grapheme: 8,
+                before_end_grapheme: 8,
+                after_start_grapheme: 8,
+                after_end_grapheme: 10,
+                before_text_hash: [7; 32],
+                after_text_hash: [8; 32],
+            },
+        ]
     }
 
     fn spans() -> Vec<LiveLineageSpan> {
@@ -717,6 +793,7 @@ mod tests {
     #[test]
     fn digest_domains_are_distinct_even_for_empty_collections() {
         let document = document_digest(&[], None);
+        let anchor = anchor_text_digest(&[]);
         let lineage = live_lineage_digest(&LineageHashInput {
             algorithm_version: 1,
             document_id: "",
@@ -726,6 +803,58 @@ mod tests {
         });
 
         assert_ne!(document, lineage);
+        assert_ne!(document, anchor);
+        assert_ne!(lineage, anchor);
+    }
+
+    #[test]
+    fn v2_event_digest_binds_anchor_order_and_every_material_field() {
+        let deltas = deltas();
+        let anchors = anchors();
+        let input = EventHashInput {
+            chain_version: CURRENT_EVENT_CHAIN_VERSION,
+            anchors: &anchors,
+            ..event(&deltas)
+        };
+        let base = event_chain_digest(&input);
+
+        let mut reversed = anchors.clone();
+        reversed.reverse();
+        assert_event_changed(
+            base,
+            &EventHashInput {
+                anchors: &reversed,
+                ..input.clone()
+            },
+        );
+
+        for mutate in [
+            |anchor: &mut EventAnchorHashInput<'_>| anchor.basis = "server_operation",
+            |anchor: &mut EventAnchorHashInput<'_>| anchor.before_start_grapheme += 1,
+            |anchor: &mut EventAnchorHashInput<'_>| anchor.before_end_grapheme += 1,
+            |anchor: &mut EventAnchorHashInput<'_>| anchor.after_start_grapheme += 1,
+            |anchor: &mut EventAnchorHashInput<'_>| anchor.after_end_grapheme += 1,
+            |anchor: &mut EventAnchorHashInput<'_>| anchor.before_text_hash[0] ^= 1,
+            |anchor: &mut EventAnchorHashInput<'_>| anchor.after_text_hash[0] ^= 1,
+        ] {
+            let mut changed = anchors.clone();
+            mutate(&mut changed[0]);
+            assert_event_changed(
+                base,
+                &EventHashInput {
+                    anchors: &changed,
+                    ..input.clone()
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn anchor_text_digest_binds_graphemes_and_order() {
+        let base = anchor_text_digest(&["e\u{301}", "🙂"]);
+        assert_eq!(base, anchor_text_digest(&["e\u{301}", "🙂"]));
+        assert_ne!(base, anchor_text_digest(&["🙂", "e\u{301}"]));
+        assert_ne!(base, anchor_text_digest(&["é", "🙂"]));
     }
 
     #[test]
@@ -842,6 +971,18 @@ mod tests {
             ..input
         };
         assert_event_changed(base, &reordered_input);
+    }
+
+    #[test]
+    fn frozen_v1_event_digest_is_byte_for_byte_stable() {
+        let deltas = deltas();
+        assert_eq!(
+            event_chain_digest(&event(&deltas)),
+            [
+                136, 216, 211, 196, 30, 163, 170, 14, 33, 215, 218, 218, 60, 187, 122, 249, 246,
+                54, 165, 167, 121, 191, 102, 69, 117, 160, 178, 33, 197, 211, 166, 233,
+            ]
+        );
     }
 
     #[test]

@@ -5,12 +5,6 @@
  * The switcher searches through the daemon's `search` tool, the same one agents
  * use, so there is one search implementation rather than two that disagree.
  */
-/**
- * The window's temporary public MCP caller. Public MCP always records an agent;
- * the anchor layer moves lifecycle writes onto the editor-only capability.
- */
-const WINDOW = { agent: "editor", model: null, session: null } as const;
-
 /** The daemon restarted and no longer knows our session. */
 class StaleSession extends Error {}
 
@@ -114,17 +108,6 @@ export class Mcp {
       .blocks as BlockAttribution[];
   }
 
-  async setDocumentDeleted(docId: string, deleted: boolean) {
-    return await this.call("set_document_deleted", { doc_id: docId, deleted, ...WINDOW });
-  }
-
-  async createDocument(title: string, initialMarkdown?: string): Promise<DocumentView> {
-    return await this.call("create_document", {
-      title,
-      ...(initialMarkdown === undefined ? {} : { initial_markdown: initialMarkdown }),
-      ...WINDOW,
-    });
-  }
 }
 
 export type Actor = {

@@ -10,6 +10,7 @@
 //! corruption bug waiting to happen. Clients find the port and capabilities in
 //! `daemon.json`; a shim binary bridges stdio clients to it.
 
+mod editor_api;
 mod tools;
 
 use thoughtd::sync;
@@ -133,6 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // it must not inherit this editor-only Observed trust.
         .route("/sync", axum::routing::any(sync::handler))
         .with_state(sync_state)
+        .merge(editor_api::routes(workspace.clone()))
         .layer(middleware::from_fn(
             move |req: Request<axum::body::Body>, next: Next| {
                 let expected = sync_expected.clone();

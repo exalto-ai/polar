@@ -417,7 +417,8 @@ the opaque Yjs update. Under the documented deterministic alignment, equal visib
 keep their prior source; insertions and replacements receive the event's source; deletions
 remain in history but leave the current breakdown; formatting and structure changes do not
 reassign equal text. Repeated equal text from different sources remains the explicit V1
-ambiguity described in [provenance.md](provenance.md).
+ambiguity described in [provenance.md](provenance.md). AD-19 defines when validated
+transaction ranges support V2 exact evidence and when the safe V1 fallback remains mandatory.
 
 The append-only provenance event and delta ledger is evidence. Current lineage spans are a
 derived read model that can be rebuilt from that ledger. Actor, ingress, and assurance are
@@ -431,6 +432,42 @@ and a second derived view that must survive Unicode, structural edits, concurren
 rebuilds. That complexity is deliberate. A simpler block-level percentage would be easy to
 ship and materially misleading. The complete claim, schema, migration, suggestion, Seal,
 privacy, and acceptance contract lives in [provenance.md](provenance.md).
+
+### AD-19: Validated transaction anchors distinguish exact evidence from inference
+
+For each local TipTap dispatch, the editor combines the root ProseMirror transaction and all
+appended plugin transactions, then captures changed ranges in UTF-16 document positions against
+the complete input and resulting trees. The daemon validates bounds, ordering,
+and grapheme boundaries against those exact trees, then maps the ranges into canonical visible
+grapheme coordinates. Missing, incomplete, or invalid hints never block the authoritative Yjs
+update. That event uses the frozen V1 deterministic reconciler instead. Only a complete set of
+validated anchors may produce V2 exact evidence.
+
+Transport batching does not merge semantic events. One WebSocket frame may carry several
+ordered editor mutations for efficiency, but each complete dispatch retains its source, stable
+client event ID, range hints, Yjs bytes, and separate immutable provenance event. A retry resends the
+same batch, and idempotency prevents a lost acknowledgement from duplicating an event.
+
+SQLite persists each event's ordered anchors with their basis, before and after grapheme ranges,
+and hashes of the text inside both ranges. The V2 event digest binds every anchor field and its
+order. The V1 digest remains byte-for-byte frozen, and migration does not invent anchors for old
+rows. Replay dispatches by each event's stored chain version, so V1 and V2 events can coexist in
+one document. Consumer contribution percentages are eligible only when every event that still
+supplies visible wording is V2 anchored. A surviving V1 source makes the current result mixed or
+deterministically inferred; a historical V1 event with no surviving text does not disqualify it.
+
+Native document creation, trash, restore, and Markdown import use an editor-only capability
+instead of the public MCP capability. Creation and import are exact server operations: their
+anchor spans the empty before state and complete resulting visible text. This keeps native
+imports classified as observed `Imported` input while public MCP mutations remain reported agent
+operations.
+
+These anchors establish which ranges Proof of Thought observed in a local transaction. They do
+not establish who composed typed, pasted, or imported words, authenticate a provider or model,
+prove the user's intent, or defend against a process with the same operating-system access. The
+editor-only capability separates trusted product paths from public MCP calls, but it is not a
+device-security boundary. External verification still requires the signing and publication work
+defined in [provenance.md](provenance.md).
 
 ### AD-20 — One product name and one machine namespace
 

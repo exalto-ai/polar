@@ -27,6 +27,10 @@ pub enum StoreError {
     },
     InvalidMigrationPlan(String),
     InvalidEventId(i64),
+    InvalidProvenanceAnchors {
+        event_id: i64,
+        reason: String,
+    },
     EventIdExhausted,
     UpdateSequenceExhausted,
     InvalidStoredOrigin {
@@ -83,6 +87,12 @@ impl std::fmt::Display for StoreError {
             }
             StoreError::InvalidEventId(event_id) => {
                 write!(f, "provenance event id must be positive, found {event_id}")
+            }
+            StoreError::InvalidProvenanceAnchors { event_id, reason } => {
+                write!(
+                    f,
+                    "invalid anchors for provenance event {event_id}: {reason}"
+                )
             }
             StoreError::EventIdExhausted => write!(f, "provenance event ids are exhausted"),
             StoreError::UpdateSequenceExhausted => write!(f, "update sequence ids are exhausted"),
@@ -339,6 +349,21 @@ pub struct ProvenanceChangeInput {
     pub after_shape: Option<String>,
 }
 
+/// One exact operation range bound to both sides of a provenance event.
+///
+/// Offsets count Unicode grapheme clusters in the canonical visible-text
+/// projection. The hashes bind the exact text inside the corresponding range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceAnchorInput {
+    pub basis: String,
+    pub before_start_grapheme: i64,
+    pub before_end_grapheme: i64,
+    pub after_start_grapheme: i64,
+    pub after_end_grapheme: i64,
+    pub before_text_hash: Vec<u8>,
+    pub after_text_hash: Vec<u8>,
+}
+
 /// One current text range attributed to the event that supplied its wording.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageSpanInput {
@@ -380,6 +405,7 @@ pub struct ProvenanceCommitInput {
     pub update: ProvenanceUpdateInput,
     pub event: ProvenanceEventInput,
     pub changes: Vec<ProvenanceChangeInput>,
+    pub anchors: Vec<ProvenanceAnchorInput>,
     pub spans: Vec<LineageSpanInput>,
     pub lineage: ReadyLineageInput,
     pub block_touches: Vec<BlockTouchInput>,
@@ -400,6 +426,7 @@ pub struct InitialProvenanceDocumentInput {
     pub update: ProvenanceUpdateInput,
     pub event: ProvenanceEventInput,
     pub changes: Vec<ProvenanceChangeInput>,
+    pub anchors: Vec<ProvenanceAnchorInput>,
     pub spans: Vec<LineageSpanInput>,
     pub lineage: ReadyLineageInput,
     /// Compatibility rows for the existing M2 attribution rails.
@@ -413,6 +440,7 @@ pub struct ProvenanceRecordInput {
     pub doc_id: String,
     pub event: ProvenanceEventInput,
     pub changes: Vec<ProvenanceChangeInput>,
+    pub anchors: Vec<ProvenanceAnchorInput>,
     pub spans: Vec<LineageSpanInput>,
     pub lineage: ReadyLineageInput,
     /// Bind the event to the document's current final update without appending
@@ -473,6 +501,13 @@ pub struct ProvenanceChangeRow {
     pub event_id: i64,
     pub ordinal: i64,
     pub change: ProvenanceChangeInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceAnchorRow {
+    pub event_id: i64,
+    pub ordinal: i64,
+    pub anchor: ProvenanceAnchorInput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -668,7 +703,7 @@ impl Store {
         &self,
         input: &ProvenanceCommitInput,
     ) -> Result<PersistedProvenance, SqlError> {
-        validate_event_input(&input.event)?;
+        validate_event_input(&input.event, &input.anchors)?;
         let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         if let Some(replayed) = idempotent_replay(&transaction, &input.doc_id, &input.event)? {
             transaction.commit()?;
@@ -678,6 +713,7 @@ impl Store {
         upsert_actor(&transaction, &input.actor)?;
         let update_seq = insert_update(&transaction, &input.doc_id, &input.update)?;
         insert_event(&transaction, &input.doc_id, Some(update_seq), &input.event)?;
+        insert_anchors(&transaction, input.event.event_id, &input.anchors)?;
         insert_changes(
             &transaction,
             &input.doc_id,
@@ -720,7 +756,7 @@ impl Store {
         &self,
         input: &InitialProvenanceDocumentInput,
     ) -> Result<PersistedProvenance, SqlError> {
-        validate_event_input(&input.event)?;
+        validate_event_input(&input.event, &input.anchors)?;
         let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         if let Some(replayed) = idempotent_replay(&transaction, &input.id, &input.event)? {
             transaction.commit()?;
@@ -735,6 +771,7 @@ impl Store {
         )?;
         let update_seq = insert_update(&transaction, &input.id, &input.update)?;
         insert_event(&transaction, &input.id, Some(update_seq), &input.event)?;
+        insert_anchors(&transaction, input.event.event_id, &input.anchors)?;
         insert_changes(
             &transaction,
             &input.id,
@@ -784,7 +821,7 @@ impl Store {
         &self,
         input: &ProvenanceRecordInput,
     ) -> Result<PersistedProvenance, SqlError> {
-        validate_event_input(&input.event)?;
+        validate_event_input(&input.event, &input.anchors)?;
         let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         if let Some(replayed) = idempotent_replay(&transaction, &input.doc_id, &input.event)? {
             transaction.commit()?;
@@ -797,6 +834,7 @@ impl Store {
             .then_some(latest_update)
             .flatten();
         insert_event(&transaction, &input.doc_id, event_update, &input.event)?;
+        insert_anchors(&transaction, input.event.event_id, &input.anchors)?;
         insert_changes(
             &transaction,
             &input.doc_id,
@@ -885,6 +923,21 @@ impl Store {
         )?;
         let rows = statement
             .query_map(params![event_id], provenance_change_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// One event's anchored range evidence in its canonical event-local order.
+    pub fn provenance_anchors(&self, event_id: i64) -> Result<Vec<ProvenanceAnchorRow>, SqlError> {
+        let mut statement = self.conn.prepare(
+            "SELECT event_id, ordinal, basis,
+                    before_start_grapheme, before_end_grapheme,
+                    after_start_grapheme, after_end_grapheme,
+                    before_text_hash, after_text_hash
+             FROM provenance_anchors WHERE event_id = ?1 ORDER BY ordinal",
+        )?;
+        let rows = statement
+            .query_map(params![event_id], provenance_anchor_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -1315,9 +1368,83 @@ impl Store {
     }
 }
 
-fn validate_event_input(event: &ProvenanceEventInput) -> Result<(), StoreError> {
+fn validate_event_input(
+    event: &ProvenanceEventInput,
+    anchors: &[ProvenanceAnchorInput],
+) -> Result<(), StoreError> {
     if event.event_id <= 0 {
         return Err(StoreError::InvalidEventId(event.event_id));
+    }
+
+    let invalid = |reason: String| StoreError::InvalidProvenanceAnchors {
+        event_id: event.event_id,
+        reason,
+    };
+    match event.chain_version {
+        1 if !anchors.is_empty() => {
+            return Err(invalid("chain version 1 does not admit anchors".into()));
+        }
+        1 => return Ok(()),
+        2 if anchors.is_empty() => {
+            return Err(invalid(
+                "chain version 2 requires at least one anchor".into(),
+            ));
+        }
+        2 => {}
+        version => {
+            return Err(invalid(format!(
+                "unsupported chain version {version}; expected 1 or 2"
+            )));
+        }
+    }
+
+    for (ordinal, anchor) in anchors.iter().enumerate() {
+        if !matches!(
+            anchor.basis.as_str(),
+            "editor_transaction" | "server_operation"
+        ) {
+            return Err(invalid(format!(
+                "anchor {ordinal} has unsupported basis `{}`",
+                anchor.basis
+            )));
+        }
+        if anchor.before_start_grapheme < 0
+            || anchor.before_end_grapheme < anchor.before_start_grapheme
+        {
+            return Err(invalid(format!(
+                "anchor {ordinal} has invalid before range {}..{}",
+                anchor.before_start_grapheme, anchor.before_end_grapheme
+            )));
+        }
+        if anchor.after_start_grapheme < 0
+            || anchor.after_end_grapheme < anchor.after_start_grapheme
+        {
+            return Err(invalid(format!(
+                "anchor {ordinal} has invalid after range {}..{}",
+                anchor.after_start_grapheme, anchor.after_end_grapheme
+            )));
+        }
+        if anchor.before_text_hash.len() != 32 {
+            return Err(invalid(format!(
+                "anchor {ordinal} before-text hash is {} bytes, expected 32",
+                anchor.before_text_hash.len()
+            )));
+        }
+        if anchor.after_text_hash.len() != 32 {
+            return Err(invalid(format!(
+                "anchor {ordinal} after-text hash is {} bytes, expected 32",
+                anchor.after_text_hash.len()
+            )));
+        }
+        if let Some(previous) = ordinal.checked_sub(1).map(|index| &anchors[index])
+            && (previous.before_end_grapheme > anchor.before_start_grapheme
+                || previous.after_end_grapheme > anchor.after_start_grapheme)
+        {
+            return Err(invalid(format!(
+                "anchor {ordinal} overlaps or precedes anchor {}",
+                ordinal - 1
+            )));
+        }
     }
     Ok(())
 }
@@ -1435,6 +1562,35 @@ fn insert_event(
             event.recorded_at
         ],
     )?;
+    Ok(())
+}
+
+fn insert_anchors(
+    transaction: &Transaction<'_>,
+    event_id: i64,
+    anchors: &[ProvenanceAnchorInput],
+) -> Result<(), StoreError> {
+    let mut statement = transaction.prepare_cached(
+        "INSERT INTO provenance_anchors (
+             event_id, ordinal, basis,
+             before_start_grapheme, before_end_grapheme,
+             after_start_grapheme, after_end_grapheme,
+             before_text_hash, after_text_hash
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )?;
+    for (ordinal, anchor) in anchors.iter().enumerate() {
+        statement.execute(params![
+            event_id,
+            ordinal as i64,
+            anchor.basis,
+            anchor.before_start_grapheme,
+            anchor.before_end_grapheme,
+            anchor.after_start_grapheme,
+            anchor.after_end_grapheme,
+            anchor.before_text_hash,
+            anchor.after_text_hash,
+        ])?;
+    }
     Ok(())
 }
 
@@ -1726,6 +1882,22 @@ fn provenance_change_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Prove
             after_format: row.get(15)?,
             before_shape: row.get(16)?,
             after_shape: row.get(17)?,
+        },
+    })
+}
+
+fn provenance_anchor_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProvenanceAnchorRow> {
+    Ok(ProvenanceAnchorRow {
+        event_id: row.get(0)?,
+        ordinal: row.get(1)?,
+        anchor: ProvenanceAnchorInput {
+            basis: row.get(2)?,
+            before_start_grapheme: row.get(3)?,
+            before_end_grapheme: row.get(4)?,
+            after_start_grapheme: row.get(5)?,
+            after_end_grapheme: row.get(6)?,
+            before_text_hash: row.get(7)?,
+            after_text_hash: row.get(8)?,
         },
     })
 }
