@@ -442,6 +442,7 @@ export function createEditor(
   provider: SyncProvider,
   user: Actor,
   actions: EditorActions,
+  shouldAutoFocus: () => boolean = () => true,
 ): Editor {
   const sourceTracker = new InputSourceTracker(provider);
   const editor = new Editor({
@@ -458,13 +459,15 @@ export function createEditor(
       }),
     ],
     editable: provider.isHydrated,
-    autofocus: provider.isHydrated ? "end" : false,
+    autofocus: provider.isHydrated && shouldAutoFocus() ? "end" : false,
   });
 
   const readiness = { editor, provider };
   const unsubscribeHydration = provider.subscribeHydration((hydrated) => {
     syncEditorReadiness(readiness);
-    if (hydrated && editor.isEditable) editor.commands.focus("end");
+    if (hydrated && editor.isEditable && shouldAutoFocus()) {
+      editor.commands.focus("end");
+    }
   });
 
   // Install before command surfaces so capture listeners can label the

@@ -1,14 +1,18 @@
 # Delta provenance and AI evidence
 
-**Status:** accepted product and architecture direction; delta foundation and anchored-evidence
-prerequisites implemented, 2026-08-26
+**Status:** accepted product and architecture direction; delta foundation, anchored-evidence
+prerequisites, and the onboarding shell implemented, 2026-08-26
 
 **Provenance stack:** `codex/provenance-delta-foundation` (PR #10), followed by
-`codex/provenance-anchors`
+`codex/provenance-anchors` (PR #11), then `codex/ai-support-onboarding`
 **Stack base:** `codex/tauri-ci-smoke`, after the separate
 `codex/editor-toolbar-branding`, `codex/brand-assets`, `codex/daemon-single-owner`,
 `codex/document-lifecycle`, `codex/sync-store-durability`, and
 `codex/macos-graceful-quit` branches
+
+The feature-by-feature completion record for the remaining consumer stack lives in
+[`docs/upgrade-roadmap.md`](upgrade-roadmap.md). It is the release checklist for onboarding,
+connections, the provenance view, suggestions, Pro, and Seal.
 
 This document records the choices behind Proof of Thought's next feature series. It is
 written for reviewers as much as implementers: the product language, evidence claims,
@@ -17,20 +21,21 @@ A change that weakens a claim must change this document in the same pull request
 
 ## 1. Target product shape
 
-The planned consumer experience offers three progressively richer ways to work. This table is
-the delivery target for the stack, not a claim that this foundation pull request ships the
-onboarding or sidebar:
+The consumer experience offers three progressively richer ways to work. This table is the
+delivery target for the full stack. The current onboarding pull request ships the Basic and
+Connect choice plus a transparent setup sidebar, while later pull requests deliver durable
+connections, suggestions, Pro, and publishing:
 
 | Experience | What the person gets | Evidence available | Cost language |
 | --- | --- | --- | --- |
-| Basic | Local writing with written-versus-pasted provenance | Locally recorded edit deltas | No AI connection |
+| Basic | Local writing with written-versus-pasted provenance | Locally recorded edit deltas | Proof of Thought initiates no AI request |
 | Connect, recommended | One or more ChatGPT, Claude, Codex, or Claude Code reviewers; AI edits can arrive directly, avoiding the reviewer copy-and-paste loop; suggestions with Accept and Reject | Semantic MCP tool deltas and anchored suggestion deltas; app and model are reported by the connection | Uses the AI access the person already has; no separate Proof of Thought API billing |
 | Pro | AI chat, files, model choice, and reasoning controls inside Proof of Thought | Provider-authenticated traces bound to exact suggestions and accepted document deltas | Uses the person's OpenAI or Anthropic API key; provider usage charges apply |
 
-When onboarding ships, Connect is the recommended path. It cannot activate without consent, so
+In the current onboarding pull request, Connect is the recommended path. It cannot activate
+without consent, so
 "recommended" means the primary card, not an automatic connection. Basic is the state after
-choosing **Continue with Basic**. Pro adds built-in AI and does not need to disconnect existing
-reviewers.
+choosing **Write locally**. Pro adds built-in AI and does not need to disconnect existing reviewers.
 
 The planned consumer UI does not lead with MCP, TLS, proxy, CRDT, or API transport terminology.
 Those details remain available under a technical disclosure.
@@ -352,10 +357,12 @@ receives observed `Imported` metadata and one whole-snapshot `server_operation` 
 public MCP capability is rejected on these routes, while the editor capability remains unable to
 call public MCP tools.
 
-This pull request still does not ship onboarding, reviewer connections, the reviewer sidebar,
-suggestions, API keys, or a new provenance visualization. MCP block mutations that do not yet
-carry exact semantic operation ranges remain V1 reported evidence. They can still support a
-weaker activity proof, but their surviving wording is not eligible for exact percentages.
+The anchor prerequisite pull request did not ship consumer setup. This stacked onboarding pull
+request adds the first-launch choice and transparent sidebar shell only. It does not yet ship
+durable reviewer connections, per-reviewer permissions, suggestions, API keys, or a new
+provenance visualization. MCP block mutations that do not yet carry exact semantic operation
+ranges remain V1 reported evidence. They can still support a weaker activity proof, but their
+surviving wording is not eligible for exact percentages.
 
 ## 8. Suggestions and multiple reviewers
 
@@ -421,8 +428,12 @@ from publication onward, not contemporaneous recording.
 - Capture checkpoints remain encrypted private state. Only reviewed notarized disclosures are
   publishable provider proof.
 - Proof publication is always explicit. Connecting a reviewer never publishes a document.
-- A connected app receives only the permissions granted to that connection. Multiple reviewer
-  identities must not share one undifferentiated external credential.
+- The current shared local MCP capability grants workspace-wide document operations, including
+  direct edits, even while no editor window is open. A configured AI app may send document content
+  returned by these tools to its provider under that app's privacy terms. The setup shell discloses
+  both boundaries. The connection layer must replace the shared capability with explicit
+  per-connection permissions and unique credentials before presenting reviewers as configured or
+  independently revocable.
 - The development preview returns daemon capabilities only to a loopback socket, even if Vite is
   explicitly bound to a LAN interface for other assets.
 
@@ -433,11 +444,13 @@ boundary.
 
 1. **Delta provenance foundation, PR #10:** versioned migrations, immutable events and semantic
    deltas, derived live spans, trusted ingress propagation, legacy seeding, and tests.
-2. **Anchored evidence prerequisites, this branch:** schema V3 anchors, chain V2 hashing and
+2. **Anchored evidence prerequisites, PR #11:** schema V3 anchors, chain V2 hashing and
    replay, validated editor ranges, immutable batched transport, editor-only native lifecycle,
    mixed-history compatibility, concurrency coverage, and a reference benchmark.
-3. **Reviewer connection and onboarding:** simple Basic and recommended Connect choices,
-   multiple reported reviewer identities, transparent guarantees, and the sidebar shell.
+3. **Reviewer connection and onboarding:** the current stacked pull request ships simple Basic
+   and recommended Connect choices plus the transparent sidebar shell. The next connection pull
+   request adds durable connection identities, permissions, multiple reported reviewers, and the
+   consumer provenance view before calling Connect complete.
 4. **Replicated suggestions:** proposal state, inline visualization, Accept and Reject,
    conflict handling, and exact proposal-to-delta attribution.
 5. **Pro provider path:** secure keys, built-in chat, model and reasoning controls, files, and
@@ -445,9 +458,9 @@ boundary.
 6. **Seal bundle:** deterministic bundle, signing and optional live anchoring, publish flow,
    and the Seal page/verifier changes in the appropriate repository.
 
-Planned consumer UI is not rendered or shipped until its corresponding pull request is ready.
-Each pull request targets its predecessor while the stack is open, then is retargeted or rebased
-onto `main` as predecessors merge.
+Consumer UI beyond the current onboarding and sidebar shell is not rendered or shipped until its
+corresponding pull request is ready. Each pull request targets its predecessor while the stack is
+open, then is retargeted or rebased onto `main` as predecessors merge.
 
 ## 12. Acceptance contract and current coverage
 

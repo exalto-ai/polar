@@ -274,8 +274,10 @@ describe("editor source dispatch wrapper", () => {
     });
     const host = document.createElement("section");
     const element = document.createElement("div");
-    host.append(element);
+    const sidebarControl = document.createElement("button");
+    host.append(sidebarControl, element);
     document.body.append(host);
+    sidebarControl.focus();
     let hydrationListener: (hydrated: boolean) => void = () => {};
     let hydrated = false;
     const provider = {
@@ -321,6 +323,7 @@ describe("editor source dispatch wrapper", () => {
         importMarkdown: () => {},
         exportMarkdown: () => {},
       },
+      () => false,
     );
 
     expect(collaborative.isEditable).toBe(false);
@@ -329,6 +332,7 @@ describe("editor source dispatch wrapper", () => {
     hydrated = true;
     hydrationListener(true);
     expect(collaborative.isEditable).toBe(true);
+    expect(document.activeElement).toBe(sidebarControl);
 
     collaborative.destroy();
     awareness.destroy();

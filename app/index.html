@@ -15,6 +15,7 @@
     <header class="chrome" data-tauri-drag-region>
       <span class="presence" id="presence"></span>
       <button class="status" id="status" title="Connections" aria-haspopup="dialog"></button>
+      <button class="ai-support-toggle" id="ai-support-toggle" type="button" aria-controls="ai-support-sidebar" aria-expanded="false">AI support</button>
     </header>
 
     <div class="popover" id="connections" hidden role="dialog" aria-label="Connections">
@@ -27,21 +28,143 @@
         <h2>Agents</h2>
         <ul id="agents"></ul>
       </section>
-      <section>
-        <h2>Connect an agent</h2>
-        <p class="note">Point any MCP client at this command. It finds the running daemon, or starts one.</p>
-        <pre id="stdio-command"></pre>
-        <button class="ghost" id="copy-command">Copy</button>
-      </section>
     </div>
 
-    <main class="page">
-      <div id="editor" class="editor"></div>
-    </main>
+    <div class="workspace">
+      <main class="page">
+        <div id="editor" class="editor"></div>
+      </main>
+
+      <aside class="ai-sidebar" id="ai-support-sidebar" aria-label="AI support" hidden>
+        <header class="ai-sidebar-header">
+          <div>
+            <span class="eyebrow">AI support</span>
+            <h2 id="ai-mode-title">Connect reviewers</h2>
+          </div>
+          <button class="icon-button" id="ai-sidebar-close" type="button" aria-label="Close AI support">×</button>
+        </header>
+
+        <section class="ai-mode-summary">
+          <p id="ai-mode-description"></p>
+          <div class="ai-assurance" id="ai-mode-evidence"></div>
+          <p class="ai-cost" id="ai-mode-cost"></p>
+          <button class="text-button" id="change-ai-mode" type="button">Change how I work</button>
+        </section>
+
+        <section class="ai-connect-panel" id="ai-connect-panel">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Set up a reviewer</span>
+              <h3>Choose your AI app</h3>
+            </div>
+            <span class="recommendation">Recommended</span>
+          </div>
+
+          <div class="ai-client-picker" role="group" aria-label="AI application">
+            <button type="button" data-ai-client="chatgpt" aria-pressed="true">
+              <span>ChatGPT</span><small>Desktop</small>
+            </button>
+            <button type="button" data-ai-client="codex" aria-pressed="false">
+              <span>Codex</span><small>Local</small>
+            </button>
+            <button type="button" data-ai-client="claude-desktop" aria-pressed="false">
+              <span>Claude</span><small>Desktop</small>
+            </button>
+            <button type="button" data-ai-client="claude-code" aria-pressed="false">
+              <span>Claude Code</span><small>Local</small>
+            </button>
+          </div>
+
+          <div class="ai-setup">
+            <p id="ai-client-setup"></p>
+            <p class="ai-caveat" id="ai-client-caveat" hidden></p>
+            <div class="ai-access-warning">
+              <strong>Current access</strong>
+              <p>This temporary shared setup lets the AI app read, search, create, edit, and move any document in this local Proof of Thought workspace to Trash. Configured AI sessions can use it even when no Proof of Thought window is open, and can edit directly, not only suggest changes.</p>
+              <p>When the AI app reads or searches a document, it may send that content to its AI provider under that app’s privacy settings.</p>
+              <p>To stop access, remove Proof of Thought from that AI app. Per-reviewer document permissions and in-app revocation are next in this upgrade.</p>
+            </div>
+            <pre id="ai-connection-command"></pre>
+            <button class="primary-button compact" id="copy-ai-command" type="button">Copy setup</button>
+          </div>
+
+          <details class="technical-disclosure">
+            <summary>What this proof can say</summary>
+            <p>Proof of Thought records edits made through this local tool connection. Today the app and model names are reported by the tool client, not authenticated by the provider. Proof of Thought cannot see the rest of your private chat.</p>
+            <p>Connecting never publishes your document. You choose what to publish later.</p>
+          </details>
+        </section>
+
+        <section class="ai-basic-panel" id="ai-basic-panel" hidden>
+          <span class="eyebrow">What is recorded</span>
+          <h3>Your document changes</h3>
+          <ul class="plain-list">
+            <li><strong>Written here</strong><span>Text entered in the editor</span></li>
+            <li><strong>Pasted</strong><span>Clipboard insertions, without guessing who wrote them</span></li>
+            <li><strong>Imported</strong><span>Text opened from a file</span></li>
+            <li><strong>Edited here</strong><span>Formatting and editor commands</span></li>
+            <li><strong>Unclassified change</strong><span>A change whose input path could not be established reliably</span></li>
+          </ul>
+          <p class="ai-caveat">Basic records observed local deltas. Exact attribution is shown only when anchored evidence supports it. Basic makes no AI request and does not set up a reviewer. An external AI app you configured earlier can remain connected until you remove it there.</p>
+        </section>
+
+        <section class="pro-preview" aria-labelledby="pro-preview-title">
+          <div class="pro-preview-heading">
+            <span class="eyebrow">Pro add-on</span>
+            <span class="coming-soon">Coming in this stack</span>
+          </div>
+          <h3 id="pro-preview-title">Built-in AI with authenticated traces</h3>
+          <p>Add an OpenAI or Anthropic API key for chat, files, model and thinking controls. When verification succeeds, Proof of Thought will bind a provider-authenticated exchange to the accepted change.</p>
+          <p class="ai-cost">Provider API usage charges apply. Pro will work alongside connected reviewers.</p>
+        </section>
+      </aside>
+    </div>
 
     <!-- Errors used to have nowhere to go: a failed call left the status dot
          green and the window silently wrong. -->
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <div class="ai-onboarding-backdrop" id="ai-onboarding" hidden>
+      <section class="ai-onboarding" role="dialog" aria-modal="true" aria-labelledby="ai-onboarding-title" aria-describedby="ai-onboarding-description">
+        <button class="icon-button onboarding-close" id="ai-onboarding-close" type="button" aria-label="Close setup">×</button>
+        <span class="eyebrow">Welcome to Proof of Thought</span>
+        <h1 id="ai-onboarding-title" tabindex="-1">How would you like to work?</h1>
+        <p class="onboarding-intro" id="ai-onboarding-description">Choose a simple starting point. You can change it anytime, and your documents and history stay intact.</p>
+        <div class="ai-startup-error" id="ai-startup-error" role="alert" hidden>
+          <strong>Proof of Thought could not finish starting</strong>
+          <span id="ai-startup-error-message"></span>
+          <small>Restart the app after resolving the problem. Your documents have not been changed by this setup screen.</small>
+        </div>
+
+        <div class="onboarding-options">
+          <button class="onboarding-card recommended" type="button" data-ai-mode="connect">
+            <span class="card-topline"><span>Connect an AI app</span><span class="recommendation">Recommended</span></span>
+            <strong>Work with reviewers you already use</strong>
+            <span>Get setup steps for ChatGPT desktop, Codex, or Claude Code. Claude Desktop’s one-click extension is next in this upgrade.</span>
+            <small>Proof of Thought adds no API usage charge. Current setup grants persistent whole-workspace access and may send document content to the AI provider; review the details before copying it.</small>
+          </button>
+
+          <button class="onboarding-card" type="button" data-ai-mode="basic">
+            <span class="card-topline"><span>Write locally</span><span class="mode-label">Basic</span></span>
+            <strong>Do not set up AI support</strong>
+            <span>Proof of Thought records observed local deltas and separates writing, pasting, importing, editor commands, and unclassified changes.</span>
+            <small>Proof of Thought makes no AI request. Existing external connections are managed in that AI app.</small>
+          </button>
+
+          <button class="onboarding-card pro-card" type="button" disabled aria-describedby="pro-card-status">
+            <span class="card-topline"><span>Use an API key</span><span class="mode-label">Pro</span></span>
+            <strong>Built-in AI with deeper traces</strong>
+            <span>Chat inside Proof of Thought with file upload, model choice, thinking controls, and provider-authenticated exchanges that Proof of Thought can bind to accepted changes.</span>
+            <small id="pro-card-status">Coming in this upgrade stack. Provider API usage charges will apply.</small>
+          </button>
+        </div>
+
+        <details class="onboarding-disclosure">
+          <summary>What “reported” and “verified” mean</summary>
+          <p><strong>Reported</strong> means Proof of Thought saw an AI tool edit arrive through a local tool connection. The app and model names are supplied by that client. <strong>Verified</strong> will mean a provider-authenticated exchange is bound to the exact accepted change. Neither label says the content is correct.</p>
+        </details>
+      </section>
+    </div>
 
     <div class="close-prompt-backdrop" id="close-prompt" hidden>
       <section class="close-prompt" role="alertdialog" aria-modal="true" aria-labelledby="close-prompt-title" aria-describedby="close-prompt-description">

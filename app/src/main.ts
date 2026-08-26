@@ -7,6 +7,7 @@ import { getCurrentWindow as tauriWindow } from "@tauri-apps/api/window";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { Editor } from "@tiptap/core";
+import { installAiSupport } from "./ai-support";
 import { createEditor } from "./editor";
 import { EditorApi } from "./editor-api";
 import {
@@ -44,7 +45,6 @@ const els = {
   connections: document.getElementById("connections")!,
   peers: document.getElementById("peers")!,
   agents: document.getElementById("agents")!,
-  stdioCommand: document.getElementById("stdio-command")!,
   toast: document.getElementById("toast")!,
   closePrompt: document.getElementById("close-prompt")!,
   closeExport: document.getElementById("close-export") as HTMLButtonElement,
@@ -161,6 +161,8 @@ function reason(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
   return text.length > 160 ? `${text.slice(0, 157)}…` : text;
 }
+
+const aiSupport = installAiSupport(document, { onNotice: notify });
 
 /**
  * Agents that have written recently.
@@ -379,6 +381,7 @@ async function openDocument(docId: string): Promise<boolean> {
         await exportMarkdownFile();
       },
     },
+    () => !aiSupport.isSidebarOpen(),
   );
   awareness.setLocalStateField("user", user);
 
@@ -533,13 +536,6 @@ document.getElementById("new-window")!.addEventListener("click", () => {
   toggleConnections(false);
   void createNewDocument();
 });
-document.getElementById("copy-command")!.addEventListener("click", async (e) => {
-  await navigator.clipboard.writeText(connection.stdio_command);
-  const button = e.currentTarget as HTMLButtonElement;
-  button.textContent = "Copied";
-  setTimeout(() => (button.textContent = "Copy"), 1200);
-});
-
 // ---------------------------------------------------------------- switcher
 
 let results: DocumentSummary[] = [];
@@ -782,6 +778,21 @@ async function showDocumentInNewWindow(docId: string): Promise<boolean> {
 // ---------------------------------------------------------------- keys
 
 document.addEventListener("keydown", (event) => {
+  if (aiSupport.isChoosingMode()) {
+    // The onboarding controller owns its ordinary keys, including Enter and
+    // Space for choosing a card. Suppress only shortcuts that would operate on
+    // a document hidden behind the modal.
+    if (
+      accel(event) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      ["n", "o", "s", "k"].includes(event.key.toLowerCase())
+    ) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+    return;
+  }
   if (closingNativeWindow) {
     // The close sheet and the native file picker own input until the window is
     // either cancelled or destroyed. In particular, document switching must
@@ -882,8 +893,11 @@ async function boot() {
   }
   mcp = new Mcp(connection.mcp_url, connection.mcp_token);
   editorApi = new EditorApi(connection.mcp_url, connection.editor_token);
-  els.stdioCommand.textContent = connection.stdio_command;
+  aiSupport.setConnectionCommand(connection.stdio_command);
   await mcp.connect();
+  // A first launch is genuinely onboarding, not a document created invisibly
+  // behind a modal. Existing preferences resolve immediately.
+  await aiSupport.whenInitialChoiceMade();
 
   const documents = await mcp.listDocuments();
   const requested = new URL(window.location.href).searchParams.get("doc");
@@ -936,6 +950,10 @@ async function installNativeCloseGuard(): Promise<void> {
     // window alive while the export choice and daemon acknowledgement complete.
     event.preventDefault();
     if (closingNativeWindow) return;
+    // A reopened setup sheet and the save-before-close sheet are both modal.
+    // Release the optional setup sheet before giving the native close flow
+    // ownership of focus and background inertness.
+    aiSupport.dismissModePicker();
     closingNativeWindow = true;
     const releaseEditorLock = target
       ? lockEditorInteraction(target)
@@ -1000,6 +1018,8 @@ window.addEventListener("beforeunload", (event) => {
 
 boot().catch((error) => {
   document.title = "Could not reach the daemon";
-  notify(`Could not reach the daemon: ${reason(error)}`, "error");
+  const message = reason(error);
+  aiSupport.setStartupError(message);
+  notify(`Could not reach the daemon: ${message}`, "error");
   console.error(error);
 });
