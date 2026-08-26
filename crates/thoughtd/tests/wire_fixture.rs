@@ -6,7 +6,7 @@
 //! asserts against it, and CI fails if the committed file is stale.
 
 use std::path::PathBuf;
-use thoughtd::sync::Frame;
+use thoughtd::sync::{Frame, LocalInputSource};
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frames.json")
@@ -42,6 +42,14 @@ fn cases() -> Vec<(&'static str, Frame)> {
             Frame::Update {
                 doc_id: "01a02d26-ac02-7072".into(),
                 update: vec![42; 8],
+            },
+        ),
+        (
+            "sourced-update-paste",
+            Frame::SourcedUpdate {
+                doc_id: "doc-source".into(),
+                source: LocalInputSource::Paste,
+                update: vec![42, 0, 255],
             },
         ),
         (
@@ -118,6 +126,22 @@ fn describe(frame: &Frame) -> serde_json::Value {
         } => ("subscribe", doc_id, state_vector.clone()),
         Frame::Sync { doc_id, update } => ("sync", doc_id, update.clone()),
         Frame::Update { doc_id, update } => ("update", doc_id, update.clone()),
+        Frame::SourcedUpdate {
+            doc_id,
+            source,
+            update,
+        } => {
+            let source = match source {
+                LocalInputSource::Unknown => 0,
+                LocalInputSource::Written => 1,
+                LocalInputSource::Paste => 2,
+                LocalInputSource::Import => 3,
+                LocalInputSource::Command => 4,
+            };
+            let mut body = vec![source];
+            body.extend(update);
+            ("sourced_update", doc_id, body)
+        }
         Frame::Broadcast { doc_id, update } => ("broadcast", doc_id, update.clone()),
         Frame::Awareness { doc_id, payload } => ("awareness", doc_id, payload.clone()),
         Frame::Error { doc_id, message } => ("error", doc_id, message.as_bytes().to_vec()),
@@ -160,6 +184,35 @@ fn every_fixture_frame_decodes_to_itself() {
     }
 }
 
+#[test]
+fn every_local_input_source_round_trips() {
+    for source in [
+        LocalInputSource::Unknown,
+        LocalInputSource::Written,
+        LocalInputSource::Paste,
+        LocalInputSource::Import,
+        LocalInputSource::Command,
+    ] {
+        let frame = Frame::SourcedUpdate {
+            doc_id: "doc-source".into(),
+            source,
+            update: vec![1, 2, 3],
+        };
+        let decoded = Frame::decode(&frame.encode()).expect("sourced frame decodes");
+        match decoded {
+            Frame::SourcedUpdate {
+                source: decoded,
+                update,
+                ..
+            } => {
+                assert_eq!(decoded, source);
+                assert_eq!(update, vec![1, 2, 3]);
+            }
+            other => panic!("expected sourced update, got {other:?}"),
+        }
+    }
+}
+
 /// A truncated or hostile frame must return None, never panic — it arrives on
 /// a connection task that would take the endpoint down with it.
 #[test]
@@ -180,4 +233,13 @@ fn malformed_frames_are_refused_rather_than_panicking() {
     );
     // An unknown tag is not a frame we understand.
     assert!(Frame::decode(&[0x7f, 0, 0, 0, 0]).is_none(), "unknown tag");
+    // A sourced update must carry one of the closed source bytes before Yjs.
+    assert!(
+        Frame::decode(&[0x09, 0, 0, 0, 0]).is_none(),
+        "missing source"
+    );
+    assert!(
+        Frame::decode(&[0x09, 0, 0, 0, 0, 0x7f]).is_none(),
+        "unknown source"
+    );
 }

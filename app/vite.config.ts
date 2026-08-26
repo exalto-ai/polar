@@ -3,12 +3,14 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+const DAEMON_PROTOCOL_VERSION = 2;
+
 /**
  * Dev-only: serve the running daemon's connection details so the window can be
  * opened in a plain browser as well as under Tauri.
  *
- * Real builds get this from the Tauri `connection` command instead. The token
- * never goes in a URL either way.
+ * Real builds get this from the Tauri `connection` command instead. Neither
+ * capability ever goes in a URL.
  */
 function thoughtConnection() {
   return {
@@ -26,12 +28,23 @@ function thoughtConnection() {
               ));
         try {
           const config = JSON.parse(readFileSync(join(home, "daemon.json"), "utf8"));
+          if (
+            config.protocol_version !== DAEMON_PROTOCOL_VERSION ||
+            typeof config.token !== "string" ||
+            typeof config.editor_token !== "string"
+          ) {
+            throw new Error(
+              "daemon discovery has an incompatible protocol or capability format",
+            );
+          }
           res.setHeader("Content-Type", "application/json");
           res.end(
             JSON.stringify({
+              protocol_version: config.protocol_version,
               sync_url: config.url.replace("http://", "ws://").replace("/mcp", "/sync"),
               mcp_url: config.url,
-              token: config.token,
+              editor_token: config.editor_token,
+              mcp_token: config.token,
               stdio_command: join(process.cwd(), "../target/debug/thought-mcp-stdio"),
               // Dev-only mirror of `thought_mcp::EDITOR_ACTOR_ID`; real builds
               // get it from the Tauri command, which reads the constant.

@@ -7,7 +7,7 @@
 //!
 //! Transport is HTTP on loopback, never stdio (AD-10). A stdio MCP server would
 //! be spawned per client, and two processes writing one SQLite store is a
-//! corruption bug waiting to happen. Clients find the port and token in
+//! corruption bug waiting to happen. Clients find the port and capabilities in
 //! `daemon.json`; a shim binary bridges stdio clients to it.
 
 mod tools;
@@ -23,6 +23,39 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use std::sync::Arc;
 use thought_mcp::Workspace;
+
+fn bearer(req: &Request<axum::body::Body>) -> Option<String> {
+    req.headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::to_string)
+}
+
+fn websocket_capability(req: &Request<axum::body::Body>) -> Option<String> {
+    req.headers()
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .find_map(|protocol| protocol.strip_prefix("thought.token."))
+        })
+        .map(str::to_string)
+}
+
+async fn mcp_health() -> axum::Json<discovery::HealthResponse> {
+    axum::Json(discovery::HealthResponse::mcp())
+}
+
+async fn identity() -> axum::Json<discovery::IdentityResponse> {
+    axum::Json(discovery::IdentityResponse::current())
+}
+
+async fn editor_health() -> axum::Json<discovery::HealthResponse> {
+    axum::Json(discovery::HealthResponse::editor())
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,6 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let workspace = Arc::new(Workspace::open(&db_path)?);
     let token = discovery::random_token()?;
+    let editor_token = loop {
+        let candidate = discovery::random_token()?;
+        if candidate != token {
+            break candidate;
+        }
+    };
 
     let service_workspace = workspace.clone();
     let service = StreamableHttpService::new(
@@ -60,48 +99,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_max_request_body_bytes(thoughtd::MAX_MCP_REQUEST_BODY_BYTES),
     );
 
-    let expected = token.clone();
-    let sync_state = sync::SyncState::new(workspace.clone());
-    let app = axum::Router::new()
+    // MCP and editor sync are separate protocol capabilities. This prevents a
+    // client given only MCP access from choosing editor-only Observed source
+    // labels. It is not a sandbox against a hostile same-user process that can
+    // read the private discovery file or the app's own state.
+    let mcp_expected = token.clone();
+    let mcp_routes = axum::Router::new()
+        .route(discovery::MCP_HEALTH_PATH, axum::routing::get(mcp_health))
         .nest_service("/mcp", service)
-        // The editor connects here and speaks the same protocol the relay will
-        // (M2.1): one protocol, two transports.
-        .route("/sync", axum::routing::any(sync::handler))
-        .with_state(sync_state)
         .layer(middleware::from_fn(
             move |req: Request<axum::body::Body>, next: Next| {
-                let expected = expected.clone();
+                let expected = mcp_expected.clone();
                 async move {
-                    // Any local process can reach a loopback port, and documents are
-                    // the user's private writing. Possession of the 0600 discovery
-                    // file is the grant.
-                    let headers = req.headers();
-                    let bearer = headers
-                        .get(axum::http::header::AUTHORIZATION)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.strip_prefix("Bearer "))
-                        .map(str::to_string);
-
-                    // The browser WebSocket API cannot set headers, and a token
-                    // in the URL would reach logs and history. Carry it as a
-                    // subprotocol instead: header-borne, never part of the URL.
-                    let subprotocol = headers
-                        .get("sec-websocket-protocol")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| {
-                            v.split(',')
-                                .map(str::trim)
-                                .find_map(|p| p.strip_prefix("thought.token."))
-                        })
-                        .map(str::to_string);
-
-                    match bearer.or(subprotocol) {
-                        Some(t) if t == expected => Ok::<Response, StatusCode>(next.run(req).await),
+                    match bearer(&req) {
+                        Some(presented) if presented == expected => {
+                            Ok::<Response, StatusCode>(next.run(req).await)
+                        }
                         _ => Err(StatusCode::UNAUTHORIZED),
                     }
                 }
             },
-        ))
+        ));
+
+    let sync_expected = editor_token.clone();
+    let sync_state = sync::SyncState::new(workspace.clone());
+    let sync_routes = axum::Router::new()
+        .route(
+            discovery::EDITOR_HEALTH_PATH,
+            axum::routing::get(editor_health),
+        )
+        // The editor connects here using the framing a future relay can reuse.
+        // A relay must still get its own capability and conservative assurance;
+        // it must not inherit this editor-only Observed trust.
+        .route("/sync", axum::routing::any(sync::handler))
+        .with_state(sync_state)
+        .layer(middleware::from_fn(
+            move |req: Request<axum::body::Body>, next: Next| {
+                let expected = sync_expected.clone();
+                async move {
+                    // The browser WebSocket API cannot set headers, and a
+                    // capability in the URL would reach logs and history. Carry
+                    // it as a subprotocol: header-borne, never part of the URL.
+                    match bearer(&req).or_else(|| websocket_capability(&req)) {
+                        Some(presented) if presented == expected => {
+                            Ok::<Response, StatusCode>(next.run(req).await)
+                        }
+                        _ => Err(StatusCode::UNAUTHORIZED),
+                    }
+                }
+            },
+        ));
+
+    let app = axum::Router::new()
+        .route(discovery::IDENTITY_PATH, axum::routing::get(identity))
+        .merge(mcp_routes)
+        .merge(sync_routes)
         // CORS, outermost so it runs before auth.
         //
         // The webview is cross-origin whichever way it loads — tauri://localhost
@@ -159,7 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
 
-    let discovery_path = discovery::write(port, &token, &db_path)?;
+    let discovery_path = discovery::write(port, &token, &editor_token, &db_path)?;
     // The readiness line stays on stderr verbatim: the app and the test harness
     // both wait for it, and a logger's prefixes would change what they match.
     eprintln!("thoughtd listening on http://127.0.0.1:{port}/mcp");

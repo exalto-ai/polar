@@ -10,6 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use harness::{Daemon, Frame};
 use thought_core::Document;
 use thought_schema::{Node, normalize};
+use thoughtd::sync::LocalInputSource;
 use tokio_tungstenite::tungstenite::Message;
 
 type Socket =
@@ -20,11 +21,35 @@ async fn connect(daemon: &Daemon) -> Socket {
     let mut request = daemon.sync_url().into_client_request().expect("request");
     request.headers_mut().insert(
         "Authorization",
-        format!("Bearer {}", daemon.token).parse().expect("header"),
+        format!("Bearer {}", daemon.editor_token)
+            .parse()
+            .expect("header"),
     );
     let (socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .expect("sync endpoint accepted the connection");
+    socket
+}
+
+async fn connect_as_browser(daemon: &Daemon) -> Socket {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = daemon.sync_url().into_client_request().expect("request");
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        format!("thought.v1, thought.token.{}", daemon.editor_token)
+            .parse()
+            .expect("header"),
+    );
+    let (socket, response) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("browser editor capability accepted");
+    assert_eq!(
+        response
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|value| value.to_str().ok()),
+        Some("thought.v1")
+    );
     socket
 }
 
@@ -117,8 +142,9 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
     let delta = local.diff_since(&before);
     send(
         &mut a,
-        Frame::Update {
+        Frame::SourcedUpdate {
             doc_id: doc_id.clone(),
+            source: LocalInputSource::Written,
             update: delta.clone(),
         },
     )
@@ -145,8 +171,9 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
         "typed in the window"
     );
 
-    // A reconnect may resend an update whose ACK was lost. It still receives
-    // an ACK after the daemon confirms the same update is already persisted.
+    // A legacy window may send the old unlabelled frame. It is accepted as an
+    // Unknown source, and a no-op resend is still acknowledged after the
+    // daemon confirms the document already contains it.
     send(
         &mut a,
         Frame::Update {
@@ -156,6 +183,94 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
     )
     .await;
     recv_ack(&mut a, &doc_id).await;
+}
+
+#[tokio::test]
+async fn every_editor_source_reaches_document_lineage() {
+    let daemon = Daemon::start();
+    daemon.connect();
+
+    let cases = [
+        (Some(LocalInputSource::Written), "entered", "observed"),
+        (Some(LocalInputSource::Paste), "pasted", "observed"),
+        (Some(LocalInputSource::Import), "imported", "observed"),
+        (Some(LocalInputSource::Command), "command", "observed"),
+        (Some(LocalInputSource::Unknown), "unknown", "unknown"),
+        (None, "unknown", "unknown"),
+    ];
+
+    for (index, (source, expected_ingress, expected_assurance)) in cases.into_iter().enumerate() {
+        let created = daemon.call(
+            "create_document",
+            serde_json::json!({
+                "title": "",
+                "agent": "test",
+                "session": format!("source-map-{index}")
+            }),
+        );
+        let doc_id = created["doc_id"].as_str().expect("doc_id").to_string();
+
+        let mut socket = connect(&daemon).await;
+        send(
+            &mut socket,
+            Frame::Subscribe {
+                doc_id: doc_id.clone(),
+                state_vector: vec![],
+            },
+        )
+        .await;
+
+        let local = Document::new();
+        match recv(&mut socket).await {
+            Frame::Sync { update, .. } => local.apply_update(&update).expect("valid sync"),
+            other => panic!("expected SYNC, got {other:?}"),
+        }
+
+        let before = local.state_vector();
+        let block = local.blocks()[0].block_id.clone();
+        local
+            .replace_block(
+                &block,
+                &normalize(&Node::element(
+                    "paragraph",
+                    vec![Node::text(format!("source {index}"), vec![])],
+                )),
+            )
+            .expect("replace");
+        let update = local.diff_since(&before);
+        let frame = match source {
+            Some(source) => Frame::SourcedUpdate {
+                doc_id: doc_id.clone(),
+                source,
+                update,
+            },
+            None => Frame::Update {
+                doc_id: doc_id.clone(),
+                update,
+            },
+        };
+        send(&mut socket, frame).await;
+        recv_ack(&mut socket, &doc_id).await;
+
+        let lineage = daemon.call("document_lineage", serde_json::json!({ "doc_id": doc_id }));
+        let contributions = lineage["summary"]["contributions"]
+            .as_array()
+            .expect("contributions");
+        assert_eq!(
+            contributions.len(),
+            1,
+            "unexpected lineage for case {index}"
+        );
+        let descriptor = &contributions[0]["source"];
+        assert_eq!(
+            descriptor["ingress"], expected_ingress,
+            "wrong ingress for case {index}"
+        );
+        assert_eq!(
+            descriptor["assurance"], expected_assurance,
+            "wrong assurance for case {index}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -203,11 +318,85 @@ async fn awareness_is_broadcast_but_never_persisted() {
 }
 
 #[tokio::test]
-async fn the_sync_endpoint_requires_the_token() {
+async fn the_sync_endpoint_requires_the_editor_capability() {
     let daemon = Daemon::start();
     let result = tokio_tungstenite::connect_async(daemon.sync_url()).await;
     assert!(
         result.is_err(),
-        "sync must not be reachable without the discovery token"
+        "sync must not be reachable without its editor capability"
     );
+}
+
+#[tokio::test]
+async fn a_browser_uses_the_editor_capability_without_putting_it_in_the_url() {
+    let daemon = Daemon::start();
+    let doc_id = daemon.create_document("Browser capability");
+    let mut socket = connect_as_browser(&daemon).await;
+
+    assert!(!daemon.sync_url().contains(&daemon.editor_token));
+    send(
+        &mut socket,
+        Frame::Subscribe {
+            doc_id: doc_id.clone(),
+            state_vector: vec![],
+        },
+    )
+    .await;
+    match recv(&mut socket).await {
+        Frame::Sync { doc_id: synced, .. } => assert_eq!(synced, doc_id),
+        other => panic!("expected SYNC, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_sync_endpoint_rejects_the_mcp_capability() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let daemon = Daemon::start();
+    let mut request = daemon.sync_url().into_client_request().expect("request");
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        format!("thought.v1, thought.token.{}", daemon.token)
+            .parse()
+            .expect("header"),
+    );
+
+    let result = tokio_tungstenite::connect_async(request).await;
+    assert!(
+        result.is_err(),
+        "an MCP capability must not authorize editor source claims"
+    );
+}
+
+#[tokio::test]
+async fn malformed_and_server_only_client_frames_receive_protocol_errors() {
+    let daemon = Daemon::start();
+    let mut socket = connect(&daemon).await;
+
+    socket
+        .send(Message::Binary(vec![0xff].into()))
+        .await
+        .expect("send malformed frame");
+    match recv(&mut socket).await {
+        Frame::Error { doc_id, message } => {
+            assert!(doc_id.is_empty());
+            assert_eq!(message, "invalid sync frame");
+        }
+        other => panic!("expected ERROR, got {other:?}"),
+    }
+
+    send(
+        &mut socket,
+        Frame::Ack {
+            doc_id: "client-ack".into(),
+        },
+    )
+    .await;
+    match recv(&mut socket).await {
+        Frame::Error { doc_id, message } => {
+            assert_eq!(doc_id, "client-ack");
+            assert_eq!(message, "frame is server-to-client only");
+        }
+        other => panic!("expected ERROR, got {other:?}"),
+    }
 }

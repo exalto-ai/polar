@@ -9,7 +9,7 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, tool, tool_router};
 use std::sync::Arc;
 use thought_core::Position;
-use thought_mcp::{ActorRef, TextEdit, Workspace};
+use thought_mcp::{ActorRef, MutationContext, TextEdit, Workspace};
 
 #[derive(Clone)]
 pub struct Thought {
@@ -56,6 +56,13 @@ impl Caller {
         } else {
             ActorRef::agent(&self.agent, self.model.as_deref(), self.session.as_deref())
         }
+    }
+
+    /// MCP decides the provenance class at the transport boundary. The legacy
+    /// `kind` field may still shape compatibility rails, but it cannot promote
+    /// an external tool call to locally observed or verified provenance.
+    fn mutation_context(&self) -> MutationContext {
+        MutationContext::mcp_reported(self.agent.clone(), None, None, self.model.clone())
     }
 }
 
@@ -219,6 +226,20 @@ impl Thought {
         Ok(Json(serde_json::json!({ "blocks": blocks })))
     }
 
+    #[tool(
+        description = "Current wording contribution by source, backed by surviving grapheme \
+                       spans and a versioned deterministic alignment. V1 does not carry editor \
+                       range anchors, so duplicate equal text from different sources can be \
+                       ambiguous; the response identifies its alignment basis."
+    )]
+    fn document_lineage(
+        &self,
+        Parameters(p): Parameters<DocParams>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let lineage = self.workspace.document_lineage(&p.doc_id).map_err(failed)?;
+        Ok(Json(serde_json::to_value(lineage).map_err(failed)?))
+    }
+
     #[tool(description = "Full-text search across documents.")]
     fn search(
         &self,
@@ -237,11 +258,14 @@ impl Thought {
         Parameters(p): Parameters<CreateParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
         let actor = p.caller.actor();
+        let context = p.caller.mutation_context();
         let view = match p.initial_markdown {
             Some(markdown) => self
                 .workspace
-                .create_document_from_markdown(&p.title, &markdown, &actor),
-            None => self.workspace.create_document(&p.title, &actor),
+                .create_document_from_markdown_with_context(&p.title, &markdown, &actor, &context),
+            None => self
+                .workspace
+                .create_document_with_context(&p.title, &actor, &context),
         }
         .map_err(failed)?;
         Ok(Json(serde_json::to_value(view).map_err(failed)?))
@@ -252,14 +276,17 @@ impl Thought {
         &self,
         Parameters(p): Parameters<ReplaceBlockParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let actor = p.caller.actor();
+        let context = p.caller.mutation_context();
         let out = self
             .workspace
-            .replace_block(
+            .replace_block_with_context(
                 &p.doc_id,
                 &p.block_id,
                 &p.markdown,
                 p.version.as_deref(),
-                &p.caller.actor(),
+                &actor,
+                &context,
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
@@ -275,14 +302,17 @@ impl Thought {
             Some("start") => Position::Start,
             Some(id) => Position::After(id.to_string()),
         };
+        let actor = p.caller.actor();
+        let context = p.caller.mutation_context();
         let out = self
             .workspace
-            .insert_blocks(
+            .insert_blocks_with_context(
                 &p.doc_id,
                 &position,
                 &p.markdown,
                 p.version.as_deref(),
-                &p.caller.actor(),
+                &actor,
+                &context,
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
@@ -297,9 +327,11 @@ impl Thought {
         &self,
         Parameters(p): Parameters<ReplaceTextParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let actor = p.caller.actor();
+        let context = p.caller.mutation_context();
         let out = self
             .workspace
-            .replace_text(
+            .replace_text_with_context(
                 &p.doc_id,
                 &p.block_id,
                 &TextEdit {
@@ -308,7 +340,8 @@ impl Thought {
                     occurrence: p.occurrence,
                 },
                 p.version.as_deref(),
-                &p.caller.actor(),
+                &actor,
+                &context,
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
@@ -322,9 +355,11 @@ impl Thought {
         &self,
         Parameters(p): Parameters<DeleteDocumentParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let actor = p.caller.actor();
+        let context = p.caller.mutation_context();
         let out = self
             .workspace
-            .set_document_deleted(&p.doc_id, p.deleted, &p.caller.actor())
+            .set_document_deleted_with_context(&p.doc_id, p.deleted, &actor, &context)
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
     }
@@ -334,13 +369,16 @@ impl Thought {
         &self,
         Parameters(p): Parameters<DeleteBlockParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let actor = p.caller.actor();
+        let context = p.caller.mutation_context();
         let out = self
             .workspace
-            .delete_block(
+            .delete_block_with_context(
                 &p.doc_id,
                 &p.block_id,
                 p.version.as_deref(),
-                &p.caller.actor(),
+                &actor,
+                &context,
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))

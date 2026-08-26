@@ -133,6 +133,40 @@
     },
     {
       "encoded": [
+        9,
+        0,
+        0,
+        0,
+        10,
+        100,
+        111,
+        99,
+        45,
+        115,
+        111,
+        117,
+        114,
+        99,
+        101,
+        2,
+        42,
+        0,
+        255
+      ],
+      "frame": {
+        "body": [
+          2,
+          42,
+          0,
+          255
+        ],
+        "doc_id": "doc-source",
+        "kind": "sourced_update"
+      },
+      "name": "sourced-update-paste"
+    },
+    {
+      "encoded": [
         4,
         0,
         0,

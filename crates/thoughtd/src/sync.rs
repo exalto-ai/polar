@@ -11,7 +11,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use thought_mcp::{ActorRef, Workspace};
+use thought_mcp::{ActorRef, MutationContext, Workspace};
 use tokio::sync::broadcast;
 
 /// Wire tags. Length-prefixed binary, because Yjs updates are binary and
@@ -25,6 +25,43 @@ mod tag {
     pub const ERROR: u8 = 0x06;
     pub const PRESENCE: u8 = 0x07;
     pub const ACK: u8 = 0x08;
+    pub const SOURCED_UPDATE: u8 = 0x09;
+}
+
+/// How a local editor observed content entering the document.
+///
+/// This is deliberately not actor identity. It travels beside a Yjs update
+/// because Yjs transaction origins are process-local and disappear on encode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalInputSource {
+    Unknown,
+    Written,
+    Paste,
+    Import,
+    Command,
+}
+
+impl LocalInputSource {
+    fn encode(self) -> u8 {
+        match self {
+            LocalInputSource::Unknown => 0x00,
+            LocalInputSource::Written => 0x01,
+            LocalInputSource::Paste => 0x02,
+            LocalInputSource::Import => 0x03,
+            LocalInputSource::Command => 0x04,
+        }
+    }
+
+    fn decode(byte: u8) -> Option<LocalInputSource> {
+        Some(match byte {
+            0x00 => LocalInputSource::Unknown,
+            0x01 => LocalInputSource::Written,
+            0x02 => LocalInputSource::Paste,
+            0x03 => LocalInputSource::Import,
+            0x04 => LocalInputSource::Command,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +76,13 @@ pub enum Frame {
     },
     Update {
         doc_id: String,
+        update: Vec<u8>,
+    },
+    /// The first body byte is a closed local-input-source value; the rest is
+    /// the unchanged Yjs update. Legacy `Update` remains accepted as Unknown.
+    SourcedUpdate {
+        doc_id: String,
+        source: LocalInputSource,
         update: Vec<u8>,
     },
     Broadcast {
@@ -78,6 +122,16 @@ impl Frame {
             } => (tag::SUBSCRIBE, doc_id, state_vector.clone()),
             Frame::Sync { doc_id, update } => (tag::SYNC, doc_id, update.clone()),
             Frame::Update { doc_id, update } => (tag::UPDATE, doc_id, update.clone()),
+            Frame::SourcedUpdate {
+                doc_id,
+                source,
+                update,
+            } => {
+                let mut body = Vec::with_capacity(update.len() + 1);
+                body.push(source.encode());
+                body.extend_from_slice(update);
+                (tag::SOURCED_UPDATE, doc_id, body)
+            }
             Frame::Broadcast { doc_id, update } => (tag::BROADCAST, doc_id, update.clone()),
             Frame::Awareness { doc_id, payload } => (tag::AWARENESS, doc_id, payload.clone()),
             Frame::Error { doc_id, message } => (tag::ERROR, doc_id, message.as_bytes().to_vec()),
@@ -119,6 +173,14 @@ impl Frame {
                 doc_id,
                 update: body,
             },
+            tag::SOURCED_UPDATE => {
+                let (&source, update) = body.split_first()?;
+                Frame::SourcedUpdate {
+                    doc_id,
+                    source: LocalInputSource::decode(source)?,
+                    update: update.to_vec(),
+                }
+            }
             tag::BROADCAST => Frame::Broadcast {
                 doc_id,
                 update: body,
@@ -238,7 +300,16 @@ async fn connection(mut socket: WebSocket, state: SyncState) {
             message = inbound => {
                 let Some(Ok(message)) = message else { break };
                 let Message::Binary(bytes) = message else { continue };
-                let Some(frame) = Frame::decode(&bytes) else { continue };
+                let Some(frame) = Frame::decode(&bytes) else {
+                    let error = Frame::Error {
+                        doc_id: String::new(),
+                        message: "invalid sync frame".into(),
+                    };
+                    if socket.send(Message::Binary(error.encode().into())).await.is_err() {
+                        return;
+                    }
+                    continue;
+                };
 
                 let reply = handle(&state, &actor, frame, &mut senders, &mut subscriptions);
                 for out in reply {
@@ -311,34 +382,20 @@ fn handle(
             }
         }
 
-        Frame::Update { doc_id, update } => {
-            match state.workspace.apply_peer_update(&doc_id, &update, actor) {
-                // A no-op update is not broadcast: Yjs updates are idempotent
-                // and a reconnecting peer resends what it already sent. It is
-                // still acknowledged, because the persisted document already
-                // contains it.
-                Ok(None) => vec![Frame::Ack { doc_id }],
-                Ok(Some(_)) => {
-                    if let Some(channel) = senders.get(&doc_id) {
-                        let _ = channel.send((
-                            u64::MAX,
-                            Frame::Broadcast {
-                                doc_id: doc_id.clone(),
-                                update,
-                            },
-                        ));
-                    }
-                    // `apply_peer_update` returns only after the workspace
-                    // commit succeeds, so this is a persistence acknowledgement,
-                    // not merely a receipt acknowledgement.
-                    vec![Frame::Ack { doc_id }]
-                }
-                Err(e) => vec![Frame::Error {
-                    doc_id,
-                    message: e.to_string(),
-                }],
-            }
-        }
+        Frame::Update { doc_id, update } => apply_editor_update(
+            state,
+            actor,
+            doc_id,
+            update,
+            LocalInputSource::Unknown,
+            senders,
+        ),
+
+        Frame::SourcedUpdate {
+            doc_id,
+            source,
+            update,
+        } => apply_editor_update(state, actor, doc_id, update, source, senders),
 
         // Presence, never persisted.
         Frame::Awareness { doc_id, payload } => {
@@ -354,11 +411,116 @@ fn handle(
             vec![]
         }
 
-        // Server-to-client only; a client sending one is confused.
-        Frame::Sync { .. }
-        | Frame::Broadcast { .. }
-        | Frame::Error { .. }
-        | Frame::Presence { .. }
-        | Frame::Ack { .. } => vec![],
+        // Server-to-client frames are a protocol error when sent by a peer.
+        Frame::Sync { doc_id, .. }
+        | Frame::Broadcast { doc_id, .. }
+        | Frame::Error { doc_id, .. }
+        | Frame::Presence { doc_id, .. }
+        | Frame::Ack { doc_id } => vec![Frame::Error {
+            doc_id,
+            message: "frame is server-to-client only".into(),
+        }],
+    }
+}
+
+/// Commit one editor update before acknowledging it.
+///
+/// `source` is already decoded and validated at the wire boundary. Mapping it
+/// here keeps the provenance claim owned by the transport and persists it
+/// atomically with the update.
+fn apply_editor_update(
+    state: &SyncState,
+    actor: &ActorRef,
+    doc_id: String,
+    update: Vec<u8>,
+    source: LocalInputSource,
+    senders: &HashMap<String, Fanout>,
+) -> Vec<Frame> {
+    let context = mutation_context(source);
+    match state
+        .workspace
+        .apply_peer_update_with_context(&doc_id, &update, actor, &context)
+    {
+        // A no-op update is not broadcast: Yjs updates are idempotent
+        // and a reconnecting peer resends what it already sent. It is
+        // still acknowledged, because the persisted document already
+        // contains it.
+        Ok(None) => vec![Frame::Ack { doc_id }],
+        Ok(Some(_)) => {
+            if let Some(channel) = senders.get(&doc_id) {
+                let _ = channel.send((
+                    u64::MAX,
+                    Frame::Broadcast {
+                        doc_id: doc_id.clone(),
+                        update,
+                    },
+                ));
+            }
+            // `apply_peer_update_with_context` returns only after the workspace
+            // commit succeeds, so this is a persistence acknowledgement,
+            // not merely a receipt acknowledgement.
+            vec![Frame::Ack { doc_id }]
+        }
+        Err(e) => vec![Frame::Error {
+            doc_id,
+            message: e.to_string(),
+        }],
+    }
+}
+
+fn mutation_context(source: LocalInputSource) -> MutationContext {
+    match source {
+        LocalInputSource::Written => MutationContext::entered(),
+        LocalInputSource::Paste => MutationContext::pasted(),
+        LocalInputSource::Import => MutationContext::imported(),
+        LocalInputSource::Command => MutationContext::command(),
+        LocalInputSource::Unknown => MutationContext::unknown(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LocalInputSource, mutation_context};
+    use thought_mcp::{Assurance, Ingress};
+
+    #[test]
+    fn every_local_source_maps_to_its_transport_owned_context() {
+        let cases = [
+            (
+                LocalInputSource::Written,
+                Ingress::Entered,
+                Assurance::Observed,
+            ),
+            (
+                LocalInputSource::Paste,
+                Ingress::Pasted,
+                Assurance::Observed,
+            ),
+            (
+                LocalInputSource::Import,
+                Ingress::Imported,
+                Assurance::Observed,
+            ),
+            (
+                LocalInputSource::Command,
+                Ingress::Command,
+                Assurance::Observed,
+            ),
+            (
+                LocalInputSource::Unknown,
+                Ingress::Unknown,
+                Assurance::Unknown,
+            ),
+        ];
+
+        for (source, ingress, assurance) in cases {
+            let context = mutation_context(source);
+            assert_eq!(context.ingress(), ingress, "wrong ingress for {source:?}");
+            assert_eq!(
+                context.assurance(),
+                assurance,
+                "wrong assurance for {source:?}"
+            );
+        }
     }
 }

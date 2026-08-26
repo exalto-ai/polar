@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Use a published daemon only when its bearer token works. Start one only
+/// Use a published daemon only when its MCP capability works. Start one only
 /// when nothing is published, so this shim never retires or races another
 /// process that may still own the store.
 fn connect() -> Result<Daemon, Box<dyn std::error::Error>> {
@@ -67,6 +67,14 @@ fn connect() -> Result<Daemon, Box<dyn std::error::Error>> {
         }
         return Err(format!(
             "a thought daemon is already published but did not accept its bearer token; quit any running Proof of Thought or thoughtd process, then remove {} if the problem persists",
+            discovery::discovery_path().display()
+        )
+        .into());
+    }
+
+    if discovery::discovery_path().exists() {
+        return Err(format!(
+            "a thought daemon has legacy or incompatible discovery protocol/capabilities; quit any running Proof of Thought or thoughtd process, then remove {} if the problem persists",
             discovery::discovery_path().display()
         )
         .into());

@@ -23,9 +23,11 @@ mod macos_termination;
 
 #[derive(serde::Serialize)]
 struct Connection {
+    protocol_version: u32,
     sync_url: String,
     mcp_url: String,
-    token: String,
+    editor_token: String,
+    mcp_token: String,
     /// The stdio shim an MCP client should spawn. Shown in the connections
     /// panel so adding an agent is a copy-paste rather than a scavenger hunt.
     stdio_command: String,
@@ -37,7 +39,12 @@ struct Connection {
 
 #[tauri::command]
 fn connection(state: tauri::State<'_, Daemon>) -> Connection {
+    connection_payload(state.inner())
+}
+
+fn connection_payload(state: &Daemon) -> Connection {
     Connection {
+        protocol_version: state.protocol_version,
         // Same origin, different path: the editor is a sync peer, agents come
         // in over MCP.
         sync_url: state
@@ -45,7 +52,8 @@ fn connection(state: tauri::State<'_, Daemon>) -> Connection {
             .replace("http://", "ws://")
             .replace("/mcp", "/sync"),
         mcp_url: state.url.clone(),
-        token: state.token.clone(),
+        editor_token: state.editor_token.clone(),
+        mcp_token: state.token.clone(),
         stdio_command: find_binary("thought-mcp-stdio")
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "thought-mcp-stdio".into()),
@@ -601,11 +609,20 @@ fn new_window(
 /// process never signals or silently replaces another possible store owner.
 fn ensure_daemon() -> Result<Daemon, String> {
     if let Some(daemon) = discovery::read() {
-        if discovery::authenticated_reachable(&daemon) {
+        if discovery::authenticated_reachable(&daemon)
+            && discovery::editor_authenticated_reachable(&daemon)
+        {
             return Ok(daemon);
         }
         return Err(format!(
-            "A thought daemon is already published but did not accept its bearer token. Quit any running Proof of Thought or thoughtd process, then remove {} if the problem persists.",
+            "A thought daemon is already published but did not accept its MCP and editor capabilities. Quit any running Proof of Thought or thoughtd process, then remove {} if the problem persists.",
+            discovery::discovery_path().display()
+        ));
+    }
+
+    if discovery::discovery_path().exists() {
+        return Err(format!(
+            "A thought daemon has legacy or incompatible discovery protocol/capabilities. Quit any running Proof of Thought or thoughtd process, then remove {} if the problem persists.",
             discovery::discovery_path().display()
         ));
     }
@@ -624,6 +641,7 @@ fn ensure_daemon() -> Result<Daemon, String> {
     while Instant::now() < deadline {
         if let Some(daemon) = discovery::read()
             && discovery::authenticated_reachable(&daemon)
+            && discovery::editor_authenticated_reachable(&daemon)
         {
             return Ok(daemon);
         }
@@ -757,10 +775,29 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        QuitState, atomic_write, cascade_axis, document_window_path, safe_suggested_name,
-        serialize_document,
+        QuitState, atomic_write, cascade_axis, connection_payload, document_window_path,
+        safe_suggested_name, serialize_document,
     };
     use thought_schema::{Mark, Node};
+
+    #[test]
+    fn connection_payload_keeps_mcp_and_editor_capabilities_separate() {
+        let daemon = thoughtd::discovery::Daemon {
+            url: "http://127.0.0.1:1234/mcp".into(),
+            protocol_version: thoughtd::discovery::PROTOCOL_VERSION,
+            token: "mcp-only".into(),
+            editor_token: "editor-only".into(),
+        };
+
+        let payload = connection_payload(&daemon);
+        assert_eq!(
+            payload.protocol_version,
+            thoughtd::discovery::PROTOCOL_VERSION
+        );
+        assert_eq!(payload.mcp_token, "mcp-only");
+        assert_eq!(payload.editor_token, "editor-only");
+        assert_eq!(payload.sync_url, "ws://127.0.0.1:1234/sync");
+    }
 
     #[test]
     fn export_projection_preserves_title_and_font_size_metadata() {

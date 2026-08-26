@@ -4372,11 +4372,21 @@ dependencies = [
  "base64 0.22.1",
  "serde",
  "serde_json",
+ "sha2",
  "thought-core",
  "thought-markdown",
+ "thought-provenance",
  "thought-schema",
  "thought-store",
  "uuid",
+]
+
+[[package]]
+name = "thought-provenance"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "unicode-segmentation",
 ]
 
 [[package]]

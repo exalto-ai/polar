@@ -13,7 +13,10 @@ pub use thoughtd::sync::Frame;
 pub struct Daemon {
     child: Child,
     pub url: String,
+    pub protocol_version: u32,
+    /// MCP capability, matching the established discovery field name.
     pub token: String,
+    pub editor_token: String,
     pub home: tempfile::TempDir,
     agent: ureq::Agent,
     session: std::cell::RefCell<Option<String>>,
@@ -71,11 +74,27 @@ impl Daemon {
             &std::fs::read_to_string(home.path().join("daemon.json")).expect("discovery file"),
         )
         .expect("valid discovery json");
+        let token = config["token"].as_str().expect("token").to_string();
+        let editor_token = config["editor_token"]
+            .as_str()
+            .expect("editor_token")
+            .to_string();
+        assert_ne!(
+            token, editor_token,
+            "daemon capabilities must be independently generated"
+        );
+        let protocol_version = config["protocol_version"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .expect("protocol_version");
+        assert_eq!(protocol_version, thoughtd::discovery::PROTOCOL_VERSION);
 
         Daemon {
             child,
             url: config["url"].as_str().expect("url").to_string(),
-            token: config["token"].as_str().expect("token").to_string(),
+            protocol_version,
+            token,
+            editor_token,
             home,
             // No idle pooling: a keep-alive socket the server has since closed
             // fails on write with ECONNRESET, which would read as a product bug

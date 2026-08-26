@@ -6,7 +6,13 @@
 import { Awareness } from "y-protocols/awareness";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { decode, encode, Tag } from "./protocol";
+import {
+  decode,
+  decodeSourcedUpdate,
+  encode,
+  LocalInputSource,
+  Tag,
+} from "./protocol";
 import { SyncProvider } from "./provider";
 
 /** A socket we drive by hand, so nothing depends on timing or a real server. */
@@ -68,13 +74,21 @@ function appendParagraph(target: Y.Doc, text: string) {
 }
 
 function sentUpdates(target: FakeSocket): Uint8Array[] {
-  return target.sent.filter((frame) => frame[0] === Tag.Update);
+  return target.sent.filter((frame) => frame[0] === Tag.SourcedUpdate);
 }
 
 function updateBody(frame: Uint8Array): Uint8Array {
   const decoded = decode(frame);
-  if (decoded?.tag !== Tag.Update) throw new Error("expected an Update frame");
-  return decoded.body;
+  const sourced = decoded && decodeSourcedUpdate(decoded);
+  if (!sourced) throw new Error("expected a SourcedUpdate frame");
+  return sourced.update;
+}
+
+function updateSource(frame: Uint8Array) {
+  const decoded = decode(frame);
+  const sourced = decoded && decodeSourcedUpdate(decoded);
+  if (!sourced) throw new Error("expected a SourcedUpdate frame");
+  return sourced.source;
 }
 
 function replicaFrom(frames: Uint8Array[]): Y.Doc {
@@ -135,9 +149,9 @@ describe("connecting", () => {
     other.destroy();
   });
 
-  it("carries the token as a subprotocol, never in the URL", () => {
-    // The browser WebSocket API cannot set headers; a token in the URL would
-    // reach logs and history.
+  it("carries the editor capability as a subprotocol, never in the URL", () => {
+    // The browser WebSocket API cannot set headers; an editor capability in the
+    // URL would reach logs and history.
     expect(socket.url).not.toContain("tok");
     expect(socket.protocols).toContain("thought.token.tok");
     expect(socket.protocols).toContain("thought.v1");
@@ -226,7 +240,8 @@ describe("echo and origin", () => {
     const element = new Y.XmlElement("paragraph");
     doc.getXmlFragment("content").push([element]);
     await settle();
-    expect(socket.sent.some((f) => f[0] === Tag.Update)).toBe(true);
+    expect(socket.sent.some((f) => f[0] === Tag.SourcedUpdate)).toBe(true);
+    expect(updateSource(sentUpdates(socket)[0])).toBe(LocalInputSource.Unknown);
   });
 
   it("ignores frames for other documents", async () => {
@@ -238,6 +253,71 @@ describe("echo and origin", () => {
 });
 
 describe("outbound coalescing", () => {
+  it("coalesces adjacent equal sources without crossing source boundaries", () => {
+    socket.sent.length = 0;
+
+    provider.withLocalInputSource(LocalInputSource.Written, () => {
+      appendParagraph(doc, "written head");
+    });
+    provider.withLocalInputSource(LocalInputSource.Paste, () => {
+      appendParagraph(doc, "pasted one");
+      appendParagraph(doc, "pasted two");
+    });
+    provider.withLocalInputSource(LocalInputSource.Written, () => {
+      appendParagraph(doc, "written tail");
+    });
+
+    // The first source run is immutable in flight. The two adjacent paste
+    // updates merge, while the later written run remains a separate entry.
+    expect(provider.pendingOutbound).toBe(3);
+    expect(sentUpdates(socket)).toHaveLength(1);
+    expect(updateSource(sentUpdates(socket)[0])).toBe(LocalInputSource.Written);
+
+    socket.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
+    expect(sentUpdates(socket)).toHaveLength(2);
+    expect(updateSource(sentUpdates(socket)[1])).toBe(LocalInputSource.Paste);
+
+    socket.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
+    expect(sentUpdates(socket)).toHaveLength(3);
+    expect(updateSource(sentUpdates(socket)[2])).toBe(LocalInputSource.Written);
+
+    const replica = replicaFrom(sentUpdates(socket));
+    const content = replica.getXmlFragment("content").toString();
+    expect(content).toContain("written head");
+    expect(content).toContain("pasted one");
+    expect(content).toContain("pasted two");
+    expect(content).toContain("written tail");
+  });
+
+  it("merges an interrupted head only with an adjacent run of the same source", async () => {
+    vi.useFakeTimers();
+    socket.sent.length = 0;
+
+    provider.withLocalInputSource(LocalInputSource.Written, () => {
+      appendParagraph(doc, "head");
+      appendParagraph(doc, "same-source tail");
+    });
+    provider.withLocalInputSource(LocalInputSource.Paste, () => {
+      appendParagraph(doc, "different-source tail");
+    });
+    expect(provider.pendingOutbound).toBe(3);
+
+    socket.close();
+    // The unacknowledged written head and adjacent written tail are both
+    // unsent now, so they become one run. Paste remains separate.
+    expect(provider.pendingOutbound).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(250);
+    const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
+    reconnected.open();
+    expect(sentUpdates(reconnected)).toHaveLength(1);
+    expect(updateSource(sentUpdates(reconnected)[0])).toBe(LocalInputSource.Written);
+
+    reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
+    expect(sentUpdates(reconnected)).toHaveLength(2);
+    expect(updateSource(sentUpdates(reconnected)[1])).toBe(LocalInputSource.Paste);
+  });
+
   it("preserves the in-flight head and merges every later edit into one tail", () => {
     const emitted: Uint8Array[] = [];
     doc.on("update", (update) => emitted.push(update.slice()));
@@ -327,13 +407,13 @@ describe("durable save status", () => {
 
     // Keep exactly one update in flight. This makes an Error or ACK refer to a
     // known queue entry instead of relying on every response being successful.
-    expect(socket.sent.filter((frame) => frame[0] === Tag.Update)).toHaveLength(1);
+    expect(sentUpdates(socket)).toHaveLength(1);
     expect(provider.hasPendingChanges).toBe(true);
     expect(seen).toEqual(["saved", "saving"]);
 
     socket.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
     expect(seen[seen.length - 1]).toBe("saving");
-    expect(socket.sent.filter((frame) => frame[0] === Tag.Update)).toHaveLength(2);
+    expect(sentUpdates(socket)).toHaveLength(2);
 
     socket.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
     expect(seen[seen.length - 1]).toBe("saved");
@@ -361,7 +441,7 @@ describe("durable save status", () => {
     socket.sent.length = 0;
 
     doc.getXmlFragment("content").push([new Y.XmlElement("paragraph")]);
-    expect(socket.sent.filter((frame) => frame[0] === Tag.Update)).toHaveLength(1);
+    expect(sentUpdates(socket)).toHaveLength(1);
 
     socket.close();
     doc.getXmlFragment("content").push([new Y.XmlElement("paragraph")]);
@@ -371,11 +451,11 @@ describe("durable save status", () => {
     const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
     reconnected.open();
     expect(reconnected.sent[0][0]).toBe(Tag.Subscribe);
-    expect(reconnected.sent.filter((frame) => frame[0] === Tag.Update)).toHaveLength(1);
+    expect(sentUpdates(reconnected)).toHaveLength(1);
     expect(seen[seen.length - 1]).toBe("saving");
 
     reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
-    expect(reconnected.sent.filter((frame) => frame[0] === Tag.Update)).toHaveLength(1);
+    expect(sentUpdates(reconnected)).toHaveLength(1);
     expect(seen[seen.length - 1]).toBe("saved");
   });
 
@@ -388,21 +468,21 @@ describe("durable save status", () => {
 
     doc.getXmlFragment("content").push([new Y.XmlElement("paragraph")]);
     doc.getXmlFragment("content").push([new Y.XmlElement("paragraph")]);
-    expect(socket.sent.filter((frame) => frame[0] === Tag.Update)).toHaveLength(1);
+    expect(sentUpdates(socket)).toHaveLength(1);
 
     socket.deliver(encode(Tag.Error, "doc-1", new TextEncoder().encode("disk full")));
     socket.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
     expect(seen[seen.length - 1]).toBe("error");
     expect(provider.hasPendingChanges).toBe(true);
-    expect(socket.sent.filter((frame) => frame[0] === Tag.Update)).toHaveLength(1);
+    expect(sentUpdates(socket)).toHaveLength(1);
 
     await vi.advanceTimersByTimeAsync(1_000);
     const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
     reconnected.open();
-    expect(reconnected.sent.filter((frame) => frame[0] === Tag.Update)).toHaveLength(1);
+    expect(sentUpdates(reconnected)).toHaveLength(1);
 
     reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
-    expect(reconnected.sent.filter((frame) => frame[0] === Tag.Update)).toHaveLength(1);
+    expect(sentUpdates(reconnected)).toHaveLength(1);
     expect(provider.hasPendingChanges).toBe(false);
     expect(seen[seen.length - 1]).toBe("saved");
   });
@@ -420,7 +500,7 @@ describe("durable save status", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
     reconnected.open();
-    expect(reconnected.sent.filter((frame) => frame[0] === Tag.Update)).toHaveLength(1);
+    expect(sentUpdates(reconnected)).toHaveLength(1);
   });
 
   it("keeps a persistence error visible when more edits arrive during backoff", () => {

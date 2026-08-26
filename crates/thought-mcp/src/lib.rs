@@ -4,15 +4,25 @@
 //! tested with no window, no server, and no client — which is the whole claim
 //! of AD-2.
 
+pub mod lineage;
+mod mutation;
+pub mod provenance_hash;
+pub mod provenance_store;
 mod workspace;
 
 /// The actor id every editor window writes under, named here so the window can
 /// be told who it is rather than hardcoding a string that `sync.rs` owns.
 pub const EDITOR_ACTOR_ID: &str = "human:editor";
 
+pub use mutation::MutationContext;
+pub use thought_provenance::{
+    Assurance, CurrentSourceSummary, GroupedSourceContribution, Ingress, LiveLineageSpan,
+    SourceContribution, SourceDescriptor, SourceGroup, SourceId,
+};
+
 pub use workspace::{
-    ActorRef, ActorSummary, BlockAttribution, BlockSpan, DocumentSummary, DocumentView,
-    EditOutcome, SearchHit, TextEdit, Workspace, WorkspaceError,
+    ActorRef, ActorSummary, BlockAttribution, BlockSpan, DocumentLineage, DocumentSummary,
+    DocumentView, EditOutcome, SearchHit, TextEdit, Workspace, WorkspaceError,
 };
 
 #[cfg(test)]

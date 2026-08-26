@@ -25,6 +25,7 @@ fn an_agent_drives_the_daemon_over_mcp() {
         "create_document",
         "read_document",
         "replace_block",
+        "document_lineage",
         "search",
     ] {
         assert!(
@@ -85,6 +86,35 @@ fn an_agent_drives_the_daemon_over_mcp() {
 }
 
 #[test]
+fn an_mcp_caller_cannot_promote_reported_provenance_with_kind_human() {
+    let daemon = Daemon::start();
+    daemon.connect();
+
+    let doc = daemon.call(
+        "create_document",
+        serde_json::json!({
+            "title": "Reported review",
+            "agent": "Claude",
+            "model": "claimed-model",
+            "session": "spoof-test",
+            "kind": "human"
+        }),
+    );
+    let doc_id = doc["doc_id"].as_str().expect("doc_id");
+
+    // The legacy actor rail still honors `kind` while it remains compatible.
+    let actors = daemon.call("document_actors", serde_json::json!({ "doc_id": doc_id }));
+    assert_eq!(actors["actors"][0]["kind"], "human");
+
+    // Provenance is owned by the MCP transport, not by caller arguments.
+    let lineage = daemon.call("document_lineage", serde_json::json!({ "doc_id": doc_id }));
+    let source = &lineage["summary"]["contributions"][0]["source"];
+    assert_eq!(source["label"], "Claude (reported)");
+    assert_eq!(source["ingress"], "mcp");
+    assert_eq!(source["assurance"], "reported");
+}
+
+#[test]
 fn the_endpoint_refuses_an_unauthenticated_client() {
     let daemon = Daemon::start();
     // A dedicated agent with no idle pooling. The global agent reuses
@@ -114,19 +144,57 @@ fn the_endpoint_refuses_an_unauthenticated_client() {
 }
 
 #[test]
-fn discovery_probe_verifies_the_published_bearer_token() {
+fn the_mcp_endpoint_rejects_the_editor_capability() {
+    let daemon = Daemon::start();
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .max_idle_connections(0)
+            .build(),
+    );
+    let response = agent
+        .post(&daemon.url)
+        .header("Authorization", &format!("Bearer {}", daemon.editor_token))
+        .header("Accept", "application/json, text/event-stream")
+        .send_json(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "wrong-capability", "version": "1"}}
+        }));
+
+    match response {
+        Err(ureq::Error::StatusCode(401)) => {}
+        other => panic!("expected editor capability to receive 401 from MCP, got {other:?}"),
+    }
+}
+
+#[test]
+fn discovery_probe_verifies_the_published_capabilities() {
     let daemon = Daemon::start();
     let published = PublishedDaemon {
         url: daemon.url.clone(),
+        protocol_version: daemon.protocol_version,
         token: daemon.token.clone(),
+        editor_token: daemon.editor_token.clone(),
     };
     assert!(discovery::authenticated_reachable(&published));
+    assert!(discovery::editor_authenticated_reachable(&published));
 
     let mut wrong_token = published;
     wrong_token.token.push_str("-wrong");
     assert!(
         !discovery::authenticated_reachable(&wrong_token),
         "an unrelated or stale bearer credential must not validate the endpoint"
+    );
+    assert!(
+        discovery::editor_authenticated_reachable(&wrong_token),
+        "the editor capability remains independently valid"
+    );
+
+    wrong_token.token = daemon.token.clone();
+    wrong_token.editor_token.push_str("-wrong");
+    assert!(
+        !discovery::editor_authenticated_reachable(&wrong_token),
+        "an unrelated editor capability must not validate the sync endpoint"
     );
 }
 
@@ -157,7 +225,46 @@ fn the_stdio_shim_refuses_to_replace_a_daemon_that_rejects_its_token() {
 
     let original_daemon = PublishedDaemon {
         url: daemon.url.clone(),
+        protocol_version: daemon.protocol_version,
         token: daemon.token.clone(),
+        editor_token: daemon.editor_token.clone(),
+    };
+    assert!(
+        discovery::authenticated_reachable(&original_daemon),
+        "the shim must leave the existing process running"
+    );
+}
+
+#[test]
+fn the_stdio_shim_refuses_legacy_single_token_discovery() {
+    let daemon = Daemon::start();
+    let published = daemon.home.path().join("daemon.json");
+    let mut legacy: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&published).expect("discovery is readable"))
+            .expect("discovery is json");
+    legacy
+        .as_object_mut()
+        .expect("discovery object")
+        .remove("editor_token");
+    std::fs::write(&published, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
+        .env("THOUGHT_HOME", daemon.home.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn stdio shim");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("legacy or incompatible discovery"),
+        "the failure must identify incompatible discovery: {stderr}"
+    );
+
+    let original_daemon = PublishedDaemon {
+        url: daemon.url.clone(),
+        protocol_version: daemon.protocol_version,
+        token: daemon.token.clone(),
+        editor_token: daemon.editor_token.clone(),
     };
     assert!(
         discovery::authenticated_reachable(&original_daemon),

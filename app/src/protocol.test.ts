@@ -7,7 +7,14 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { decode, encode, Tag } from "./protocol";
+import {
+  decode,
+  decodeSourcedUpdate,
+  encode,
+  encodeSourcedUpdate,
+  LocalInputSource,
+  Tag,
+} from "./protocol";
 
 type Fixture = {
   frames: {
@@ -33,6 +40,7 @@ const TAG_BY_KIND: Record<string, number> = {
   error: Tag.Error,
   presence: Tag.Presence,
   ack: Tag.Ack,
+  sourced_update: Tag.SourcedUpdate,
 };
 
 describe("wire format agrees with the daemon", () => {
@@ -82,5 +90,37 @@ describe("malformed frames", () => {
     const decoded = decode(view);
     expect(decoded?.docId).toBe("doc-1");
     expect([...(decoded?.body ?? [])]).toEqual([1, 2, 3]);
+  });
+});
+
+describe("source-aware updates", () => {
+  it.each([
+    LocalInputSource.Unknown,
+    LocalInputSource.Written,
+    LocalInputSource.Paste,
+    LocalInputSource.Import,
+    LocalInputSource.Command,
+  ])("round-trips the closed %s source", (source) => {
+    const encoded = encodeSourcedUpdate("doc-1", source, new Uint8Array([9, 8, 7]));
+    const frame = decode(encoded);
+    expect(frame?.tag).toBe(Tag.SourcedUpdate);
+    expect(decodeSourcedUpdate(frame!)).toEqual({
+      source,
+      update: new Uint8Array([9, 8, 7]),
+    });
+  });
+
+  it("rejects missing and unknown source bytes", () => {
+    const missing = decode(encode(Tag.SourcedUpdate, "doc-1", new Uint8Array()));
+    const unknown = decode(
+      encode(Tag.SourcedUpdate, "doc-1", new Uint8Array([0x7f, 1, 2, 3])),
+    );
+    expect(decodeSourcedUpdate(missing!)).toBeNull();
+    expect(decodeSourcedUpdate(unknown!)).toBeNull();
+  });
+
+  it("does not reinterpret a legacy update as sourced", () => {
+    const legacy = decode(encode(Tag.Update, "doc-1", new Uint8Array([1, 2, 3])));
+    expect(decodeSourcedUpdate(legacy!)).toBeNull();
   });
 });

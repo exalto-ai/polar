@@ -1,11 +1,28 @@
+use crate::lineage::{SnapshotError, block_snapshots};
+use crate::mutation::{MutationContext, action_name, assurance_name, ingress_name};
+use crate::provenance_hash::{
+    ActorEventMetadata, CURRENT_EVENT_CHAIN_VERSION, EventAction, EventHashInput, EventReferences,
+    LineageHashInput, UpdateLogEntry, document_digest, empty_update_log_digest, event_chain_digest,
+    live_lineage_digest, update_log_digest,
+};
+use crate::provenance_store::{
+    ProvenanceStoreError, deltas_from_store, deltas_to_store, lineage_from_store, spans_to_store,
+};
 use base64::Engine;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use thought_core::{BlockError, Document, Position};
 use thought_markdown::{from_markdown, to_markdown_with_spans};
+use thought_provenance::{
+    Assurance, CurrentSourceSummary, Ingress, LineageState, ReconcileError, SourceId,
+};
 use thought_schema::{Node, Schema, normalize};
-use thought_store::{Actor, InitialDocument, Origin, Store};
+use thought_store::{
+    Actor, BlockTouchInput, InitialProvenanceDocumentInput, LineageRebuildInput, Origin,
+    ProvenanceCommitInput, ProvenanceEventInput, ProvenanceRecordInput, ProvenanceUpdateInput,
+    ReadyLineageInput, Store,
+};
 
 /// The caller, as asserted by the MCP session. Not authenticated (AD-6) — this
 /// is identity so that attribution and per-run revert have something to key on.
@@ -94,6 +111,18 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
+/// Current wording contribution under the versioned alignment algorithm.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DocumentLineage {
+    pub algorithm_version: u32,
+    /// V1 has no transaction-range anchors. Equal text is preserved through a
+    /// deterministic semantic alignment, but duplicate occurrences with
+    /// different sources can be observationally ambiguous.
+    pub alignment: &'static str,
+    pub summary: CurrentSourceSummary,
+    pub spans: Vec<thought_provenance::LiveLineageSpan>,
+}
+
 /// The three parts of a find-and-replace, grouped so the call does not grow an
 /// unreadable positional tail.
 #[derive(Debug, Clone, Copy)]
@@ -151,6 +180,9 @@ pub enum WorkspaceError {
     InvalidMarkdown(Vec<String>),
     NotFound(String),
     Storage(thought_store::SqlError),
+    Snapshot(SnapshotError),
+    Reconcile(ReconcileError),
+    ProvenanceStore(ProvenanceStoreError),
 }
 
 impl std::fmt::Display for WorkspaceError {
@@ -167,6 +199,9 @@ impl std::fmt::Display for WorkspaceError {
             }
             WorkspaceError::NotFound(what) => write!(f, "{what}"),
             WorkspaceError::Storage(e) => write!(f, "storage: {e}"),
+            WorkspaceError::Snapshot(e) => write!(f, "provenance snapshot: {e}"),
+            WorkspaceError::Reconcile(e) => write!(f, "provenance reconciliation: {e}"),
+            WorkspaceError::ProvenanceStore(e) => write!(f, "persisted provenance: {e}"),
         }
     }
 }
@@ -185,8 +220,33 @@ impl From<BlockError> for WorkspaceError {
     }
 }
 
+impl From<SnapshotError> for WorkspaceError {
+    fn from(e: SnapshotError) -> Self {
+        WorkspaceError::Snapshot(e)
+    }
+}
+
+impl From<ReconcileError> for WorkspaceError {
+    fn from(e: ReconcileError) -> Self {
+        WorkspaceError::Reconcile(e)
+    }
+}
+
+impl From<ProvenanceStoreError> for WorkspaceError {
+    fn from(e: ProvenanceStoreError) -> Self {
+        WorkspaceError::ProvenanceStore(e)
+    }
+}
+
 /// Compact updates into a snapshot after this many, per AD-13.
 const SNAPSHOT_EVERY: i64 = 200;
+
+/// Frozen V1 semantic reconciliation version.
+///
+/// Do not increment this independently. A future evidence-suite version needs
+/// a schema migration plus version-dispatched verification and reconciliation
+/// for already-recorded events before this value can change safely.
+const LINEAGE_ALGORITHM_VERSION: u32 = 1;
 
 /// Store and document cache live under **one** mutex rather than two.
 ///
@@ -205,6 +265,8 @@ struct Inner {
     /// rather than re-deriving it means a commit hashes the tree it has already
     /// built for reindexing, instead of serialising the document a second time.
     prints: HashMap<String, HashMap<String, u64>>,
+    /// Current semantic lineage, hydrated and verified with each document.
+    lineages: HashMap<String, LineageState>,
     /// Deltas committed under the current lock, drained and delivered to the
     /// observer once it is released — user code must not run under our mutex.
     pending: Vec<(String, Vec<u8>, ActorRef)>,
@@ -229,6 +291,7 @@ impl Workspace {
                 store: Store::open(path)?,
                 docs: HashMap::new(),
                 prints: HashMap::new(),
+                lineages: HashMap::new(),
                 pending: Vec::new(),
             }),
             observer: Mutex::new(None),
@@ -241,6 +304,7 @@ impl Workspace {
                 store: Store::open_in_memory()?,
                 docs: HashMap::new(),
                 prints: HashMap::new(),
+                lineages: HashMap::new(),
                 pending: Vec::new(),
             }),
             observer: Mutex::new(None),
@@ -284,6 +348,16 @@ impl Workspace {
         title: &str,
         actor: &ActorRef,
     ) -> Result<DocumentView, WorkspaceError> {
+        let context = default_context(actor, MutationContext::entered());
+        self.create_document_with_context(title, actor, &context)
+    }
+
+    pub fn create_document_with_context(
+        &self,
+        title: &str,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<DocumentView, WorkspaceError> {
         // Seed the title as a heading rather than storing metadata that the
         // first read would immediately discard. Always leave a paragraph after
         // it so there is somewhere to start typing.
@@ -295,7 +369,7 @@ impl Workspace {
             );
         }
         blocks.push(Node::element("paragraph", vec![]));
-        self.create_document_tree(Node::element("doc", blocks), actor)
+        self.create_document_tree(Node::element("doc", blocks), actor, context)
     }
 
     /// Import a Markdown snapshot as one new collaborative document.
@@ -310,6 +384,17 @@ impl Workspace {
         markdown: &str,
         actor: &ActorRef,
     ) -> Result<DocumentView, WorkspaceError> {
+        let context = default_context(actor, MutationContext::imported());
+        self.create_document_from_markdown_with_context(_title, markdown, actor, &context)
+    }
+
+    pub fn create_document_from_markdown_with_context(
+        &self,
+        _title: &str,
+        markdown: &str,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<DocumentView, WorkspaceError> {
         let mut tree = normalize(&from_markdown(markdown.trim_start_matches('\u{feff}')));
         // ProseMirror requires at least one block. An empty Markdown file maps
         // to the same truly blank document as File > New.
@@ -321,13 +406,14 @@ impl Workspace {
                 errs.iter().map(ToString::to_string).collect(),
             ));
         }
-        self.create_document_tree(tree, actor)
+        self.create_document_tree(tree, actor, context)
     }
 
     fn create_document_tree(
         &self,
         tree: Node,
         actor: &ActorRef,
+        context: &MutationContext,
     ) -> Result<DocumentView, WorkspaceError> {
         let tree = normalize(&tree);
         if let Err(errs) = Schema::v0().validate(&tree) {
@@ -337,34 +423,75 @@ impl Workspace {
         }
 
         let doc_id = self.with(|inner| -> Result<String, WorkspaceError> {
-            inner.register(actor)?;
             let doc_id = uuid::Uuid::now_v7().to_string();
             let doc = Document::new();
             doc.set_document(&tree);
             let state = doc.encode_state();
             let (markdown, _) = to_markdown_with_spans(&tree);
             let title = derive_title(&tree);
+            let snapshots = block_snapshots(&doc, &tree)?;
+            let event_id = inner.store.next_provenance_event_id()?;
+            let update_seq = inner.store.next_update_seq()?;
+            let source_id = source_id(event_id)?;
+            let source = context.source(source_id);
+            let empty = LineageState::seed(vec![], source.clone())?;
+            let reconciled = empty.reconcile(snapshots.clone(), source)?;
+            let at = now_ms();
+            let update_log_root =
+                extend_update_log_root(None, &doc_id, update_seq, &state, actor, at)?;
+            let event = event_input(EventBuild {
+                event_id,
+                update_seq: Some(update_seq),
+                doc_id: &doc_id,
+                actor: Some(actor),
+                context,
+                action: context.action(),
+                before_hash: document_digest(&[], None),
+                after_hash: document_digest(&snapshots, doc.deleted_at()),
+                update_log_root,
+                previous_hash: None,
+                deltas: &reconciled.deltas,
+                created_at: at,
+                recorded_at: at,
+            })?;
+            let spans = spans_to_store(reconciled.state.spans())?;
+            let lineage =
+                ready_lineage(&doc_id, update_seq, event_id, reconciled.state.spans(), at)?;
             let block_ids = doc
                 .blocks()
                 .into_iter()
                 .map(|block| block.block_id)
                 .collect::<Vec<_>>();
-            let attributed_at = now_ms();
-            inner.store.create_initial_document(InitialDocument {
-                id: &doc_id,
-                title: &title,
-                payload: &state,
-                actor_id: &actor.id,
-                origin: actor.origin(),
-                session_id: actor.session_id.as_deref(),
-                markdown: &markdown,
-                block_ids: &block_ids,
-                attributed_at,
-            })?;
+            inner.store.create_initial_document_with_provenance(
+                &InitialProvenanceDocumentInput {
+                    id: doc_id.clone(),
+                    title,
+                    markdown,
+                    created_at: at,
+                    updated_at: at,
+                    actor: store_actor(actor),
+                    update: ProvenanceUpdateInput {
+                        expected_seq: update_seq,
+                        payload: state.clone(),
+                        actor_id: actor.id.clone(),
+                        origin: actor.origin(),
+                        session_id: actor.session_id.clone(),
+                        created_at: at,
+                    },
+                    event,
+                    changes: deltas_to_store(source_id, &reconciled.deltas)?,
+                    spans,
+                    lineage,
+                    block_ids,
+                    attributed_at: at,
+                },
+            )?;
 
             let prints = Inner::fingerprints(&doc);
             inner.docs.insert(doc_id.clone(), doc);
             inner.prints.insert(doc_id.clone(), prints);
+            inner.lineages.insert(doc_id.clone(), reconciled.state);
+            inner.pending.push((doc_id.clone(), state, actor.clone()));
             Ok(doc_id)
         })?;
         self.read_document(&doc_id)
@@ -447,6 +574,19 @@ impl Workspace {
         version: Option<&str>,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
+        let context = default_context(actor, MutationContext::entered());
+        self.replace_block_with_context(doc_id, block_id, markdown, version, actor, &context)
+    }
+
+    pub fn replace_block_with_context(
+        &self,
+        doc_id: &str,
+        block_id: &str,
+        markdown: &str,
+        version: Option<&str>,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<EditOutcome, WorkspaceError> {
         let nodes = parse_blocks(markdown)?;
         let Some(first) = nodes.first() else {
             return Err(WorkspaceError::InvalidMarkdown(vec![
@@ -454,18 +594,17 @@ impl Workspace {
             ]));
         };
         self.with(|inner| {
-            inner.register(actor)?;
-            let doc = inner.doc(doc_id)?;
-            let before = doc.state_vector();
-            let warnings = staleness(doc, version);
-
-            let block = doc.replace_block(block_id, first)?;
-            // Extra blocks in the payload follow the one replaced rather than
-            // being silently dropped.
-            if nodes.len() > 1 {
-                doc.insert_blocks(&Position::After(block.block_id.clone()), &nodes[1..])?;
-            }
-            let version = inner.commit(doc_id, &before, actor)?;
+            let ((block, warnings), version) =
+                inner.mutate(doc_id, actor, context, |doc| -> Result<_, WorkspaceError> {
+                    let warnings = staleness(doc, version);
+                    let block = doc.replace_block(block_id, first)?;
+                    // Extra blocks in the payload follow the one replaced rather than
+                    // being silently dropped.
+                    if nodes.len() > 1 {
+                        doc.insert_blocks(&Position::After(block.block_id.clone()), &nodes[1..])?;
+                    }
+                    Ok((block, warnings))
+                })?;
             Ok(EditOutcome {
                 doc_id: doc_id.into(),
                 block_id: Some(block.block_id),
@@ -483,14 +622,27 @@ impl Workspace {
         version: Option<&str>,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
+        let context = default_context(actor, MutationContext::entered());
+        self.insert_blocks_with_context(doc_id, after, markdown, version, actor, &context)
+    }
+
+    pub fn insert_blocks_with_context(
+        &self,
+        doc_id: &str,
+        after: &Position,
+        markdown: &str,
+        version: Option<&str>,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<EditOutcome, WorkspaceError> {
         let nodes = parse_blocks(markdown)?;
         self.with(|inner| {
-            inner.register(actor)?;
-            let doc = inner.doc(doc_id)?;
-            let before = doc.state_vector();
-            let warnings = staleness(doc, version);
-            let created = doc.insert_blocks(after, &nodes)?;
-            let version = inner.commit(doc_id, &before, actor)?;
+            let ((created, warnings), version) =
+                inner.mutate(doc_id, actor, context, |doc| -> Result<_, WorkspaceError> {
+                    let warnings = staleness(doc, version);
+                    let created = doc.insert_blocks(after, &nodes)?;
+                    Ok((created, warnings))
+                })?;
             Ok(EditOutcome {
                 doc_id: doc_id.into(),
                 block_id: created.first().map(|b| b.block_id.clone()),
@@ -507,13 +659,25 @@ impl Workspace {
         version: Option<&str>,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
+        let context = default_context(actor, MutationContext::command());
+        self.delete_block_with_context(doc_id, block_id, version, actor, &context)
+    }
+
+    pub fn delete_block_with_context(
+        &self,
+        doc_id: &str,
+        block_id: &str,
+        version: Option<&str>,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<EditOutcome, WorkspaceError> {
         self.with(|inner| {
-            inner.register(actor)?;
-            let doc = inner.doc(doc_id)?;
-            let before = doc.state_vector();
-            let warnings = staleness(doc, version);
-            doc.delete_block(block_id)?;
-            let version = inner.commit(doc_id, &before, actor)?;
+            let (warnings, version) =
+                inner.mutate(doc_id, actor, context, |doc| -> Result<_, WorkspaceError> {
+                    let warnings = staleness(doc, version);
+                    doc.delete_block(block_id)?;
+                    Ok(warnings)
+                })?;
             Ok(EditOutcome {
                 doc_id: doc_id.into(),
                 block_id: None,
@@ -536,6 +700,19 @@ impl Workspace {
         edit: &TextEdit<'_>,
         version: Option<&str>,
         actor: &ActorRef,
+    ) -> Result<EditOutcome, WorkspaceError> {
+        let context = default_context(actor, MutationContext::entered());
+        self.replace_text_with_context(doc_id, block_id, edit, version, actor, &context)
+    }
+
+    pub fn replace_text_with_context(
+        &self,
+        doc_id: &str,
+        block_id: &str,
+        edit: &TextEdit<'_>,
+        version: Option<&str>,
+        actor: &ActorRef,
+        context: &MutationContext,
     ) -> Result<EditOutcome, WorkspaceError> {
         let TextEdit {
             find,
@@ -587,7 +764,7 @@ impl Workspace {
             None => current.replace(find, replace),
         };
 
-        self.replace_block(doc_id, block_id, &updated, version, actor)
+        self.replace_block_with_context(doc_id, block_id, &updated, version, actor, context)
     }
 
     /// Everything this replica has that the holder of `state_vector` lacks.
@@ -608,9 +785,18 @@ impl Workspace {
         update: &[u8],
         actor: &ActorRef,
     ) -> Result<Option<String>, WorkspaceError> {
-        self.with(|inner| {
-            inner.register(actor)?;
+        let context = default_context(actor, MutationContext::unknown());
+        self.apply_peer_update_with_context(doc_id, update, actor, &context)
+    }
 
+    pub fn apply_peer_update_with_context(
+        &self,
+        doc_id: &str,
+        update: &[u8],
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<Option<String>, WorkspaceError> {
+        self.with(|inner| {
             // Apply to a candidate first. If SQLite refuses the commit, the
             // cached authority must remain at its persisted state. Mutating the
             // cached document in place made a retry look like a no-op, which
@@ -621,7 +807,6 @@ impl Workspace {
             candidate.apply_update(&current_state).map_err(|e| {
                 WorkspaceError::NotFound(format!("could not clone document state: {e}"))
             })?;
-            let before = candidate.state_vector();
             candidate
                 .apply_update(update)
                 .map_err(|e| WorkspaceError::NotFound(format!("bad update: {e}")))?;
@@ -633,29 +818,8 @@ impl Workspace {
                 return Ok(None);
             }
 
-            let original = inner
-                .docs
-                .insert(doc_id.to_string(), candidate)
-                .expect("document was loaded above");
-            let original_prints = inner.prints.get(doc_id).cloned();
-            let pending_before = inner.pending.len();
-
-            match inner.commit(doc_id, &before, actor) {
-                Ok(version) => Ok(Some(version)),
-                Err(error) => {
-                    inner.docs.insert(doc_id.to_string(), original);
-                    match original_prints {
-                        Some(prints) => {
-                            inner.prints.insert(doc_id.to_string(), prints);
-                        }
-                        None => {
-                            inner.prints.remove(doc_id);
-                        }
-                    }
-                    inner.pending.truncate(pending_before);
-                    Err(error)
-                }
-            }
+            let version = inner.commit_candidate(doc_id, candidate, actor, context)?;
+            Ok(Some(version))
         })
     }
 
@@ -670,14 +834,23 @@ impl Workspace {
         deleted: bool,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
+        let context = default_context(actor, MutationContext::command());
+        self.set_document_deleted_with_context(doc_id, deleted, actor, &context)
+    }
+
+    pub fn set_document_deleted_with_context(
+        &self,
+        doc_id: &str,
+        deleted: bool,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<EditOutcome, WorkspaceError> {
         self.with(|inner| {
-            inner.register(actor)?;
-            let doc = inner.doc(doc_id)?;
-            let before = doc.state_vector();
-            doc.set_deleted_at(deleted.then(now_ms));
-            let at = doc.deleted_at();
-            let version = inner.commit(doc_id, &before, actor)?;
-            inner.store.cache_deleted_at(doc_id, at)?;
+            let (_, version) =
+                inner.mutate(doc_id, actor, context, |doc| -> Result<_, WorkspaceError> {
+                    doc.set_deleted_at(deleted.then(now_ms));
+                    Ok(())
+                })?;
             Ok(EditOutcome {
                 doc_id: doc_id.into(),
                 block_id: None,
@@ -706,6 +879,23 @@ impl Workspace {
                     edits: a.edits,
                 })
                 .collect())
+        })
+    }
+
+    /// Current source spans and grapheme counts for the visible wording.
+    pub fn document_lineage(&self, doc_id: &str) -> Result<DocumentLineage, WorkspaceError> {
+        self.with(|inner| {
+            inner.doc(doc_id)?;
+            let lineage = inner
+                .lineages
+                .get(doc_id)
+                .expect("document hydration installs lineage");
+            Ok(DocumentLineage {
+                algorithm_version: LINEAGE_ALGORITHM_VERSION,
+                alignment: "deterministic_inference",
+                summary: lineage.current_source_summary()?,
+                spans: lineage.spans().to_vec(),
+            })
         })
     }
 
@@ -761,15 +951,23 @@ impl Workspace {
 }
 
 impl Inner {
-    fn register(&self, actor: &ActorRef) -> Result<(), WorkspaceError> {
-        self.store.upsert_actor(&Actor {
-            id: actor.id.clone(),
-            kind: actor.kind.clone(),
-            display_name: actor.display_name.clone(),
-            model: actor.model.clone(),
-            color: color_for(&actor.id),
+    /// Run a mutation against a disposable replica, then install it only after
+    /// the complete document and provenance transaction commits.
+    fn mutate<T>(
+        &mut self,
+        doc_id: &str,
+        actor: &ActorRef,
+        context: &MutationContext,
+        operation: impl FnOnce(&Document) -> Result<T, WorkspaceError>,
+    ) -> Result<(T, String), WorkspaceError> {
+        let current_state = self.doc(doc_id)?.encode_state();
+        let candidate = Document::new();
+        candidate.apply_update(&current_state).map_err(|error| {
+            WorkspaceError::NotFound(format!("could not clone document state: {error}"))
         })?;
-        Ok(())
+        let value = operation(&candidate)?;
+        let version = self.commit_candidate(doc_id, candidate, actor, context)?;
+        Ok((value, version))
     }
 
     /// Documents are hydrated on first touch, not at boot.
@@ -798,13 +996,279 @@ impl Inner {
             let prints = Self::fingerprints(self.docs.get(doc_id).expect("just inserted"));
             self.prints.insert(doc_id.to_string(), prints);
 
-            // Documents written before this table existed have a full log and
-            // no attribution. Replay pays that off once.
-            if !self.store.has_provenance(doc_id)? {
-                self.backfill(doc_id)?;
+            // Compatibility backfill and semantic-lineage hydration are one
+            // logical cache installation. If either fails, do not leave a
+            // document-only half-cache that skips verification on retry and
+            // later panics when a mutation expects lineage to exist.
+            let hydration = (|| {
+                // Documents written before the block table existed have a
+                // full log and no compatibility attribution. Replay pays that
+                // off once.
+                if !self.store.has_provenance(doc_id)? {
+                    self.backfill(doc_id)?;
+                }
+                self.hydrate_lineage(doc_id)
+            })();
+            if let Err(error) = hydration {
+                self.docs.remove(doc_id);
+                self.prints.remove(doc_id);
+                self.lineages.remove(doc_id);
+                return Err(error);
             }
         }
         Ok(self.docs.get(doc_id).expect("just inserted"))
+    }
+
+    fn hydrate_lineage(&mut self, doc_id: &str) -> Result<(), WorkspaceError> {
+        let tree = normalize(
+            &self
+                .docs
+                .get(doc_id)
+                .expect("document is loaded before lineage")
+                .read(),
+        );
+        let snapshots = block_snapshots(self.docs.get(doc_id).expect("document is loaded"), &tree)?;
+        let events = self.store.provenance_events(doc_id)?;
+        if events.is_empty() {
+            let lineage = self.seed_legacy_lineage(doc_id, snapshots)?;
+            self.lineages.insert(doc_id.to_string(), lineage);
+            return Ok(());
+        }
+
+        verify_stored_chain(&self.store, doc_id, &events)?;
+
+        if let Some(lineage) = self.load_lineage_cache(doc_id, &snapshots, &events)? {
+            self.lineages.insert(doc_id.to_string(), lineage);
+            return Ok(());
+        }
+
+        let lineage = self.rebuild_lineage(doc_id, &events)?;
+        self.lineages.insert(doc_id.to_string(), lineage);
+        Ok(())
+    }
+
+    fn load_lineage_cache(
+        &self,
+        doc_id: &str,
+        snapshots: &[thought_provenance::BlockSnapshot],
+        events: &[thought_store::ProvenanceEventRow],
+    ) -> Result<Option<LineageState>, WorkspaceError> {
+        let Some(stored_state) = self.store.lineage_state(doc_id)? else {
+            return Ok(None);
+        };
+        if stored_state.state != "ready"
+            || stored_state.algorithm_version != i64::from(LINEAGE_ALGORITHM_VERSION)
+        {
+            return Ok(None);
+        }
+        let last_event = events.last().expect("events are nonempty");
+        let last_update = self
+            .store
+            .updates_for_rebuild(doc_id)?
+            .last()
+            .map(|update| update.seq)
+            .unwrap_or(0);
+        if stored_state.through_event_id != last_event.event_id
+            || stored_state.through_update_seq != last_update
+            || last_event.after_hash.as_slice()
+                != document_digest(
+                    snapshots,
+                    self.docs
+                        .get(doc_id)
+                        .expect("document is loaded before lineage")
+                        .deleted_at(),
+                )
+        {
+            return Ok(None);
+        }
+
+        let rows = self.store.lineage_spans(doc_id)?;
+        let mut parts = lineage_from_store(doc_id, &rows, events)?;
+        sort_spans(snapshots, &mut parts.spans);
+        let lineage = match LineageState::from_parts(snapshots.to_vec(), parts.spans, parts.sources)
+        {
+            Ok(lineage) => lineage,
+            Err(
+                ReconcileError::UncoveredText(_)
+                | ReconcileError::InvalidSpan(_)
+                | ReconcileError::OverlappingSpans(_, _),
+            ) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let digest = live_lineage_digest(&LineageHashInput {
+            algorithm_version: LINEAGE_ALGORITHM_VERSION,
+            document_id: doc_id,
+            through_update_seq: as_u64(stored_state.through_update_seq, "update sequence")?,
+            through_event_id: source_id(stored_state.through_event_id)?,
+            spans: lineage.spans(),
+        });
+        if stored_state.lineage_digest.as_slice() != digest {
+            return Ok(None);
+        }
+        Ok(Some(lineage))
+    }
+
+    fn seed_legacy_lineage(
+        &self,
+        doc_id: &str,
+        snapshots: Vec<thought_provenance::BlockSnapshot>,
+    ) -> Result<LineageState, WorkspaceError> {
+        let context = MutationContext::legacy_seed();
+        let event_id = self.store.next_provenance_event_id()?;
+        let source_id = source_id(event_id)?;
+        let source = context.source(source_id);
+        let empty = LineageState::seed(vec![], source.clone())?;
+        let reconciled = empty.reconcile(snapshots.clone(), source)?;
+        let updates = self.store.updates_for_rebuild(doc_id)?;
+        let update_seq = updates.last().map(|update| update.seq);
+        let update_log_root = update_log_root_for_rows(doc_id, &updates)?;
+        let at = now_ms();
+        let event = event_input(EventBuild {
+            event_id,
+            update_seq,
+            doc_id,
+            actor: None,
+            context: &context,
+            action: context.action(),
+            before_hash: document_digest(&[], None),
+            after_hash: document_digest(
+                &snapshots,
+                self.docs
+                    .get(doc_id)
+                    .expect("document is loaded before lineage")
+                    .deleted_at(),
+            ),
+            update_log_root,
+            previous_hash: None,
+            deltas: &reconciled.deltas,
+            created_at: at,
+            recorded_at: at,
+        })?;
+        let through_update_seq = update_seq.unwrap_or(0);
+        self.store
+            .record_provenance_without_update(&ProvenanceRecordInput {
+                doc_id: doc_id.to_string(),
+                event,
+                changes: deltas_to_store(source_id, &reconciled.deltas)?,
+                spans: spans_to_store(reconciled.state.spans())?,
+                lineage: ready_lineage(
+                    doc_id,
+                    through_update_seq,
+                    event_id,
+                    reconciled.state.spans(),
+                    at,
+                )?,
+                bind_to_latest_update: update_seq.is_some(),
+            })?;
+        Ok(reconciled.state)
+    }
+
+    fn rebuild_lineage(
+        &self,
+        doc_id: &str,
+        events: &[thought_store::ProvenanceEventRow],
+    ) -> Result<LineageState, WorkspaceError> {
+        let updates = self.store.updates_for_rebuild(doc_id)?;
+        let descriptors = lineage_from_store(doc_id, &[], events)?.sources;
+        let replay = Document::new();
+        let update_roots = update_log_roots(doc_id, &updates)?;
+        let mut update_position = 0_usize;
+        let mut lineage: Option<LineageState> = None;
+        let mut previous_hash = None;
+        let mut previous_document_hash = document_digest(&[], None);
+
+        for event in events {
+            if let Some(target) = event.update_seq {
+                while update_position < updates.len() && updates[update_position].seq <= target {
+                    replay
+                        .apply_update(&updates[update_position].payload)
+                        .map_err(|error| {
+                            WorkspaceError::NotFound(format!(
+                                "could not replay update {} for provenance: {error}",
+                                updates[update_position].seq
+                            ))
+                        })?;
+                    update_position += 1;
+                }
+                if update_position == 0 || updates[update_position - 1].seq != target {
+                    return Err(WorkspaceError::NotFound(format!(
+                        "provenance event {} refers to missing update {target}",
+                        event.event_id
+                    )));
+                }
+            }
+
+            let tree = normalize(&replay.read());
+            let after = block_snapshots(&replay, &tree)?;
+            let source_id = source_id(event.event_id)?;
+            let source = descriptors.get(&source_id).cloned().ok_or_else(|| {
+                WorkspaceError::NotFound(format!(
+                    "provenance event {} has no source descriptor",
+                    event.event_id
+                ))
+            })?;
+            let before_hash = previous_document_hash;
+            let base = match lineage.take() {
+                Some(state) => state,
+                None => LineageState::seed(vec![], source.clone())?,
+            };
+            let reconciled = base.reconcile(after.clone(), source)?;
+            let after_hash = document_digest(&after, replay.deleted_at());
+            let update_log_root = event
+                .update_seq
+                .and_then(|seq| update_roots.get(&seq).copied())
+                .or_else(|| {
+                    update_position
+                        .checked_sub(1)
+                        .and_then(|position| update_roots.get(&updates[position].seq).copied())
+                })
+                .unwrap_or_else(|| empty_update_log_digest(doc_id));
+            verify_rebuilt_event(
+                &self.store,
+                event,
+                doc_id,
+                RebuiltEventState {
+                    before_hash,
+                    after_hash,
+                    update_log_root,
+                    previous_hash,
+                },
+                &reconciled.deltas,
+            )?;
+            previous_hash = Some(digest_from_bytes(&event.event_hash, "event hash")?);
+            previous_document_hash = after_hash;
+            lineage = Some(reconciled.state);
+        }
+
+        if update_position != updates.len() {
+            return Err(WorkspaceError::NotFound(format!(
+                "document `{doc_id}` has updates with no provenance event"
+            )));
+        }
+        let lineage = lineage.expect("events are nonempty");
+        let current = self.docs.get(doc_id).expect("document is loaded");
+        if replay.encode_state() != current.encode_state() {
+            return Err(WorkspaceError::NotFound(format!(
+                "provenance replay for `{doc_id}` does not match the document"
+            )));
+        }
+
+        let through_update_seq = updates.last().map(|update| update.seq).unwrap_or(0);
+        let through_event_id = events.last().expect("events are nonempty").event_id;
+        self.store.rebuild_lineage_cache(&LineageRebuildInput {
+            doc_id: doc_id.to_string(),
+            spans: spans_to_store(lineage.spans())?,
+            lineage: ready_lineage(
+                doc_id,
+                through_update_seq,
+                through_event_id,
+                lineage.spans(),
+                now_ms(),
+            )?,
+            through_update_seq,
+            through_event_id,
+        })?;
+        Ok(lineage)
     }
 
     /// Each top-level block's content, hashed.
@@ -822,34 +1286,6 @@ impl Inner {
             .zip(tree.content.iter())
             .map(|(r, node)| (r.block_id.clone(), fingerprint(node)))
             .collect()
-    }
-
-    /// Attribute whatever this commit changed to the actor that wrote it.
-    ///
-    /// A block is *created* the first time its id appears and *touched* when
-    /// its fingerprint moves. Blocks that did not change are left alone, so a
-    /// one-word edit does not re-attribute the whole document to whoever made
-    /// it.
-    fn attribute(&mut self, doc_id: &str, actor: &ActorRef, at: i64) -> Result<(), WorkspaceError> {
-        let doc = self.docs.get(doc_id).expect("document is loaded");
-        let current = Self::fingerprints(doc);
-        let previous = self.prints.get(doc_id);
-
-        for (block_id, print) in &current {
-            let unchanged = previous.and_then(|p| p.get(block_id)) == Some(print);
-            if unchanged {
-                continue;
-            }
-            self.store
-                .touch_block(doc_id, block_id, &actor.id, actor.session_id.as_deref(), at)?;
-        }
-
-        if previous.is_some_and(|p| p.keys().any(|id| !current.contains_key(id))) {
-            let keep: HashSet<String> = current.keys().cloned().collect();
-            self.store.forget_blocks(doc_id, &keep)?;
-        }
-        self.prints.insert(doc_id.to_string(), current);
-        Ok(())
     }
 
     /// Attribute a document that has never been attributed, by replaying its
@@ -893,48 +1329,603 @@ impl Inner {
         Ok(())
     }
 
-    /// Persist everything written since `before`, then keep derived state in
-    /// step.
-    fn commit(
+    /// Persist a disposable candidate, then make it the in-memory authority.
+    fn commit_candidate(
         &mut self,
         doc_id: &str,
-        before: &[u8],
+        candidate: Document,
         actor: &ActorRef,
+        context: &MutationContext,
     ) -> Result<String, WorkspaceError> {
-        let doc = self.docs.get(doc_id).expect("document is loaded");
-        let delta = doc.diff_since(before);
-        let tree = normalize(&doc.read());
-        let state = doc.encode_state();
-        let state_vector = doc.state_vector();
+        let current = self.docs.get(doc_id).expect("document is loaded");
+        let before_vector = current.state_vector();
+        let delta = candidate.diff_since(&before_vector);
+        let before_tree = normalize(&current.read());
+        let after_tree = normalize(&candidate.read());
+        let before_snapshots = block_snapshots(current, &before_tree)?;
+        let after_snapshots = block_snapshots(&candidate, &after_tree)?;
+        let previous_lineage = self
+            .lineages
+            .get(doc_id)
+            .expect("document hydration installs lineage")
+            .clone();
 
-        let seq = self.store.append_update(
+        let event_id = self.store.next_provenance_event_id()?;
+        let update_seq = self.store.next_update_seq()?;
+        let source_id = source_id(event_id)?;
+        let reconciled =
+            previous_lineage.reconcile(after_snapshots.clone(), context.source(source_id))?;
+        let prior_event = self.store.latest_provenance_event(doc_id)?;
+        let previous_hash = prior_event
+            .as_ref()
+            .map(|event| digest_from_bytes(&event.event_hash, "event hash"))
+            .transpose()?;
+        let previous_update_root = prior_event
+            .as_ref()
+            .map(|event| digest_from_bytes(&event.update_log_root, "update log root"))
+            .transpose()?;
+        let before_hash = document_digest(&before_snapshots, current.deleted_at());
+        if let Some(last) = prior_event.as_ref()
+            && last.after_hash.as_slice() != before_hash
+        {
+            return Err(WorkspaceError::NotFound(format!(
+                "document `{doc_id}` does not match its last provenance event"
+            )));
+        }
+        let after_hash = document_digest(&after_snapshots, candidate.deleted_at());
+        let action = if current.deleted_at() == candidate.deleted_at() {
+            context.action()
+        } else if candidate.deleted_at().is_some() {
+            EventAction::Trash
+        } else {
+            EventAction::Restore
+        };
+        let at = now_ms();
+        let update_log_root =
+            extend_update_log_root(previous_update_root, doc_id, update_seq, &delta, actor, at)?;
+        let event = event_input(EventBuild {
+            event_id,
+            update_seq: Some(update_seq),
             doc_id,
-            &delta,
-            &actor.id,
-            actor.origin(),
-            actor.session_id.as_deref(),
-        )?;
+            actor: Some(actor),
+            context,
+            action,
+            before_hash,
+            after_hash,
+            update_log_root,
+            previous_hash,
+            deltas: &reconciled.deltas,
+            created_at: at,
+            recorded_at: at,
+        })?;
+
+        let current_prints = Self::fingerprints(&candidate);
+        let previous_prints = self.prints.get(doc_id);
+        let block_touches = current_prints
+            .iter()
+            .filter(|(block_id, print)| {
+                previous_prints.and_then(|prints| prints.get(*block_id)) != Some(*print)
+            })
+            .map(|(block_id, _)| BlockTouchInput {
+                block_id: block_id.clone(),
+                actor_id: actor.id.clone(),
+                session_id: actor.session_id.clone(),
+                at,
+            })
+            .collect::<Vec<_>>();
+        let current_block_ids = candidate
+            .blocks()
+            .into_iter()
+            .map(|block| block.block_id)
+            .collect::<Vec<_>>();
+        let (markdown, _) = to_markdown_with_spans(&after_tree);
+        let state = candidate.encode_state();
+        let state_vector = candidate.state_vector();
+        let persisted = self
+            .store
+            .commit_update_with_provenance(&ProvenanceCommitInput {
+                doc_id: doc_id.to_string(),
+                title: derive_title(&after_tree),
+                markdown,
+                deleted_at: candidate.deleted_at(),
+                updated_at: at,
+                actor: store_actor(actor),
+                update: ProvenanceUpdateInput {
+                    expected_seq: update_seq,
+                    payload: delta.clone(),
+                    actor_id: actor.id.clone(),
+                    origin: actor.origin(),
+                    session_id: actor.session_id.clone(),
+                    created_at: at,
+                },
+                event,
+                changes: deltas_to_store(source_id, &reconciled.deltas)?,
+                spans: spans_to_store(reconciled.state.spans())?,
+                lineage: ready_lineage(doc_id, update_seq, event_id, reconciled.state.spans(), at)?,
+                block_touches,
+                current_block_ids,
+            })?;
+
+        self.docs.insert(doc_id.to_string(), candidate);
+        self.prints.insert(doc_id.to_string(), current_prints);
+        self.lineages.insert(doc_id.to_string(), reconciled.state);
         self.pending
-            .push((doc_id.to_string(), delta.clone(), actor.clone()));
+            .push((doc_id.to_string(), delta, actor.clone()));
 
-        // Before reindexing, while the actor is still in hand: which blocks
-        // this commit changed, and who to credit for them.
-        self.attribute(doc_id, actor, now_ms())?;
-
-        let (markdown, _) = to_markdown_with_spans(&tree);
-        // Reindexed on every mutation, not on snapshot as M1.4 first said.
-        // Serializing a document and writing two rows is cheap; agents reading
-        // a stale index is not, and search is how they avoid reading every
-        // document.
-        self.store
-            .reindex(doc_id, &derive_title(&tree), &markdown)?;
-
-        if self.store.updates_since_snapshot(doc_id)? >= SNAPSHOT_EVERY {
-            self.store
-                .write_snapshot(doc_id, seq, &state, &state_vector)?;
+        if self
+            .store
+            .updates_since_snapshot(doc_id)
+            .is_ok_and(|count| count >= SNAPSHOT_EVERY)
+            && let Some(seq) = persisted.update_seq
+        {
+            // Snapshots are a discardable performance cache. An authoritative
+            // commit must not be reported as failed if this follow-up write is
+            // unavailable.
+            let _ = self
+                .store
+                .write_snapshot(doc_id, seq, &state, &state_vector);
         }
         Ok(encode_version(&state_vector))
     }
+}
+
+struct EventBuild<'a> {
+    event_id: i64,
+    update_seq: Option<i64>,
+    doc_id: &'a str,
+    actor: Option<&'a ActorRef>,
+    context: &'a MutationContext,
+    action: EventAction,
+    before_hash: [u8; 32],
+    after_hash: [u8; 32],
+    update_log_root: [u8; 32],
+    previous_hash: Option<[u8; 32]>,
+    deltas: &'a [thought_provenance::DeltaSegment],
+    created_at: i64,
+    recorded_at: i64,
+}
+
+fn event_input(build: EventBuild<'_>) -> Result<ProvenanceEventInput, WorkspaceError> {
+    let source_id = source_id(build.event_id)?;
+    let actor_id = build.actor.map(|actor| actor.id.as_str());
+    let actor_label = build
+        .actor
+        .map(|actor| actor.display_name.as_str())
+        .unwrap_or("Unknown");
+    let session_id = build.actor.and_then(|actor| actor.session_id.as_deref());
+    let reported_model = build
+        .context
+        .reported_model()
+        .or_else(|| build.actor.and_then(|actor| actor.model.as_deref()));
+    let hash = event_chain_digest(&EventHashInput {
+        chain_version: CURRENT_EVENT_CHAIN_VERSION,
+        event_id: source_id,
+        document_id: build.doc_id,
+        update_seq: build
+            .update_seq
+            .map(|seq| as_u64(seq, "update sequence"))
+            .transpose()?,
+        action: build.action,
+        ingress: build.context.ingress(),
+        assurance: build.context.assurance(),
+        source_label: build.context.source_label(),
+        actor: ActorEventMetadata {
+            actor_id,
+            actor_label,
+            provider: build.context.provider(),
+            requested_model: build.context.requested_model(),
+            reported_model,
+            connection_id: build.context.connection_id(),
+            session_id,
+        },
+        references: EventReferences {
+            evidence_ref: build.context.evidence_ref(),
+            suggestion_id: build.context.suggestion_id(),
+            client_event_id: build.context.client_event_id(),
+        },
+        created_at_ms: build.created_at,
+        recorded_at_ms: build.recorded_at,
+        before_document_hash: build.before_hash,
+        after_document_hash: build.after_hash,
+        update_log_root: build.update_log_root,
+        previous_event_hash: build.previous_hash,
+        deltas: build.deltas,
+    });
+
+    Ok(ProvenanceEventInput {
+        event_id: build.event_id,
+        actor_id: actor_id.map(str::to_string),
+        action: action_name(build.action).to_string(),
+        ingress: ingress_name(build.context.ingress()).to_string(),
+        assurance: assurance_name(build.context.assurance()).to_string(),
+        connection_id: build.context.connection_id().map(str::to_string),
+        session_id: session_id.map(str::to_string),
+        actor_label: actor_label.to_string(),
+        source_label: build.context.source_label().to_string(),
+        provider: build.context.provider().map(str::to_string),
+        requested_model: build.context.requested_model().map(str::to_string),
+        reported_model: reported_model.map(str::to_string),
+        evidence_ref: build.context.evidence_ref().map(str::to_string),
+        suggestion_id: build.context.suggestion_id().map(str::to_string),
+        client_event_id: build.context.client_event_id().map(str::to_string),
+        chain_version: i64::from(CURRENT_EVENT_CHAIN_VERSION),
+        before_hash: build.before_hash.to_vec(),
+        after_hash: build.after_hash.to_vec(),
+        update_log_root: build.update_log_root.to_vec(),
+        previous_event_hash: build.previous_hash.map(|hash| hash.to_vec()),
+        event_hash: hash.to_vec(),
+        created_at: build.created_at,
+        recorded_at: build.recorded_at,
+    })
+}
+
+fn ready_lineage(
+    doc_id: &str,
+    update_seq: i64,
+    event_id: i64,
+    spans: &[thought_provenance::LiveLineageSpan],
+    rebuilt_at: i64,
+) -> Result<ReadyLineageInput, WorkspaceError> {
+    let digest = live_lineage_digest(&LineageHashInput {
+        algorithm_version: LINEAGE_ALGORITHM_VERSION,
+        document_id: doc_id,
+        through_update_seq: as_u64(update_seq, "update sequence")?,
+        through_event_id: source_id(event_id)?,
+        spans,
+    });
+    Ok(ReadyLineageInput {
+        algorithm_version: i64::from(LINEAGE_ALGORITHM_VERSION),
+        lineage_digest: digest.to_vec(),
+        rebuilt_at,
+    })
+}
+
+fn verify_stored_chain(
+    store: &Store,
+    doc_id: &str,
+    events: &[thought_store::ProvenanceEventRow],
+) -> Result<(), WorkspaceError> {
+    let updates = store.updates_for_rebuild(doc_id)?;
+    let update_roots = update_log_roots(doc_id, &updates)?;
+    let mut previous_event_hash = None;
+    let mut previous_document_hash = document_digest(&[], None);
+    let mut previous_update_root = empty_update_log_digest(doc_id);
+    let mut previous_update_seq = None;
+    for event in events {
+        let before_hash = digest_from_bytes(&event.before_hash, "before document hash")?;
+        let after_hash = digest_from_bytes(&event.after_hash, "after document hash")?;
+        if before_hash != previous_document_hash
+            || event.previous_event_hash.as_deref()
+                != previous_event_hash
+                    .as_ref()
+                    .map(|hash: &[u8; 32]| hash.as_slice())
+        {
+            return Err(WorkspaceError::NotFound(format!(
+                "provenance event {} breaks the document hash chain",
+                event.event_id
+            )));
+        }
+        let expected_update_root = match event.update_seq {
+            Some(seq) => {
+                if previous_update_seq.is_some_and(|previous| seq <= previous) {
+                    return Err(WorkspaceError::NotFound(format!(
+                        "provenance event {} has a non-increasing update sequence",
+                        event.event_id
+                    )));
+                }
+                previous_update_seq = Some(seq);
+                update_roots.get(&seq).copied().ok_or_else(|| {
+                    WorkspaceError::NotFound(format!(
+                        "provenance event {} refers to missing update {seq}",
+                        event.event_id
+                    ))
+                })?
+            }
+            None => previous_update_root,
+        };
+        if event.update_log_root.as_slice() != expected_update_root {
+            return Err(WorkspaceError::NotFound(format!(
+                "provenance event {} has an invalid update log root",
+                event.event_id
+            )));
+        }
+        let event_id = source_id(event.event_id)?;
+        let deltas = deltas_from_store(event_id, &store.provenance_changes(event.event_id)?)?;
+        let computed = event_digest_from_row(
+            event,
+            doc_id,
+            before_hash,
+            after_hash,
+            expected_update_root,
+            previous_event_hash,
+            &deltas,
+        )?;
+        if event.event_hash.as_slice() != computed {
+            return Err(WorkspaceError::NotFound(format!(
+                "provenance event {} has an invalid event hash",
+                event.event_id
+            )));
+        }
+        previous_event_hash = Some(computed);
+        previous_document_hash = after_hash;
+        previous_update_root = expected_update_root;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct RebuiltEventState {
+    before_hash: [u8; 32],
+    after_hash: [u8; 32],
+    update_log_root: [u8; 32],
+    previous_hash: Option<[u8; 32]>,
+}
+
+fn verify_rebuilt_event(
+    store: &Store,
+    event: &thought_store::ProvenanceEventRow,
+    doc_id: &str,
+    state: RebuiltEventState,
+    deltas: &[thought_provenance::DeltaSegment],
+) -> Result<(), WorkspaceError> {
+    if event.before_hash.as_slice() != state.before_hash
+        || event.after_hash.as_slice() != state.after_hash
+        || event.update_log_root.as_slice() != state.update_log_root
+        || event.previous_event_hash.as_deref()
+            != state.previous_hash.as_ref().map(|hash| hash.as_slice())
+    {
+        return Err(WorkspaceError::NotFound(format!(
+            "provenance event {} has an invalid document hash chain",
+            event.event_id
+        )));
+    }
+    let event_id = source_id(event.event_id)?;
+    let stored_deltas = deltas_from_store(event_id, &store.provenance_changes(event.event_id)?)?;
+    if stored_deltas != deltas {
+        return Err(WorkspaceError::NotFound(format!(
+            "provenance event {} does not match its semantic changes",
+            event.event_id
+        )));
+    }
+    let computed = event_digest_from_row(
+        event,
+        doc_id,
+        state.before_hash,
+        state.after_hash,
+        state.update_log_root,
+        state.previous_hash,
+        deltas,
+    )?;
+    if event.event_hash.as_slice() != computed {
+        return Err(WorkspaceError::NotFound(format!(
+            "provenance event {} has an invalid event hash",
+            event.event_id
+        )));
+    }
+    Ok(())
+}
+
+fn event_digest_from_row(
+    event: &thought_store::ProvenanceEventRow,
+    doc_id: &str,
+    before_hash: [u8; 32],
+    after_hash: [u8; 32],
+    update_log_root: [u8; 32],
+    previous_hash: Option<[u8; 32]>,
+    deltas: &[thought_provenance::DeltaSegment],
+) -> Result<[u8; 32], WorkspaceError> {
+    let event_id = source_id(event.event_id)?;
+    let chain_version = u32::try_from(event.chain_version).map_err(|_| {
+        WorkspaceError::NotFound(format!(
+            "provenance event {} has an invalid chain version",
+            event.event_id
+        ))
+    })?;
+    if chain_version != CURRENT_EVENT_CHAIN_VERSION {
+        return Err(WorkspaceError::NotFound(format!(
+            "provenance event {} uses unsupported chain version {}; this build supports {}",
+            event.event_id, chain_version, CURRENT_EVENT_CHAIN_VERSION
+        )));
+    }
+    Ok(event_chain_digest(&EventHashInput {
+        chain_version,
+        event_id,
+        document_id: doc_id,
+        update_seq: event
+            .update_seq
+            .map(|seq| as_u64(seq, "update sequence"))
+            .transpose()?,
+        action: parse_action(&event.action)?,
+        ingress: parse_ingress(&event.ingress)?,
+        assurance: parse_assurance(&event.assurance)?,
+        source_label: &event.source_label,
+        actor: ActorEventMetadata {
+            actor_id: event.actor_id.as_deref(),
+            actor_label: &event.actor_label,
+            provider: event.provider.as_deref(),
+            requested_model: event.requested_model.as_deref(),
+            reported_model: event.reported_model.as_deref(),
+            connection_id: event.connection_id.as_deref(),
+            session_id: event.session_id.as_deref(),
+        },
+        references: EventReferences {
+            evidence_ref: event.evidence_ref.as_deref(),
+            suggestion_id: event.suggestion_id.as_deref(),
+            client_event_id: event.client_event_id.as_deref(),
+        },
+        created_at_ms: event.created_at,
+        recorded_at_ms: event.recorded_at,
+        before_document_hash: before_hash,
+        after_document_hash: after_hash,
+        update_log_root,
+        previous_event_hash: previous_hash,
+        deltas,
+    }))
+}
+
+fn extend_update_log_root(
+    previous: Option<[u8; 32]>,
+    doc_id: &str,
+    seq: i64,
+    payload: &[u8],
+    actor: &ActorRef,
+    created_at: i64,
+) -> Result<[u8; 32], WorkspaceError> {
+    Ok(update_log_digest(
+        previous,
+        &UpdateLogEntry {
+            document_id: doc_id,
+            seq: as_u64(seq, "update sequence")?,
+            payload,
+            actor_id: &actor.id,
+            origin: actor.origin().as_str(),
+            session_id: actor.session_id.as_deref(),
+            created_at_ms: created_at,
+        },
+    ))
+}
+
+fn update_log_roots(
+    doc_id: &str,
+    updates: &[thought_store::EvidenceUpdate],
+) -> Result<HashMap<i64, [u8; 32]>, WorkspaceError> {
+    let mut roots = HashMap::with_capacity(updates.len());
+    let mut previous = None;
+    let mut previous_seq = None;
+    for update in updates {
+        if previous_seq.is_some_and(|seq| update.seq <= seq) {
+            return Err(WorkspaceError::NotFound(format!(
+                "document `{doc_id}` has a non-increasing update sequence"
+            )));
+        }
+        let root = update_log_digest(
+            previous,
+            &UpdateLogEntry {
+                document_id: doc_id,
+                seq: as_u64(update.seq, "update sequence")?,
+                payload: &update.payload,
+                actor_id: &update.actor_id,
+                origin: &update.origin,
+                session_id: update.session_id.as_deref(),
+                created_at_ms: update.created_at,
+            },
+        );
+        roots.insert(update.seq, root);
+        previous = Some(root);
+        previous_seq = Some(update.seq);
+    }
+    Ok(roots)
+}
+
+fn update_log_root_for_rows(
+    doc_id: &str,
+    updates: &[thought_store::EvidenceUpdate],
+) -> Result<[u8; 32], WorkspaceError> {
+    let roots = update_log_roots(doc_id, updates)?;
+    Ok(updates
+        .last()
+        .and_then(|update| roots.get(&update.seq).copied())
+        .unwrap_or_else(|| empty_update_log_digest(doc_id)))
+}
+
+fn default_context(actor: &ActorRef, local: MutationContext) -> MutationContext {
+    if actor.kind == "agent" {
+        MutationContext::mcp_reported(actor.display_name.clone(), None, None, actor.model.clone())
+    } else {
+        local
+    }
+}
+
+fn store_actor(actor: &ActorRef) -> Actor {
+    Actor {
+        id: actor.id.clone(),
+        kind: actor.kind.clone(),
+        display_name: actor.display_name.clone(),
+        model: actor.model.clone(),
+        color: color_for(&actor.id),
+    }
+}
+
+fn source_id(value: i64) -> Result<SourceId, WorkspaceError> {
+    Ok(SourceId(as_u64(value, "provenance event id")?))
+}
+
+fn as_u64(value: i64, field: &str) -> Result<u64, WorkspaceError> {
+    u64::try_from(value).map_err(|_| {
+        WorkspaceError::NotFound(format!("{field} must be nonnegative, found {value}"))
+    })
+}
+
+fn digest_from_bytes(bytes: &[u8], field: &str) -> Result<[u8; 32], WorkspaceError> {
+    bytes.try_into().map_err(|_| {
+        WorkspaceError::NotFound(format!(
+            "{field} must contain exactly 32 bytes, found {}",
+            bytes.len()
+        ))
+    })
+}
+
+fn parse_action(value: &str) -> Result<crate::provenance_hash::EventAction, WorkspaceError> {
+    use crate::provenance_hash::EventAction;
+    match value {
+        "edit" => Ok(EventAction::Edit),
+        "trash" => Ok(EventAction::Trash),
+        "restore" => Ok(EventAction::Restore),
+        "legacy_seed" => Ok(EventAction::LegacySeed),
+        "suggestion" => Ok(EventAction::Suggestion),
+        "accept" => Ok(EventAction::Accept),
+        "reject" => Ok(EventAction::Reject),
+        other => Err(WorkspaceError::NotFound(format!(
+            "unknown persisted provenance action `{other}`"
+        ))),
+    }
+}
+
+fn parse_ingress(value: &str) -> Result<Ingress, WorkspaceError> {
+    match value {
+        "entered" => Ok(Ingress::Entered),
+        "command" => Ok(Ingress::Command),
+        "pasted" => Ok(Ingress::Pasted),
+        "imported" => Ok(Ingress::Imported),
+        "mcp" => Ok(Ingress::Mcp),
+        "api" => Ok(Ingress::Api),
+        "suggestion" => Ok(Ingress::Suggestion),
+        "unknown" => Ok(Ingress::Unknown),
+        "legacy_unknown" => Ok(Ingress::LegacyUnknown),
+        other => Err(WorkspaceError::NotFound(format!(
+            "unknown persisted provenance ingress `{other}`"
+        ))),
+    }
+}
+
+fn parse_assurance(value: &str) -> Result<Assurance, WorkspaceError> {
+    match value {
+        "observed" => Ok(Assurance::Observed),
+        "reported" => Ok(Assurance::Reported),
+        "verified" => Ok(Assurance::Verified),
+        "unknown" => Ok(Assurance::Unknown),
+        other => Err(WorkspaceError::NotFound(format!(
+            "unknown persisted provenance assurance `{other}`"
+        ))),
+    }
+}
+
+fn sort_spans(
+    blocks: &[thought_provenance::BlockSnapshot],
+    spans: &mut [thought_provenance::LiveLineageSpan],
+) {
+    let block_order = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.block_id.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    spans.sort_by(|left, right| {
+        block_order
+            .get(left.location.block_id.as_str())
+            .cmp(&block_order.get(right.location.block_id.as_str()))
+            .then_with(|| left.location.path.cmp(&right.location.path))
+            .then_with(|| left.location.from_utf16.cmp(&right.location.from_utf16))
+    });
 }
 
 fn parse_blocks(markdown: &str) -> Result<Vec<Node>, WorkspaceError> {

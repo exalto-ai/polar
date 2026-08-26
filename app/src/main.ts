@@ -20,9 +20,11 @@ import { installProvenanceRails, type Rails } from "./provenance";
 import { SyncProvider, type AgentPresence, type ProviderStatus } from "./provider";
 
 type Connection = {
+  protocol_version: number;
   sync_url: string;
   mcp_url: string;
-  token: string;
+  editor_token: string;
+  mcp_token: string;
   stdio_command: string;
   /** Who this window writes as, from `thought_mcp::EDITOR_ACTOR_ID`. */
   actor_id: string;
@@ -65,6 +67,7 @@ type CloseChoice = "export" | "close" | "cancel";
 let closePromptResolver: ((choice: CloseChoice) => void) | null = null;
 const closeBlockedElements = new Set<HTMLElement>();
 
+const DAEMON_PROTOCOL_VERSION = 2;
 function settleClosePrompt(choice: CloseChoice) {
   const resolve = closePromptResolver;
   if (!resolve) return;
@@ -328,7 +331,7 @@ async function openDocument(docId: string): Promise<boolean> {
   const awareness = new Awareness(doc);
   const provider = new SyncProvider(
     connection.sync_url,
-    connection.token,
+    connection.editor_token,
     docId,
     doc,
     awareness,
@@ -822,7 +825,12 @@ async function loadConnection(): Promise<Connection> {
 async function boot() {
   relabelShortcutHints();
   connection = await loadConnection();
-  mcp = new Mcp(connection.mcp_url, connection.token);
+  if (connection.protocol_version !== DAEMON_PROTOCOL_VERSION) {
+    throw new Error(
+      `incompatible daemon protocol ${connection.protocol_version}; restart Proof of Thought`,
+    );
+  }
+  mcp = new Mcp(connection.mcp_url, connection.mcp_token);
   els.stdioCommand.textContent = connection.stdio_command;
   await mcp.connect();
 

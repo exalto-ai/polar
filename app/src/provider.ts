@@ -9,7 +9,14 @@
  */
 import * as Y from "yjs";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
-import { decode, encode, Tag } from "./protocol";
+import {
+  decode,
+  encode,
+  encodeSourcedUpdate,
+  LocalInputSource,
+  Tag,
+  type LocalInputSource as LocalInputSourceValue,
+} from "./protocol";
 
 /** Marks transactions that came off the wire, so they are not echoed back. */
 export const REMOTE = Symbol("remote");
@@ -27,75 +34,68 @@ export type AgentPresence = {
   session: string | null;
 };
 
-type OutboundState =
-  | { kind: "idle"; queued: Uint8Array | null }
-  | { kind: "in-flight"; head: Uint8Array; tail: Uint8Array | null };
+type OutboundUpdate = {
+  source: LocalInputSourceValue;
+  update: Uint8Array;
+};
 
 /**
  * Acknowledgements are positional, so the update already sent must remain
- * unchanged until its ACK arrives. All later updates can be merged into one
- * tail, which keeps the queue at two entries even during a long editing burst.
+ * unchanged until its ACK arrives. Unsent updates may coalesce only when their
+ * sources match and they are adjacent. Crossing a written/paste boundary would
+ * permanently erase the distinction because Yjs updates carry no origin.
  */
 class OutboundQueue {
-  private state: OutboundState = { kind: "idle", queued: null };
+  private inFlight: OutboundUpdate | null = null;
+  private queued: OutboundUpdate[] = [];
 
   get length(): number {
-    if (this.state.kind === "idle") return this.state.queued === null ? 0 : 1;
-    return this.state.tail === null ? 1 : 2;
+    return this.queued.length + (this.inFlight === null ? 0 : 1);
   }
 
   get hasPending(): boolean {
     return this.length > 0;
   }
 
-  enqueue(update: Uint8Array) {
-    const queued = update.slice();
-    if (this.state.kind === "idle") {
-      this.state = {
-        kind: "idle",
-        queued: this.merge(this.state.queued, queued),
-      };
-      return;
+  enqueue(update: Uint8Array, source: LocalInputSourceValue) {
+    const incoming = { source, update: update.slice() };
+    const tail = this.queued[this.queued.length - 1];
+    if (tail?.source === incoming.source) {
+      tail.update = Y.mergeUpdates([tail.update, incoming.update]);
+    } else {
+      this.queued.push(incoming);
     }
-
-    this.state = {
-      kind: "in-flight",
-      head: this.state.head,
-      tail: this.merge(this.state.tail, queued),
-    };
   }
 
-  /** Move the sole unsent update into the in-flight position. */
-  beginSend(): Uint8Array | null {
-    if (this.state.kind === "in-flight" || this.state.queued === null) return null;
-    const head = this.state.queued;
-    this.state = { kind: "in-flight", head, tail: null };
-    return head;
+  /** Move the oldest unsent source run into the in-flight position. */
+  beginSend(): OutboundUpdate | null {
+    if (this.inFlight !== null) return null;
+    this.inFlight = this.queued.shift() ?? null;
+    return this.inFlight;
   }
 
   /** Consume exactly the head that the peer has durably acknowledged. */
   acknowledge(): boolean {
-    if (this.state.kind !== "in-flight") return false;
-    this.state = { kind: "idle", queued: this.state.tail };
+    if (this.inFlight === null) return false;
+    this.inFlight = null;
     return true;
   }
 
   /**
    * Once the socket is gone, no ACK from it can be accepted. The old head and
-   * tail are both unsent work for the next connection and can become one update.
+   * queued work are both unsent for the next connection. They become one run
+   * only if their adjacent source labels agree.
    */
   retryInFlight() {
-    if (this.state.kind !== "in-flight") return;
-    this.state = {
-      kind: "idle",
-      queued: this.merge(this.state.head, this.state.tail),
-    };
-  }
-
-  private merge(left: Uint8Array | null, right: Uint8Array | null): Uint8Array | null {
-    if (left === null) return right;
-    if (right === null) return left;
-    return Y.mergeUpdates([left, right]);
+    if (this.inFlight === null) return;
+    const head = this.inFlight;
+    this.inFlight = null;
+    const next = this.queued[0];
+    if (next?.source === head.source) {
+      next.update = Y.mergeUpdates([head.update, next.update]);
+    } else {
+      this.queued.unshift(head);
+    }
   }
 }
 
@@ -114,10 +114,18 @@ export class SyncProvider {
   private saveError = false;
   private saveStatus: SaveStatus = "connecting";
   private readonly saveListeners = new Set<(status: SaveStatus) => void>();
+  /** Source scoped around a TipTap dispatch; Yjs emits its update synchronously. */
+  private activeLocalSource: LocalInputSourceValue | null = null;
+  /**
+   * A DOM event can cause Yjs work without a TipTap dispatch, notably undo.
+   * Keep the observation for the current browser task as a narrow fallback.
+   */
+  private pendingLocalSource: LocalInputSourceValue | null = null;
+  private pendingSourceGeneration = 0;
 
   constructor(
     private readonly url: string,
-    private readonly token: string,
+    private readonly editorToken: string,
     private readonly docId: string,
     private readonly doc: Y.Doc,
     private readonly awareness: Awareness,
@@ -144,14 +152,19 @@ export class SyncProvider {
 
     this.onStatus("connecting");
     this.setSaveStatus("connecting");
-    // A new connection retries all unacknowledged work as one Yjs update. This
-    // is safe when only the ACK was lost because Yjs updates are idempotent.
+    // A new connection returns the in-flight head to the source-run queue.
+    // Adjacent runs with the same source may merge, but distinct source
+    // boundaries remain separate. Resending is safe when only the ACK was lost
+    // because Yjs updates are idempotent.
     this.outbound.retryInFlight();
     this.saveError = false;
-    // The browser WebSocket API cannot set headers, so the token rides as a
-    // subprotocol. It is header-borne and never part of the URL, which would
-    // otherwise put a bearer credential into logs and history.
-    const socket = new WebSocket(this.url, ["thought.v1", `thought.token.${this.token}`]);
+    // The browser WebSocket API cannot set headers, so the editor capability
+    // rides as a subprotocol. It is header-borne and never part of the URL,
+    // which would otherwise put a bearer credential into logs and history.
+    const socket = new WebSocket(this.url, [
+      "thought.v1",
+      `thought.token.${this.editorToken}`,
+    ]);
     socket.binaryType = "arraybuffer";
     this.socket = socket;
 
@@ -241,6 +254,35 @@ export class SyncProvider {
   }
 
   /**
+   * Scope the next synchronous Yjs update to the transaction that produced it.
+   * Nested scopes restore the outer source, which keeps plugin composition
+   * deterministic.
+   */
+  withLocalInputSource<T>(source: LocalInputSourceValue, run: () => T): T {
+    const previous = this.activeLocalSource;
+    this.activeLocalSource = source;
+    try {
+      return run();
+    } finally {
+      this.activeLocalSource = previous;
+    }
+  }
+
+  /**
+   * Remember an observed editor event for direct Yjs commands and delayed DOM
+   * reconciliation. A later browser task must not inherit a stale source.
+   */
+  noteLocalInputSource(source: LocalInputSourceValue) {
+    this.pendingLocalSource = source;
+    const generation = ++this.pendingSourceGeneration;
+    window.setTimeout(() => {
+      if (this.pendingSourceGeneration === generation) {
+        this.pendingLocalSource = null;
+      }
+    }, 0);
+  }
+
+  /**
    * Observe whether local changes have reached durable storage. The current
    * value is delivered immediately so a toolbar does not need a separate
    * getter or guess at initial state.
@@ -304,7 +346,11 @@ export class SyncProvider {
 
   private onLocalUpdate = (update: Uint8Array, origin: unknown) => {
     if (origin === REMOTE) return;
-    this.outbound.enqueue(update);
+    const source =
+      this.activeLocalSource ?? this.pendingLocalSource ?? LocalInputSource.Unknown;
+    this.pendingLocalSource = null;
+    this.pendingSourceGeneration += 1;
+    this.outbound.enqueue(update, source);
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.flushOutbound();
     } else if (
@@ -340,7 +386,7 @@ export class SyncProvider {
 
     const update = this.outbound.beginSend();
     if (update === null) return;
-    socket.send(encode(Tag.Update, this.docId, update));
+    socket.send(encodeSourcedUpdate(this.docId, update.source, update.update));
     this.setSaveStatus("saving");
   }
 
