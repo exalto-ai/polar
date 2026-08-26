@@ -15,8 +15,10 @@ margin says who wrote each block. `cargo test --workspace` is green and CI gates
 One thing is still owed from M2: the manual IME pass (AD-8), which needs a person at a
 keyboard rather than a test. M3 — sharing through a relay — is planned but not built.
 
-- **[docs/architecture.md](docs/architecture.md)** — 17 decisions, each with its cost
+- **[docs/architecture.md](docs/architecture.md):** 18 decisions, each with its cost
   stated. Written to be argued with.
+- **[docs/provenance.md](docs/provenance.md):** the accepted delta-lineage, reviewer,
+  evidence, and Seal contract for the next feature stack.
 - **[DESIGN.md](DESIGN.md)** — one accent, one mark, and the file each is
   defined in.
 - **[prototypes/editor-probe](prototypes/editor-probe)** — throwaway probe answering
@@ -71,8 +73,9 @@ window:
 cargo run -p thoughtd
 ```
 
-It prints its port and writes `daemon.json` (mode 0600) with a bearer token. MCP clients
-that speak HTTP can use the URL inside; clients that spawn a stdio server should spawn
+It prints its port and writes `daemon.json` (mode 0600) with separate MCP and editor bearer
+capabilities. MCP clients that speak HTTP use only the MCP capability; the app keeps the editor
+capability for sourced sync updates. Clients that spawn a stdio server should spawn
 `thought-mcp-stdio`, which reuses the published daemon or starts one only when nothing is
 published, then proxies to it. A stale or unauthenticated discovery record is reported for
 the developer to resolve instead of causing one process to replace another.

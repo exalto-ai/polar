@@ -404,6 +404,34 @@ Consequence: an IME failure is a bridge bug, not a reason to abandon the webview
 Per-session override either way. The reason to gate agent writes is other people, not the
 agent; gating solo local editing is friction with no beneficiary.
 
+### AD-18: Provenance follows the semantic delta, not the last actor to touch a block
+
+The M2 rails answer who created and last touched each top-level block. That remains useful
+for orientation, but it cannot support the product claim we now need. Replacing one word for
+grammar must not make the other ninety-nine words in the paragraph look newly AI-authored.
+
+Yjs updates cannot be treated as the visible delta. The current `replace_block` path may
+delete and recreate an inline subtree even when almost all visible wording is equal. Every
+canonical mutation therefore records a deterministic semantic before-and-after delta beside
+the opaque Yjs update. Under the documented deterministic alignment, equal visible graphemes
+keep their prior source; insertions and replacements receive the event's source; deletions
+remain in history but leave the current breakdown; formatting and structure changes do not
+reassign equal text. Repeated equal text from different sources remains the explicit V1
+ambiguity described in [provenance.md](provenance.md).
+
+The append-only provenance event and delta ledger is evidence. Current lineage spans are a
+derived read model that can be rebuilt from that ledger. Actor, ingress, and assurance are
+separate dimensions, so `Pasted`, `Claude (reported)`, and `Claude (verified)` say exactly
+what was observed without turning a transport signal into an authorship claim. The public
+MCP surface cannot create a trusted human provenance claim or choose a verified classification.
+Its older block-rail actor kind remains self-reported compatibility metadata.
+
+**Cost:** Proof of Thought now owns a versioned diff algorithm, a real SQLite migration path,
+and a second derived view that must survive Unicode, structural edits, concurrency, and
+rebuilds. That complexity is deliberate. A simpler block-level percentage would be easy to
+ship and materially misleading. The complete claim, schema, migration, suggestion, Seal,
+privacy, and acceptance contract lives in [provenance.md](provenance.md).
+
 ### AD-20 — One product name and one machine namespace
 
 The interface and application bundle are **Proof of Thought**. Names resolved by package
@@ -631,15 +659,16 @@ streamable-HTTP server. Corrections found while building:
 * **Reindex on every mutation**, not on snapshot as M1.4 said — serializing a document and
   writing two rows is cheap, and agents reading a stale index is not.
 
-HTTP on localhost. The port and a token live in
-`~/Library/Application Support/ai.exalto.thought/daemon.json`, mode `0600` — any local
-process can reach a localhost port, and documents are the user's private writing.
+HTTP on localhost. The port and separate MCP/editor capabilities live in
+`~/Library/Application Support/ai.exalto.thought/daemon.json`, published atomically with mode
+`0600`. Any local process can reach a localhost port, and documents are the user's private writing.
 `thought-mcp-stdio` reads that file, proxies stdio to HTTP, and spawns `thoughtd` only when
-nothing is published (AD-10). **Built.** Its probe sends the published bearer token and
-accepts application-level HTTP errors, because rejecting an uninitialized `ping` is normal.
-A 401 or transport failure is reported for the developer to resolve instead of replacing a
-process that may still own the store. Racing fresh launches are made safe by the
-process-lifetime store lock.
+nothing is published (AD-10). **Built.** Discovery first checks an exact daemon identity and
+protocol response without disclosing a capability, then verifies each route with only its own
+bearer. An unexpected status, body, protocol, or authentication result is rejected. The error is
+reported for the developer to resolve rather than signalling or silently replacing a process
+that may still own the store. Racing fresh launches are made safe by the process-lifetime store
+lock.
 
 ```
 list_documents(query?, limit?)   -> [{doc_id, title, updated_at, word_count}]
