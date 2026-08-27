@@ -39,6 +39,7 @@ mod macos_keychain {
     };
     use core_foundation::array::{CFArray, CFArrayRef};
     use core_foundation::base::{CFType, CFTypeID, CFTypeRef, TCFType};
+    use core_foundation::boolean::CFBoolean;
     use core_foundation::data::CFData;
     use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
     use core_foundation::string::{CFString, CFStringRef};
@@ -80,8 +81,26 @@ mod macos_keychain {
         fn SecItemUpdate(query: CFDictionaryRef, attributes: CFDictionaryRef) -> i32;
         static kSecAttrAccess: CFStringRef;
         static kSecValueData: CFStringRef;
+        static kSecReturnData: CFStringRef;
         static kSecUseAuthenticationUI: CFStringRef;
         static kSecUseAuthenticationUIFail: CFStringRef;
+    }
+
+    trait ProviderSecurityItemApi {
+        fn copy_matching(&self, query: CFDictionaryRef, result: *mut CFTypeRef) -> i32;
+        fn update(&self, query: CFDictionaryRef, attributes: CFDictionaryRef) -> i32;
+    }
+
+    struct SystemProviderSecurityItemApi;
+
+    impl ProviderSecurityItemApi for SystemProviderSecurityItemApi {
+        fn copy_matching(&self, query: CFDictionaryRef, result: *mut CFTypeRef) -> i32 {
+            unsafe { SecItemCopyMatching(query, result) }
+        }
+
+        fn update(&self, query: CFDictionaryRef, attributes: CFDictionaryRef) -> i32 {
+            unsafe { SecItemUpdate(query, attributes) }
+        }
     }
 
     pub(super) fn set_reviewer_password(
@@ -190,8 +209,8 @@ mod macos_keychain {
             ),
         ];
         let update = CFDictionary::from_CFType_pairs(&update);
-        let status =
-            unsafe { SecItemUpdate(query.as_concrete_TypeRef(), update.as_concrete_TypeRef()) };
+        let status = SystemProviderSecurityItemApi
+            .update(query.as_concrete_TypeRef(), update.as_concrete_TypeRef());
         security_status("replace provider credential and access", status)
     }
 
@@ -199,10 +218,17 @@ mod macos_keychain {
     /// its secret bytes or display authentication UI. Status surfaces can
     /// therefore stay metadata-only and cannot block the editor.
     pub(super) fn provider_password_exists(provider_id: &str) -> Result<bool, CredentialError> {
+        provider_password_exists_with_api(&SystemProviderSecurityItemApi, provider_id)
+    }
+
+    fn provider_password_exists_with_api(
+        api: &impl ProviderSecurityItemApi,
+        provider_id: &str,
+    ) -> Result<bool, CredentialError> {
         let options = provider_password_no_ui_options(provider_id);
         #[allow(deprecated)]
         let query = CFDictionary::from_CFType_pairs(&options.query);
-        let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), ptr::null_mut()) };
+        let status = api.copy_matching(query.as_concrete_TypeRef(), ptr::null_mut());
         match status {
             0 => Ok(true),
             ERR_SEC_ITEM_NOT_FOUND => Ok(false),
@@ -217,13 +243,44 @@ mod macos_keychain {
     /// without allowing Security.framework to display application-modal UI.
     /// Add and Replace are the only operations that may change access.
     pub(super) fn provider_password(provider_id: &str) -> Result<Vec<u8>, CredentialError> {
-        let options = provider_password_no_ui_options(provider_id);
-        security_framework::passwords::generic_password(options).map_err(|error| {
-            match error.code() {
-                ERR_SEC_ITEM_NOT_FOUND => CredentialError::Missing,
-                status => provider_access_error(status, error.to_string()),
-            }
-        })
+        provider_password_with_api(&SystemProviderSecurityItemApi, provider_id)
+    }
+
+    fn provider_password_with_api(
+        api: &impl ProviderSecurityItemApi,
+        provider_id: &str,
+    ) -> Result<Vec<u8>, CredentialError> {
+        let mut options = provider_password_no_ui_options(provider_id);
+        #[allow(deprecated)]
+        options.query.push((
+            unsafe { CFString::wrap_under_get_rule(kSecReturnData) },
+            CFBoolean::true_value().into_CFType(),
+        ));
+        #[allow(deprecated)]
+        let query = CFDictionary::from_CFType_pairs(&options.query);
+        let mut result = ptr::null();
+        let status = api.copy_matching(query.as_concrete_TypeRef(), &mut result);
+        if status == ERR_SEC_ITEM_NOT_FOUND {
+            return Err(CredentialError::Missing);
+        }
+        if status != 0 {
+            return Err(provider_access_error(
+                status,
+                security_framework::base::Error::from_code(status).to_string(),
+            ));
+        }
+        if result.is_null() {
+            return Err(CredentialError::Platform(
+                "native credential storage returned no provider data".into(),
+            ));
+        }
+        let result = unsafe { CFType::wrap_under_create_rule(result) };
+        let data = result.downcast_into::<CFData>().ok_or_else(|| {
+            CredentialError::Platform(
+                "native credential storage returned invalid provider data".into(),
+            )
+        })?;
+        Ok(data.bytes().to_vec())
     }
 
     fn provider_access_error(status: i32, message: String) -> CredentialError {
@@ -319,12 +376,40 @@ mod macos_keychain {
     #[cfg(test)]
     mod tests {
         use super::{
-            access_for_paths, provider_access_error, provider_password_no_ui_options,
-            trusted_executable_path_names,
+            ProviderSecurityItemApi, access_for_paths, provider_access_error,
+            provider_password_exists_with_api, provider_password_no_ui_options,
+            provider_password_with_api, trusted_executable_path_names,
         };
-        use core_foundation::base::TCFType as _;
+        use core_foundation::base::{CFTypeRef, TCFType as _};
+        use core_foundation::data::CFData;
+        use core_foundation::dictionary::CFDictionaryRef;
         use core_foundation::string::CFString;
         use std::path::Path;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct RecordingProviderSecurityItemApi {
+            copy_calls: AtomicUsize,
+            update_calls: AtomicUsize,
+        }
+
+        impl ProviderSecurityItemApi for RecordingProviderSecurityItemApi {
+            fn copy_matching(&self, _: CFDictionaryRef, result: *mut CFTypeRef) -> i32 {
+                self.copy_calls.fetch_add(1, Ordering::Relaxed);
+                if !result.is_null() {
+                    let data = CFData::from_buffer(b"recorded-provider-secret");
+                    let reference = data.as_CFTypeRef();
+                    std::mem::forget(data);
+                    unsafe { result.write(reference) };
+                }
+                0
+            }
+
+            fn update(&self, _: CFDictionaryRef, _: CFDictionaryRef) -> i32 {
+                self.update_calls.fetch_add(1, Ordering::Relaxed);
+                0
+            }
+        }
 
         #[test]
         fn trusted_helpers_are_siblings_of_the_running_daemon() {
@@ -389,6 +474,22 @@ mod macos_keychain {
                 provider_access_error(super::ERR_SEC_INTERACTION_NOT_ALLOWED, "ignored".into()),
                 super::CredentialError::InteractionRequired
             ));
+        }
+
+        #[test]
+        fn repeated_provider_reads_use_copy_matching_without_updates() {
+            let api = RecordingProviderSecurityItemApi::default();
+
+            for _ in 0..3 {
+                assert!(provider_password_exists_with_api(&api, "openai").unwrap());
+                assert_eq!(
+                    provider_password_with_api(&api, "openai").unwrap(),
+                    b"recorded-provider-secret"
+                );
+            }
+
+            assert_eq!(api.copy_calls.load(Ordering::Relaxed), 6);
+            assert_eq!(api.update_calls.load(Ordering::Relaxed), 0);
         }
     }
 }
