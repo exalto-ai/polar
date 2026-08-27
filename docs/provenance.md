@@ -93,3 +93,10 @@ other reviewers.
 Built-in provider keys are entered and stored by native macOS code. A model-catalog check does not
 change the document and creates no lineage or verified evidence. Later features must bind any
 provider exchange to the exact accepted change before presenting it as provider-verified.
+
+## Built-in chat
+
+Built-in chat is separate by document and provider. After explicit per-provider consent, it sends
+only completed visible chat turns and the new message—never document text, selection, or files by
+default. Its local transcript is not lineage or verified evidence, and clearing it does not rewrite
+document or reviewer history.

@@ -1,6 +1,8 @@
 import type { ReviewerBridge } from "./reviewer-bridge";
+import type { ProChatBridge } from "./pro-chat-bridge";
+import { installProChat } from "./pro-chat";
 import type { ProProviderBridge } from "./pro-provider-bridge";
-import { installProProvider } from "./pro-provider";
+import { installProProvider, type ProProviderController } from "./pro-provider";
 import {
   installReviewerConnections,
   type ReviewerDocumentContext,
@@ -15,6 +17,7 @@ type AiSupportOptions = {
   copyText?: (text: string) => Promise<void>;
   reviewerBridge?: ReviewerBridge | null;
   providerBridge?: ProProviderBridge | null;
+  chatBridge?: ProChatBridge | null;
   openExternal?: (url: string) => Promise<void>;
   onNotice?: (message: string, kind?: "info" | "error") => void;
 };
@@ -49,11 +52,21 @@ export function installAiSupport(
     copyText: options.copyText,
     onNotice: options.onNotice,
   });
-  const providers = root.querySelector("#ai-pro-panel")
+  let providers: ProProviderController | null = null;
+  const chat = root.querySelector("#pro-chat-view")
+    ? installProChat(root, {
+        bridge: options.chatBridge,
+        onOpenSettings: () => root.querySelector("#ai-pro-panel")?.scrollIntoView(),
+        onBusyChange: (provider) => providers?.setChatBusy(provider),
+        onNotice: options.onNotice,
+      })
+    : null;
+  providers = root.querySelector("#ai-pro-panel")
     ? installProProvider(root, {
         bridge: options.providerBridge,
         openExternal: options.openExternal,
         onNotice: options.onNotice,
+        onConfigurationsChange: () => void chat?.refreshCapabilities(),
       })
     : null;
 
@@ -81,6 +94,7 @@ export function installAiSupport(
     toggle.setAttribute("aria-expanded", String(open));
     reviewers.setSidebarOpen(open);
     providers?.setActive(open);
+    chat?.setActive(open);
   }
 
   function open() {
@@ -111,12 +125,17 @@ export function installAiSupport(
     isOpen: () => !sidebar.hidden,
     setConnectionCommand: (command) => reviewers.setStdioExecutable(command),
     setReviewerBridge: (bridge) => reviewers.setBridge(bridge),
-    setCurrentDocument: (context) => reviewers.setDocumentContext(context),
+    setCurrentDocument(context) {
+      reviewers.setDocumentContext(context);
+      chat?.setDocument(context);
+    },
     open,
     close,
     destroy() {
       for (const dispose of disposers.splice(0)) dispose();
       reviewers.destroy();
+      chat?.cancelActive();
+      chat?.destroy();
       providers?.destroy();
     },
   };
