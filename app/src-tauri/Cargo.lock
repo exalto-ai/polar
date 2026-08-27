@@ -4354,6 +4354,9 @@ dependencies = [
 name = "thought"
 version = "0.1.0"
 dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "rfd",
  "serde",
  "serde_json",
@@ -4362,9 +4365,12 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tempfile",
+ "thought-credentials",
  "thought-markdown",
  "thought-schema",
  "thoughtd",
+ "ureq",
+ "zeroize",
 ]
 
 [[package]]
@@ -4383,6 +4389,7 @@ version = "0.1.0"
 dependencies = [
  "core-foundation",
  "security-framework",
+ "zeroize",
 ]
 
 [[package]]
@@ -4456,6 +4463,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]

@@ -87,3 +87,9 @@ document scope. This layer is read-only: writes wait for the suggestion layer or
 expiring session grant. The configured app and any model it reports are attribution labels, not
 provider authentication. Revoking one connection invalidates its credential without affecting
 other reviewers.
+
+## Provider setup
+
+Built-in provider keys are entered and stored by native macOS code. A model-catalog check does not
+change the document and creates no lineage or verified evidence. Later features must bind any
+provider exchange to the exact accepted change before presenting it as provider-verified.

@@ -14,6 +14,10 @@ use std::{
 use tauri_plugin_dialog::DialogExt;
 use thoughtd::discovery::{self, Daemon};
 
+#[cfg(target_os = "macos")]
+mod macos_secure_input;
+mod pro_provider;
+
 #[derive(serde::Serialize)]
 struct Connection {
     protocol_version: u32,
@@ -499,16 +503,22 @@ pub fn run() {
             return;
         }
     };
+    let provider_state = pro_provider::ProviderState::platform(discovery::home());
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(daemon)
+        .manage(provider_state)
         .invoke_handler(tauri::generate_handler![
             connection,
             new_window,
             import_markdown,
             export_markdown,
-            document_wording_revision
+            document_wording_revision,
+            pro_provider::provider_configurations,
+            pro_provider::configure_provider_key,
+            pro_provider::revalidate_provider_key,
+            pro_provider::remove_provider_key
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
