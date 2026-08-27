@@ -17,10 +17,14 @@ type ProProviderOptions = {
   bridge?: ProProviderBridge | null;
   openExternal?: (url: string) => Promise<void>;
   onNotice?: (message: string, kind?: "info" | "error") => void;
+  onConfigurationsChange?: (
+    configurations: readonly ProviderConfiguration[],
+  ) => void;
 };
 
 export type ProProviderController = {
   setActive(active: boolean): void;
+  setChatBusy(provider: ProProvider | null): void;
   refresh(): Promise<void>;
   destroy(): void;
 };
@@ -83,6 +87,16 @@ function shortError(error: unknown): string {
   return clean ? clean.slice(0, 180) : "The provider setup could not be completed.";
 }
 
+function configurationSnapshot(
+  configurations: Iterable<ProviderConfiguration>,
+): string {
+  return JSON.stringify(
+    [...configurations].sort((left, right) =>
+      left.provider.localeCompare(right.provider)
+    ),
+  );
+}
+
 async function defaultOpenExternal(url: string): Promise<void> {
   const tauri = Boolean(
     (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__,
@@ -110,10 +124,12 @@ export function installProProvider(
   const disposers: Array<() => void> = [];
   let active = false;
   let busy: ProProvider | null = null;
+  let chatBusy: ProProvider | null = null;
   let loadError: string | null = null;
   let removeConfirmation: ProProvider | null = null;
   let removeReturnFocus: HTMLButtonElement | null = null;
   let destroyed = false;
+  let refreshGeneration = 0;
 
   function listen<K extends keyof HTMLElementEventMap>(
     target: HTMLElement,
@@ -189,18 +205,22 @@ export function installProProvider(
 
     configure.textContent = configured ? "Replace key" : "Add key";
     configure.hidden = removalPending;
-    configure.disabled = busy !== null || bridge === null || !costAcknowledgement.checked;
+    const operationBlocked = busy !== null || chatBusy !== null;
+    configure.disabled = operationBlocked || bridge === null || !costAcknowledgement.checked;
     revalidate.hidden = !configured;
-    revalidate.disabled = busy !== null || bridge === null;
+    revalidate.disabled = operationBlocked || bridge === null;
     remove.hidden = !configured && !removalPending;
     remove.textContent = removalPending ? "Finish removal" : "Remove";
-    remove.disabled = busy !== null || bridge === null;
+    remove.disabled = operationBlocked || bridge === null;
     confirmation.hidden = removeConfirmation !== provider;
-    container.setAttribute("aria-busy", String(busy === provider));
+    container.setAttribute(
+      "aria-busy",
+      String(busy === provider || chatBusy === provider),
+    );
   }
 
   function render(): void {
-    panel.setAttribute("aria-busy", String(busy !== null));
+    panel.setAttribute("aria-busy", String(busy !== null || chatBusy !== null));
     error.hidden = loadError === null;
     error.firstElementChild!.textContent = loadError ?? "";
     for (const provider of PROVIDERS) renderProvider(provider);
@@ -221,6 +241,7 @@ export function installProProvider(
     } else {
       attemptStatus.set(result.configuration.provider, result.attempt_status);
     }
+    options.onConfigurationsChange?.([...configurations.values()]);
   }
 
   async function refresh(): Promise<void> {
@@ -229,19 +250,24 @@ export function installProProvider(
       render();
       return;
     }
+    const generation = ++refreshGeneration;
     loadError = null;
     render();
     try {
       const values = await bridge.list();
-      if (destroyed) return;
+      if (destroyed || generation !== refreshGeneration) return;
+      const previous = configurationSnapshot(configurations.values());
       configurations.clear();
       for (const configuration of values) {
         if (PROVIDERS.includes(configuration.provider)) {
           configurations.set(configuration.provider, configuration);
         }
       }
+      if (configurationSnapshot(configurations.values()) !== previous) {
+        options.onConfigurationsChange?.([...configurations.values()]);
+      }
     } catch (cause) {
-      if (destroyed) return;
+      if (destroyed || generation !== refreshGeneration) return;
       loadError = shortError(cause);
     }
     render();
@@ -390,10 +416,15 @@ export function installProProvider(
       active = nextActive;
       if (becameActive && busy === null) void refresh();
     },
+    setChatBusy(provider) {
+      chatBusy = provider;
+      render();
+    },
     refresh,
     destroy() {
       destroyed = true;
       active = false;
+      refreshGeneration += 1;
       for (const dispose of disposers.splice(0)) dispose();
     },
   };

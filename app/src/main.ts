@@ -8,6 +8,7 @@ import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { Editor } from "@tiptap/core";
 import { installAiSupport } from "./ai-support";
+import { tauriProChatBridge } from "./pro-chat-bridge";
 import { tauriProProviderBridge } from "./pro-provider-bridge";
 import { createEditor } from "./editor";
 import { EditorApi } from "./editor-api";
@@ -96,6 +97,7 @@ function reason(error: unknown): string {
 
 const aiSupport = installAiSupport(document, {
   providerBridge: tauriProProviderBridge(),
+  chatBridge: tauriProChatBridge(),
   onNotice: notify,
 });
 

@@ -161,6 +161,70 @@
           </section>
         </section>
 
+        <section class="pro-chat-view" id="pro-chat-view" aria-labelledby="pro-chat-title">
+          <header class="pro-chat-header">
+            <div>
+              <span class="eyebrow">This document</span>
+              <h3 id="pro-chat-title">Built-in AI chat</h3>
+            </div>
+            <button class="text-button pro-chat-clear" id="pro-chat-clear" type="button" disabled>Clear conversation</button>
+          </header>
+          <p class="pro-chat-document" id="pro-chat-document">Waiting for this document to open…</p>
+
+          <div class="pro-chat-unavailable" id="pro-chat-unavailable" role="status">
+            <strong>Add a provider to start chatting</strong>
+            <span>OpenAI or Anthropic can be set up without sending document content.</span>
+            <button class="text-button" id="pro-chat-open-settings" type="button">Show provider settings</button>
+          </div>
+
+          <form class="pro-chat-controls" id="pro-chat-controls">
+            <label for="pro-chat-provider">Provider
+              <select id="pro-chat-provider" autocomplete="off" disabled></select>
+            </label>
+            <label for="pro-chat-model">Model
+              <select id="pro-chat-model" autocomplete="off" disabled></select>
+            </label>
+            <label for="pro-chat-thinking">Thinking
+              <select id="pro-chat-thinking" autocomplete="off" disabled></select>
+            </label>
+          </form>
+
+          <p class="pro-chat-loading" id="pro-chat-loading" role="status" hidden>Loading this conversation…</p>
+          <p class="pro-chat-empty" id="pro-chat-empty" hidden>Start a conversation for this document. Nothing from the editor is included automatically.</p>
+          <ol class="pro-chat-messages" id="pro-chat-messages" role="log" aria-live="off" aria-label="Conversation" tabindex="0"></ol>
+
+          <div class="pro-chat-clear-confirmation" id="pro-chat-clear-confirmation" hidden>
+            <strong>Clear this document’s chat?</strong>
+            <p>This removes the local chat only. Your document and reviewer history stay intact.</p>
+            <div class="pro-chat-actions">
+              <button id="pro-chat-clear-cancel" type="button">Keep conversation</button>
+              <button class="danger-button" id="pro-chat-clear-confirm" type="button">Clear chat</button>
+            </div>
+          </div>
+
+          <div class="pro-chat-error" id="pro-chat-error" role="alert" hidden>
+            <span id="pro-chat-error-message"></span>
+            <button class="text-button" id="pro-chat-error-retry" type="button" hidden>Try again</button>
+          </div>
+
+          <form class="pro-chat-composer" id="pro-chat-composer">
+            <label class="sr-only" for="pro-chat-message">Message the selected AI provider</label>
+            <textarea id="pro-chat-message" rows="3" maxlength="16384" placeholder="Write a message…" aria-describedby="pro-chat-sharing pro-chat-consent-copy pro-chat-message-issue" disabled></textarea>
+            <p class="pro-chat-message-issue" id="pro-chat-message-issue" role="status" hidden></p>
+            <p class="pro-chat-sharing" id="pro-chat-sharing">Only the message shown here will be sent. No document text or files are added.</p>
+            <label class="pro-chat-consent" for="pro-chat-consent">
+              <input id="pro-chat-consent" type="checkbox" disabled />
+              <span id="pro-chat-consent-copy">I agree to send this visible chat to my provider. API charges may apply.</span>
+            </label>
+            <div class="pro-chat-composer-actions">
+              <span class="pro-chat-shortcut">Enter to send · Shift Enter for a new line</span>
+              <button class="primary-button compact" id="pro-chat-send" type="submit" disabled>Send</button>
+              <button class="danger-button pro-chat-stop" id="pro-chat-stop" type="button" hidden>Stop</button>
+            </div>
+          </form>
+          <p class="sr-only" id="pro-chat-live" aria-live="polite"></p>
+        </section>
+
         <section class="ai-pro-panel" id="ai-pro-panel" aria-labelledby="ai-pro-title" aria-busy="false">
           <span class="eyebrow">Built-in AI</span>
           <h3 id="ai-pro-title">Provider keys</h3>

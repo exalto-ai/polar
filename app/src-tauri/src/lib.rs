@@ -16,6 +16,7 @@ use thoughtd::discovery::{self, Daemon};
 
 #[cfg(target_os = "macos")]
 mod macos_secure_input;
+mod pro_chat;
 mod pro_provider;
 
 #[derive(serde::Serialize)]
@@ -504,11 +505,13 @@ pub fn run() {
         }
     };
     let provider_state = pro_provider::ProviderState::platform(discovery::home());
-    tauri::Builder::default()
+    let chat_state = pro_chat::ChatState::platform(discovery::home());
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(daemon)
         .manage(provider_state)
+        .manage(chat_state)
         .invoke_handler(tauri::generate_handler![
             connection,
             new_window,
@@ -518,10 +521,28 @@ pub fn run() {
             pro_provider::provider_configurations,
             pro_provider::configure_provider_key,
             pro_provider::revalidate_provider_key,
-            pro_provider::remove_provider_key
+            pro_provider::remove_provider_key,
+            pro_chat::pro_chat_capabilities,
+            pro_chat::pro_chat_history,
+            pro_chat::start_pro_chat,
+            pro_chat::stop_pro_chat,
+            pro_chat::clear_pro_chat
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|handle, event| match event {
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Destroyed,
+            ..
+        } => {
+            if let Some(state) = handle.try_state::<pro_chat::ChatState>() {
+                state.cancel_window(&label);
+            }
+        }
+        _ => {}
+    });
 }
 
 #[cfg(test)]

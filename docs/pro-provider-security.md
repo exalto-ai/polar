@@ -1,6 +1,7 @@
 # Pro provider setup security contract
 
-**Status:** implemented provider foundation, updated 2026-08-26
+**Status:** provider-foundation implementation complete; packaged WKWebView acceptance remains open,
+updated 2026-08-27
 
 This contract covers API-key setup only. It does not activate built-in chat, file transfer, model
 selection, thinking controls, provider traces, verified provenance, or Seal publication.
@@ -98,11 +99,18 @@ change. Local removal first records a `removal_pending` tombstone, then deletes 
 and clears the provider metadata. A failed or interrupted deletion stays visibly unfinished and
 can be retried, rather than presenting the provider as configured or silently abandoning a key.
 
+Add, Check, Replace, and Remove are also mutually exclusive with active chat for the same provider.
+Chat cannot start while one of those key actions is active. This keeps one credential fixed for the
+entire provider request.
+
 ## Provenance and privacy boundary
 
 Setup creates no AI request with document content, no mutation, no suggestion, no provider receipt,
-and no provenance event. It must never unlock a verified label. Future chat will require separate
-consent before document text or files are sent. Future verification will require a
+and no provenance event. It must never unlock a verified label. The stacked Pro chat flow requires
+separate provider-specific consent. It sends completed eligible chat plus the newly typed or pasted
+message, but adds no editor document, selection, or file automatically. Its additional transport,
+local transcript, cancellation, and claim limits are in
+[pro-chat-security.md](pro-chat-security.md). Future verification will require a
 provider-authenticated exchange to bind to the exact proposal, anchors, hashes, and accepted delta.
 
 Anthropic recommends App Attest for distributed macOS apps that call its API directly. This
