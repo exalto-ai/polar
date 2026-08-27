@@ -95,6 +95,59 @@
             <button id="reviewer-setup-done" type="button">Done</button>
           </div>
         </section>
+
+        <section class="ai-pro-panel" id="ai-pro-panel" aria-labelledby="ai-pro-title" aria-busy="false">
+          <span class="eyebrow">Built-in AI</span>
+          <h3 id="ai-pro-title">Provider keys</h3>
+          <p>Add OpenAI or Anthropic for built-in AI features. Reviewer connections remain independent.</p>
+          <div class="pro-privacy-note">
+            <strong>Your key stays native</strong>
+            <p>Enter it in a macOS secure field. Proof of Thought checks model-list access over TLS and saves a successful key in your login Keychain. Setup sends no document text or files.</p>
+          </div>
+          <label class="pro-cost-acknowledgement" for="pro-cost-acknowledgement">
+            <input id="pro-cost-acknowledgement" type="checkbox" />
+            <span><strong>I understand API usage can cost money</strong><small>Your provider bills API usage. This setup check only reads the model catalog.</small></span>
+          </label>
+          <div class="pro-provider-error" id="pro-provider-error" role="alert" hidden>
+            <span></span>
+            <button class="text-button" id="pro-provider-retry" type="button">Try again</button>
+          </div>
+          <p class="sr-only" id="pro-provider-live" aria-live="polite"></p>
+          <div class="pro-provider-list">
+            <article class="pro-provider-card" data-pro-provider-card="openai" aria-busy="false">
+              <header><div><span class="eyebrow">Provider</span><h4>OpenAI</h4></div><span class="pro-provider-status" data-pro-provider-status data-status="unset">Not set up</span></header>
+              <p data-pro-provider-detail>Add a key in a native secure field, then Proof of Thought will check model-list access.</p>
+              <a class="pro-key-link" data-pro-provider-key-link href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Open OpenAI API keys</a>
+              <div class="pro-provider-actions">
+                <button class="primary-button compact" type="button" data-pro-provider-action="configure" disabled>Add key</button>
+                <button type="button" data-pro-provider-action="revalidate" hidden>Check again</button>
+                <button type="button" data-pro-provider-action="remove" hidden>Remove</button>
+              </div>
+              <div class="pro-remove-confirmation" data-pro-provider-remove-confirmation hidden>
+                <p><strong>Remove OpenAI?</strong> This deletes the local Keychain copy. It does not revoke the key.</p>
+                <div class="pro-provider-actions"><button type="button" data-pro-provider-action="cancel-remove">Cancel</button><button class="danger-button" type="button" data-pro-provider-action="confirm-remove">Remove local key</button></div>
+              </div>
+            </article>
+            <article class="pro-provider-card" data-pro-provider-card="anthropic" aria-busy="false">
+              <header><div><span class="eyebrow">Provider</span><h4>Anthropic</h4></div><span class="pro-provider-status" data-pro-provider-status data-status="unset">Not set up</span></header>
+              <p data-pro-provider-detail>Add a key in a native secure field, then Proof of Thought will check model-list access.</p>
+              <a class="pro-key-link" data-pro-provider-key-link href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener noreferrer">Open Anthropic API keys</a>
+              <div class="pro-provider-actions">
+                <button class="primary-button compact" type="button" data-pro-provider-action="configure" disabled>Add key</button>
+                <button type="button" data-pro-provider-action="revalidate" hidden>Check again</button>
+                <button type="button" data-pro-provider-action="remove" hidden>Remove</button>
+              </div>
+              <div class="pro-remove-confirmation" data-pro-provider-remove-confirmation hidden>
+                <p><strong>Remove Anthropic?</strong> This deletes the local Keychain copy. It does not revoke the key.</p>
+                <div class="pro-provider-actions"><button type="button" data-pro-provider-action="cancel-remove">Cancel</button><button class="danger-button" type="button" data-pro-provider-action="confirm-remove">Remove local key</button></div>
+              </div>
+            </article>
+          </div>
+          <details class="technical-disclosure">
+            <summary>What setup establishes</summary>
+            <p>A successful check means the provider accepted the key for its model catalog. It does not prove balance, future access, or any document change.</p>
+          </details>
+        </section>
       </aside>
     </div>
 
