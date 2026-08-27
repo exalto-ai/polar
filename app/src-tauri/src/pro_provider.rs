@@ -5,6 +5,7 @@
 //! remain in native Rust, are checked against fixed TLS endpoints, and are
 //! stored in an app-only Keychain service only after authentication succeeds.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -18,12 +19,16 @@ use zeroize::Zeroizing;
 
 pub const DISCLOSURE_VERSION: u32 = 1;
 const SETTINGS_VERSION: u32 = 1;
+const CHAT_CATALOG_VERSION: u32 = 2;
 const MAX_KEY_BYTES: usize = 4096;
 const MAX_SETTINGS_BYTES: usize = 128 * 1024;
 const MAX_MODEL_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_MODEL_COUNT: usize = 10_000;
 const MAX_MODEL_ID_BYTES: usize = 512;
+const MAX_CHAT_MODEL_COUNT: usize = 100;
+const MAX_CHAT_MODEL_ID_BYTES: usize = 160;
+const MAX_MODEL_DISPLAY_NAME_BYTES: usize = 160;
 const VALIDATION_TIMEOUT: Duration = Duration::from_secs(12);
 static SETTINGS_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -36,16 +41,16 @@ pub enum Provider {
 }
 
 impl Provider {
-    const ALL: [Self; 2] = [Self::Openai, Self::Anthropic];
+    pub(crate) const ALL: [Self; 2] = [Self::Openai, Self::Anthropic];
 
-    fn id(self) -> &'static str {
+    pub(crate) fn id(self) -> &'static str {
         match self {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
         }
     }
 
-    fn display_name(self) -> &'static str {
+    pub(crate) fn display_name(self) -> &'static str {
         match self {
             Self::Openai => "OpenAI",
             Self::Anthropic => "Anthropic",
@@ -58,6 +63,32 @@ impl Provider {
             Self::Anthropic => "https://api.anthropic.com/v1/models?limit=100",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderThinkingLevel {
+    Default,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderChatModel {
+    pub id: String,
+    pub display_name: String,
+    pub thinking_levels: Vec<ProviderThinkingLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderChatCapability {
+    pub provider: Provider,
+    pub display_name: String,
+    pub status: ValidationStatus,
+    pub models: Vec<ProviderChatModel>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +153,7 @@ pub struct ProviderActionResult {
 struct ValidationAttempt {
     status: ValidationStatus,
     model_count: Option<usize>,
+    chat_models: Vec<ProviderChatModel>,
     request_id: Option<String>,
 }
 
@@ -130,9 +162,70 @@ impl ValidationAttempt {
         Self {
             status,
             model_count: None,
+            chat_models: Vec::new(),
             request_id,
         }
     }
+}
+
+fn safe_chat_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_CHAT_MODEL_ID_BYTES
+        && id.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+}
+
+fn safe_chat_model(model: &ProviderChatModel, secret: &[u8]) -> bool {
+    safe_chat_model_id(&model.id)
+        && !value_overlaps_secret(&model.id, secret)
+        && !model.display_name.is_empty()
+        && model.display_name.len() <= MAX_MODEL_DISPLAY_NAME_BYTES
+        && !model.display_name.chars().any(char::is_control)
+        && !value_overlaps_secret(&model.display_name, secret)
+}
+
+fn normalize_chat_models(
+    models: Vec<ProviderChatModel>,
+    secret: &[u8],
+) -> Result<Vec<ProviderChatModel>, ()> {
+    let mut positions = HashMap::with_capacity(models.len().min(MAX_CHAT_MODEL_COUNT));
+    let mut normalized = Vec::with_capacity(models.len().min(MAX_CHAT_MODEL_COUNT));
+    for model in models {
+        if !safe_chat_model(&model, secret) {
+            return Err(());
+        }
+        if let Some(index) = positions.get(&model.id).copied() {
+            if normalized.get(index) != Some(&model) {
+                return Err(());
+            }
+            continue;
+        }
+        positions.insert(model.id.clone(), normalized.len());
+        normalized.push(model);
+    }
+    normalized.truncate(MAX_CHAT_MODEL_COUNT);
+    Ok(normalized)
+}
+
+fn sanitize_validation_attempt(mut attempt: ValidationAttempt, secret: &[u8]) -> ValidationAttempt {
+    if attempt
+        .request_id
+        .as_ref()
+        .is_some_and(|value| value_overlaps_secret(value, secret))
+    {
+        attempt.request_id = None;
+    }
+    if attempt.status.authenticated() {
+        match normalize_chat_models(std::mem::take(&mut attempt.chat_models), secret) {
+            Ok(models) => attempt.chat_models = models,
+            Err(()) => {
+                return ValidationAttempt::failed(
+                    ValidationStatus::InvalidProviderResponse,
+                    attempt.request_id,
+                );
+            }
+        }
+    }
+    attempt
 }
 
 trait ProviderValidator: Send + Sync {
@@ -155,6 +248,10 @@ struct ProviderRecord {
     last_checked_at: i64,
     last_validated_at: Option<i64>,
     model_count: Option<usize>,
+    #[serde(default)]
+    chat_models: Vec<ProviderChatModel>,
+    #[serde(default)]
+    chat_catalog_version: Option<u32>,
     request_id: Option<String>,
     disclosure_version: Option<u32>,
     charges_acknowledged_at: Option<i64>,
@@ -393,6 +490,150 @@ impl ProviderState {
         }
     }
 
+    pub(crate) fn chat_capabilities(&self) -> Result<Vec<ProviderChatCapability>, String> {
+        if self.0.operation_busy.load(Ordering::Acquire) {
+            return Err("Finish the current API key action before opening Pro chat.".to_string());
+        }
+        let _lock = self.lock();
+        let mut settings = load_settings(&self.0.settings_path)?;
+        let mut changed = false;
+
+        for provider in Provider::ALL {
+            let configuration = self.configuration_locked(provider, &settings)?;
+            let needs_catalog = configuration.configured
+                && settings.record(provider).is_some_and(|record| {
+                    record.chat_catalog_version != Some(CHAT_CATALOG_VERSION)
+                });
+            if !needs_catalog {
+                continue;
+            }
+            let key = self
+                .0
+                .credentials
+                .get(provider.id())
+                .map_err(credential_store_error)?;
+            let attempt = sanitize_validation_attempt(
+                self.0.validator.validate(provider, &key),
+                key.as_ref(),
+            );
+            let previous = settings
+                .record(provider)
+                .cloned()
+                .ok_or_else(|| "Provider setup is incomplete.".to_string())?;
+            let authenticated = attempt.status.authenticated();
+            let now = epoch_seconds();
+            settings.upsert(ProviderRecord {
+                provider,
+                validation_status: attempt.status,
+                last_checked_at: now,
+                last_validated_at: if authenticated {
+                    Some(now)
+                } else {
+                    previous.last_validated_at
+                },
+                model_count: if authenticated {
+                    attempt.model_count
+                } else {
+                    previous.model_count
+                },
+                chat_models: if authenticated {
+                    attempt.chat_models
+                } else {
+                    previous.chat_models
+                },
+                chat_catalog_version: if authenticated {
+                    Some(CHAT_CATALOG_VERSION)
+                } else {
+                    previous.chat_catalog_version
+                },
+                request_id: attempt.request_id,
+                disclosure_version: previous.disclosure_version,
+                charges_acknowledged_at: previous.charges_acknowledged_at,
+                removal_pending: previous.removal_pending,
+            });
+            changed = true;
+        }
+
+        if changed {
+            save_settings(&self.0.settings_path, &settings)?;
+        }
+        let mut capabilities = Vec::new();
+        for provider in Provider::ALL {
+            if !self.configuration_locked(provider, &settings)?.configured {
+                continue;
+            }
+            let record = settings
+                .record(provider)
+                .ok_or_else(|| "Provider setup is incomplete.".to_string())?;
+            let key = self
+                .0
+                .credentials
+                .get(provider.id())
+                .map_err(credential_store_error)?;
+            if record
+                .chat_models
+                .iter()
+                .any(|model| !safe_chat_model(model, &key))
+            {
+                return Err(
+                    "Provider model setup could not be used safely. Recheck the API key."
+                        .to_string(),
+                );
+            }
+            capabilities.push(ProviderChatCapability {
+                provider,
+                display_name: provider.display_name().to_string(),
+                status: record.validation_status,
+                models: record.chat_models.clone(),
+            });
+        }
+        Ok(capabilities)
+    }
+
+    pub(crate) fn chat_credential(
+        &self,
+        provider: Provider,
+        model: &str,
+        thinking: ProviderThinkingLevel,
+    ) -> Result<Zeroizing<Vec<u8>>, String> {
+        // Chat reserves its provider conversation before calling this method.
+        // Provider mutations acquire `operation_busy` first and then check the
+        // active chat registry. Those two checks close both possible orderings
+        // of a chat/key-operation race without sending credentials to the UI.
+        if self.0.operation_busy.load(Ordering::Acquire) {
+            return Err("Finish the current API key action before sending a message.".to_string());
+        }
+        let _lock = self.lock();
+        let settings = load_settings(&self.0.settings_path)?;
+        let configuration = self.configuration_locked(provider, &settings)?;
+        if !configuration.configured {
+            return Err(format!(
+                "Set up {} before sending a message.",
+                provider.display_name()
+            ));
+        }
+        let key = self
+            .0
+            .credentials
+            .get(provider.id())
+            .map_err(credential_store_error)?;
+        let allowed = settings
+            .record(provider)
+            .and_then(|record| {
+                record
+                    .chat_models
+                    .iter()
+                    .find(|candidate| candidate.id == model)
+            })
+            .is_some_and(|candidate| {
+                safe_chat_model(candidate, &key) && candidate.thinking_levels.contains(&thinking)
+            });
+        if !allowed {
+            return Err("Choose a model and thinking level shown by Proof of Thought.".to_string());
+        }
+        Ok(key)
+    }
+
     fn configure(
         &self,
         provider: Provider,
@@ -403,7 +644,8 @@ impl ProviderState {
             return Err("Review the current API cost and privacy disclosure first.".to_string());
         }
         let _lock = self.lock();
-        let attempt = self.0.validator.validate(provider, &key);
+        let attempt =
+            sanitize_validation_attempt(self.0.validator.validate(provider, &key), key.as_ref());
         if !attempt.status.authenticated() {
             let settings = load_settings(&self.0.settings_path)?;
             return Ok(ProviderActionResult {
@@ -459,6 +701,8 @@ impl ProviderState {
             last_checked_at: now,
             last_validated_at: Some(now),
             model_count: attempt.model_count,
+            chat_models: attempt.chat_models,
+            chat_catalog_version: Some(CHAT_CATALOG_VERSION),
             request_id: attempt.request_id.clone(),
             disclosure_version: Some(disclosure_version),
             charges_acknowledged_at: Some(now),
@@ -527,7 +771,8 @@ impl ProviderState {
             .credentials
             .get(provider.id())
             .map_err(credential_store_error)?;
-        let attempt = self.0.validator.validate(provider, &key);
+        let attempt =
+            sanitize_validation_attempt(self.0.validator.validate(provider, &key), key.as_ref());
         let mut settings = load_settings(&self.0.settings_path)?;
         let now = epoch_seconds();
         let previous = settings.record(provider).cloned();
@@ -546,6 +791,21 @@ impl ProviderState {
                 attempt.model_count
             } else {
                 previous.as_ref().and_then(|record| record.model_count)
+            },
+            chat_models: if attempt.status.authenticated() {
+                attempt.chat_models
+            } else {
+                previous
+                    .as_ref()
+                    .map(|record| record.chat_models.clone())
+                    .unwrap_or_default()
+            },
+            chat_catalog_version: if attempt.status.authenticated() {
+                Some(CHAT_CATALOG_VERSION)
+            } else {
+                previous
+                    .as_ref()
+                    .and_then(|record| record.chat_catalog_version)
             },
             request_id: attempt.request_id.clone(),
             disclosure_version: previous
@@ -575,6 +835,8 @@ impl ProviderState {
             last_checked_at: now,
             last_validated_at: None,
             model_count: None,
+            chat_models: Vec::new(),
+            chat_catalog_version: None,
             request_id: None,
             disclosure_version: None,
             charges_acknowledged_at: None,
@@ -621,6 +883,7 @@ pub async fn provider_configurations(
 pub async fn configure_provider_key(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProviderState>,
+    chat_state: tauri::State<'_, crate::pro_chat::ChatState>,
     provider: Provider,
     disclosure_version: u32,
 ) -> Result<ProviderActionResult, String> {
@@ -629,6 +892,9 @@ pub async fn configure_provider_key(
     }
     let state = state.inner().clone();
     let _operation = state.begin_operation()?;
+    if chat_state.provider_in_use(provider) {
+        return Err("Stop the current response before changing this API key.".to_string());
+    }
     let status_state = state.clone();
     let replacing =
         tauri::async_runtime::spawn_blocking(move || status_state.prompt_is_replacement(provider))
@@ -658,10 +924,14 @@ pub async fn configure_provider_key(
 #[tauri::command]
 pub async fn revalidate_provider_key(
     state: tauri::State<'_, ProviderState>,
+    chat_state: tauri::State<'_, crate::pro_chat::ChatState>,
     provider: Provider,
 ) -> Result<ProviderActionResult, String> {
     let state = state.inner().clone();
     let _operation = state.begin_operation()?;
+    if chat_state.provider_in_use(provider) {
+        return Err("Stop the current response before checking this API key.".to_string());
+    }
     tauri::async_runtime::spawn_blocking(move || state.revalidate(provider))
         .await
         .map_err(|_| "Provider validation stopped unexpectedly.".to_string())?
@@ -670,10 +940,14 @@ pub async fn revalidate_provider_key(
 #[tauri::command]
 pub async fn remove_provider_key(
     state: tauri::State<'_, ProviderState>,
+    chat_state: tauri::State<'_, crate::pro_chat::ChatState>,
     provider: Provider,
 ) -> Result<ProviderActionResult, String> {
     let state = state.inner().clone();
     let _operation = state.begin_operation()?;
+    if chat_state.provider_in_use(provider) {
+        return Err("Stop the current response before removing this API key.".to_string());
+    }
     tauri::async_runtime::spawn_blocking(move || state.remove(provider))
         .await
         .map_err(|_| "Provider removal stopped unexpectedly.".to_string())?
@@ -769,19 +1043,124 @@ fn validate_provider_at(
     #[derive(Deserialize)]
     struct Model {
         id: String,
+        display_name: Option<String>,
+        capabilities: Option<ModelCapabilities>,
+    }
+    #[derive(Deserialize)]
+    struct ModelCapabilities {
+        thinking: Option<ThinkingCapabilities>,
+        effort: Option<EffortCapabilities>,
+    }
+    #[derive(Deserialize)]
+    struct ThinkingCapabilities {
+        supported: Option<bool>,
+        types: Option<ThinkingTypes>,
+    }
+    #[derive(Deserialize)]
+    struct ThinkingTypes {
+        adaptive: Option<SupportedCapability>,
+    }
+    #[derive(Deserialize)]
+    struct EffortCapabilities {
+        supported: Option<bool>,
+        low: Option<SupportedCapability>,
+        medium: Option<SupportedCapability>,
+        high: Option<SupportedCapability>,
+        xhigh: Option<SupportedCapability>,
+        max: Option<SupportedCapability>,
+    }
+    #[derive(Deserialize)]
+    struct SupportedCapability {
+        supported: bool,
     }
     let Ok(catalog) = serde_json::from_slice::<ModelCatalog>(&body) else {
         return ValidationAttempt::failed(ValidationStatus::InvalidProviderResponse, request_id);
     };
     if catalog.data.len() > MAX_MODEL_COUNT
-        || catalog
-            .data
-            .iter()
-            .any(|model| model.id.is_empty() || model.id.len() > MAX_MODEL_ID_BYTES)
+        || catalog.data.iter().any(|model| {
+            model.id.is_empty()
+                || model.id.len() > MAX_MODEL_ID_BYTES
+                || model.id.chars().any(char::is_control)
+                || value_overlaps_secret(&model.id, key.as_bytes())
+                || model.display_name.as_ref().is_some_and(|name| {
+                    name.is_empty()
+                        || name.len() > MAX_MODEL_DISPLAY_NAME_BYTES
+                        || name.chars().any(char::is_control)
+                        || value_overlaps_secret(name, key.as_bytes())
+                })
+        })
     {
         return ValidationAttempt::failed(ValidationStatus::InvalidProviderResponse, request_id);
     }
     let model_count = catalog.data.len();
+    let mut chat_models = catalog
+        .data
+        .into_iter()
+        .filter_map(|model| {
+            if !safe_chat_model_id(&model.id) {
+                return None;
+            }
+            let mut thinking_levels = vec![ProviderThinkingLevel::Default];
+            match provider {
+                Provider::Openai if openai_chat_model(&model.id) => {
+                    if openai_reasoning_model(&model.id) {
+                        thinking_levels.extend([
+                            ProviderThinkingLevel::Low,
+                            ProviderThinkingLevel::Medium,
+                            ProviderThinkingLevel::High,
+                            ProviderThinkingLevel::Xhigh,
+                            ProviderThinkingLevel::Max,
+                        ]);
+                    }
+                }
+                Provider::Openai => return None,
+                Provider::Anthropic if model.id.starts_with("claude-") => {
+                    let capabilities = model.capabilities.as_ref();
+                    let adaptive = capabilities
+                        .and_then(|value| value.thinking.as_ref())
+                        .is_some_and(|value| {
+                            value.supported == Some(true)
+                                && value
+                                    .types
+                                    .as_ref()
+                                    .and_then(|types| types.adaptive.as_ref())
+                                    .is_some_and(|capability| capability.supported)
+                        });
+                    let effort = capabilities.and_then(|value| value.effort.as_ref());
+                    if adaptive && effort.is_some_and(|value| value.supported == Some(true)) {
+                        let effort = effort.expect("checked above");
+                        for (level, capability) in [
+                            (ProviderThinkingLevel::Low, effort.low.as_ref()),
+                            (ProviderThinkingLevel::Medium, effort.medium.as_ref()),
+                            (ProviderThinkingLevel::High, effort.high.as_ref()),
+                            (ProviderThinkingLevel::Xhigh, effort.xhigh.as_ref()),
+                            (ProviderThinkingLevel::Max, effort.max.as_ref()),
+                        ] {
+                            if capability.is_some_and(|capability| capability.supported) {
+                                thinking_levels.push(level);
+                            }
+                        }
+                    }
+                }
+                Provider::Anthropic => return None,
+            }
+            Some(ProviderChatModel {
+                display_name: model.display_name.unwrap_or_else(|| model.id.clone()),
+                id: model.id,
+                thinking_levels,
+            })
+        })
+        .collect::<Vec<_>>();
+    sort_chat_models(provider, &mut chat_models);
+    let chat_models = match normalize_chat_models(chat_models, key.as_bytes()) {
+        Ok(models) => models,
+        Err(()) => {
+            return ValidationAttempt::failed(
+                ValidationStatus::InvalidProviderResponse,
+                request_id,
+            );
+        }
+    };
     ValidationAttempt {
         status: if model_count == 0 {
             ValidationStatus::ModelUnavailable
@@ -789,8 +1168,47 @@ fn validate_provider_at(
             ValidationStatus::ModelAccessChecked
         },
         model_count: Some(model_count),
+        chat_models,
         request_id,
     }
+}
+
+fn openai_chat_model(id: &str) -> bool {
+    ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+        .iter()
+        .any(|base| id == *base || id.starts_with(&format!("{base}-20")))
+}
+
+fn openai_reasoning_model(id: &str) -> bool {
+    openai_chat_model(id)
+}
+
+fn sort_chat_models(provider: Provider, models: &mut [ProviderChatModel]) {
+    if provider != Provider::Openai {
+        return;
+    }
+    fn priority(id: &str) -> usize {
+        if id == "gpt-5.6-terra" {
+            0
+        } else if id == "gpt-5.6-sol" || id == "gpt-5.6" {
+            1
+        } else if id == "gpt-5.6-luna" {
+            2
+        } else if id.starts_with("gpt-5.6-terra-") {
+            3
+        } else if id.starts_with("gpt-5.6-sol-") {
+            4
+        } else if id.starts_with("gpt-5.6-luna-") {
+            5
+        } else {
+            6
+        }
+    }
+    models.sort_by(|left, right| {
+        priority(&left.id)
+            .cmp(&priority(&right.id))
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 fn read_bounded_body(
@@ -814,7 +1232,7 @@ fn read_bounded_body(
     Ok(body)
 }
 
-fn classify_provider_error(
+pub(crate) fn classify_provider_error(
     provider: Provider,
     status: u16,
     body: &[u8],
@@ -938,12 +1356,17 @@ fn response_request_id(
                 && !value.is_empty()
                 && value.len() <= 256
                 && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
-                && !value
-                    .as_bytes()
-                    .windows(secret.len())
-                    .any(|window| window == secret)
+                && !value_overlaps_secret(value, secret)
         })
         .map(ToOwned::to_owned)
+}
+
+fn value_overlaps_secret(value: &str, secret: &[u8]) -> bool {
+    !secret.is_empty()
+        && value
+            .as_bytes()
+            .windows(secret.len())
+            .any(|window| window == secret)
 }
 
 fn bounded_header_present(response: &ureq::http::Response<ureq::Body>, name: &str) -> bool {
@@ -1036,6 +1459,30 @@ fn load_settings(path: &Path) -> Result<ProviderSettings, String> {
                     .iter()
                     .any(|earlier| earlier.provider == record.provider)
             })
+        || settings.providers.iter().any(|record| {
+            record
+                .chat_catalog_version
+                .is_some_and(|version| version > CHAT_CATALOG_VERSION)
+                || record.chat_models.len() > MAX_CHAT_MODEL_COUNT
+                || record.chat_models.iter().enumerate().any(|(index, model)| {
+                    !safe_chat_model_id(&model.id)
+                        || model.display_name.is_empty()
+                        || model.display_name.len() > MAX_MODEL_DISPLAY_NAME_BYTES
+                        || model.display_name.chars().any(char::is_control)
+                        || model.thinking_levels.is_empty()
+                        || model.thinking_levels[0] != ProviderThinkingLevel::Default
+                        || model
+                            .thinking_levels
+                            .iter()
+                            .enumerate()
+                            .any(|(level_index, level)| {
+                                model.thinking_levels[..level_index].contains(level)
+                            })
+                        || record.chat_models[..index]
+                            .iter()
+                            .any(|earlier| earlier.id == model.id)
+                })
+        })
     {
         return Err("Provider settings use an unsupported format.".to_string());
     }
@@ -1098,20 +1545,32 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::net::TcpListener;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
     use std::thread;
 
-    struct StubValidator(Mutex<VecDeque<ValidationAttempt>>);
+    struct StubValidator {
+        attempts: Mutex<VecDeque<ValidationAttempt>>,
+        calls: AtomicUsize,
+    }
 
     impl StubValidator {
         fn new(attempts: impl IntoIterator<Item = ValidationAttempt>) -> Self {
-            Self(Mutex::new(attempts.into_iter().collect()))
+            Self {
+                attempts: Mutex::new(attempts.into_iter().collect()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::Acquire)
         }
     }
 
     impl ProviderValidator for StubValidator {
         fn validate(&self, _: Provider, _: &[u8]) -> ValidationAttempt {
-            self.0.lock().unwrap().pop_front().unwrap()
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.attempts.lock().unwrap().pop_front().unwrap()
         }
     }
 
@@ -1185,6 +1644,18 @@ mod tests {
         ValidationAttempt {
             status: ValidationStatus::ModelAccessChecked,
             model_count: Some(3),
+            chat_models: vec![ProviderChatModel {
+                id: "gpt-5.6-terra".into(),
+                display_name: "GPT-5.6 Terra".into(),
+                thinking_levels: vec![
+                    ProviderThinkingLevel::Default,
+                    ProviderThinkingLevel::Low,
+                    ProviderThinkingLevel::Medium,
+                    ProviderThinkingLevel::High,
+                    ProviderThinkingLevel::Xhigh,
+                    ProviderThinkingLevel::Max,
+                ],
+            }],
             request_id: Some("request-123".into()),
         }
     }
@@ -1414,6 +1885,187 @@ mod tests {
     }
 
     #[test]
+    fn configure_invokes_provider_validation_exactly_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let validator = Arc::new(StubValidator::new([valid_attempt()]));
+        let state = ProviderState::new(
+            ProviderCredentialStore::files(directory.path().join("keys")),
+            directory.path().join("settings.json"),
+            validator.clone(),
+        );
+        state
+            .configure(
+                Provider::Openai,
+                Zeroizing::new(b"sentinel-single-validation".to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap();
+        assert_eq!(validator.call_count(), 1);
+    }
+
+    #[test]
+    fn configure_deduplicates_identical_model_ids_and_reloads_cleanly() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut attempt = valid_attempt();
+        attempt.chat_models.push(attempt.chat_models[0].clone());
+        let state = test_state(&directory, [attempt]);
+        state
+            .configure(
+                Provider::Openai,
+                Zeroizing::new(b"sentinel-duplicate-catalog".to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap();
+
+        let stored = load_settings(&state.0.settings_path).unwrap();
+        let record = stored.record(Provider::Openai).unwrap();
+        assert_eq!(record.chat_models.len(), 1);
+        assert_eq!(record.chat_models[0].id, "gpt-5.6-terra");
+
+        let reloaded = ProviderState::new(
+            ProviderCredentialStore::files(directory.path().join("keys")),
+            directory.path().join("settings.json"),
+            Arc::new(StubValidator::new([])),
+        );
+        let capabilities = reloaded.chat_capabilities().unwrap();
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].models.len(), 1);
+        assert_eq!(capabilities[0].models[0].id, "gpt-5.6-terra");
+    }
+
+    #[test]
+    fn configure_rejects_conflicting_duplicate_model_ids_before_persistence() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut attempt = valid_attempt();
+        let mut conflicting = attempt.chat_models[0].clone();
+        conflicting.display_name = "Conflicting display name".to_string();
+        attempt.chat_models.push(conflicting);
+        let state = test_state(&directory, [attempt]);
+        let result = state
+            .configure(
+                Provider::Openai,
+                Zeroizing::new(b"sentinel-conflicting-catalog".to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap();
+
+        assert_eq!(result.outcome, ProviderActionOutcome::ValidationFailed);
+        assert_eq!(
+            result.attempt_status,
+            Some(ValidationStatus::InvalidProviderResponse)
+        );
+        assert!(!state.0.credentials.contains("openai").unwrap());
+        assert!(
+            load_settings(&state.0.settings_path)
+                .unwrap()
+                .providers
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn chat_credentials_require_a_native_catalog_choice_and_never_serialize() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = test_state(&directory, [valid_attempt()]);
+        let sentinel = b"sentinel-chat-secret";
+        state
+            .configure(
+                Provider::Openai,
+                Zeroizing::new(sentinel.to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap();
+
+        let credential = state
+            .chat_credential(
+                Provider::Openai,
+                "gpt-5.6-terra",
+                ProviderThinkingLevel::Medium,
+            )
+            .unwrap();
+        assert_eq!(&*credential, sentinel);
+        assert!(
+            state
+                .chat_credential(
+                    Provider::Openai,
+                    "unlisted-model",
+                    ProviderThinkingLevel::Default,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            &*state
+                .chat_credential(
+                    Provider::Openai,
+                    "gpt-5.6-terra",
+                    ProviderThinkingLevel::Max,
+                )
+                .unwrap(),
+            sentinel
+        );
+
+        let capabilities = serde_json::to_vec(&state.chat_capabilities().unwrap()).unwrap();
+        assert!(
+            !capabilities
+                .windows(sentinel.len())
+                .any(|window| window == sentinel)
+        );
+    }
+
+    #[test]
+    fn stored_catalog_metadata_that_reflects_the_key_never_crosses_chat_ipc() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = test_state(&directory, [valid_attempt()]);
+        let sentinel = b"sentinel-stored-catalog-key";
+        state
+            .configure(
+                Provider::Openai,
+                Zeroizing::new(sentinel.to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap();
+
+        for tamper_id in [false, true] {
+            let mut settings = load_settings(&state.0.settings_path).unwrap();
+            let model_id = {
+                let model = settings
+                    .providers
+                    .iter_mut()
+                    .find(|record| record.provider == Provider::Openai)
+                    .and_then(|record| record.chat_models.first_mut())
+                    .unwrap();
+                if tamper_id {
+                    model.id = format!("gpt-{}", String::from_utf8_lossy(sentinel));
+                    model.display_name = "Safe display".to_string();
+                } else {
+                    model.id = "gpt-5.6-terra".to_string();
+                    model.display_name = format!("GPT {}", String::from_utf8_lossy(sentinel));
+                }
+                model.id.clone()
+            };
+            save_settings(&state.0.settings_path, &settings).unwrap();
+
+            assert!(state.chat_capabilities().is_err());
+            assert!(
+                state
+                    .chat_credential(Provider::Openai, &model_id, ProviderThinkingLevel::Default,)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn chat_model_ids_are_printable_and_match_the_send_limit() {
+        assert!(safe_chat_model_id(&"m".repeat(MAX_CHAT_MODEL_ID_BYTES)));
+        assert!(!safe_chat_model_id(
+            &"m".repeat(MAX_CHAT_MODEL_ID_BYTES + 1)
+        ));
+        assert!(!safe_chat_model_id("gpt-5.6\nterra"));
+        assert!(!safe_chat_model_id("gpt-5.6-terr\u{7f}"));
+        assert!(!safe_chat_model_id("gpt-5.6-terré"));
+    }
+
+    #[test]
     fn failed_and_cancelled_replacements_cannot_overwrite_a_saved_key() {
         let directory = tempfile::tempdir().unwrap();
         let state = test_state(
@@ -1604,7 +2256,7 @@ mod tests {
 
     #[test]
     fn provider_validation_uses_fixed_auth_shapes_and_parses_catalogs() {
-        let body = "{\"data\":[{\"id\":\"model-one\"},{\"id\":\"model-two\"}]}";
+        let body = r#"{"data":[{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-luna-2026-08-01"},{"id":"text-embedding-4"}]}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nx-request-id: req-openai\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
@@ -1613,13 +2265,32 @@ mod tests {
         let attempt =
             validate_provider_at(Provider::Openai, b"sentinel-openai-key", &endpoint, false);
         assert_eq!(attempt.status, ValidationStatus::ModelAccessChecked);
-        assert_eq!(attempt.model_count, Some(2));
+        assert_eq!(attempt.model_count, Some(3));
         assert_eq!(attempt.request_id.as_deref(), Some("req-openai"));
+        assert_eq!(
+            attempt
+                .chat_models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-5.6-terra", "gpt-5.6-luna-2026-08-01"]
+        );
+        assert!(attempt.chat_models.iter().all(|model| {
+            model.thinking_levels
+                == [
+                    ProviderThinkingLevel::Default,
+                    ProviderThinkingLevel::Low,
+                    ProviderThinkingLevel::Medium,
+                    ProviderThinkingLevel::High,
+                    ProviderThinkingLevel::Xhigh,
+                    ProviderThinkingLevel::Max,
+                ]
+        }));
         let request = request.recv().unwrap().to_ascii_lowercase();
         assert!(request.contains("authorization: bearer sentinel-openai-key"));
         assert!(request.contains("x-client-request-id: thought-provider-check-"));
 
-        let body = "{\"data\":[]}";
+        let body = r#"{"data":[{"id":"claude-opus-4-6","display_name":"Claude Opus 4.6","capabilities":{"thinking":{"supported":true,"types":{"adaptive":{"supported":true}}},"effort":{"supported":true,"low":{"supported":true},"medium":{"supported":true},"high":{"supported":true},"xhigh":{"supported":false},"max":{"supported":false}}}},{"id":"embedding-model","display_name":"Not chat"}]}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nrequest-id: req-anthropic\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
@@ -1642,12 +2313,63 @@ mod tests {
             &format!("http://{address}/v1/models?limit=100"),
             false,
         );
-        assert_eq!(attempt.status, ValidationStatus::ModelUnavailable);
-        assert_eq!(attempt.model_count, Some(0));
+        assert_eq!(attempt.status, ValidationStatus::ModelAccessChecked);
+        assert_eq!(attempt.model_count, Some(2));
+        assert_eq!(attempt.chat_models.len(), 1);
+        assert_eq!(attempt.chat_models[0].id, "claude-opus-4-6");
+        assert_eq!(
+            attempt.chat_models[0].thinking_levels,
+            [
+                ProviderThinkingLevel::Default,
+                ProviderThinkingLevel::Low,
+                ProviderThinkingLevel::Medium,
+                ProviderThinkingLevel::High,
+            ]
+        );
         let request = receiver.recv().unwrap().to_ascii_lowercase();
         assert!(request.contains("x-api-key: sentinel-anthropic-key"));
         assert!(request.contains("anthropic-version: 2023-06-01"));
         assert!(!request.contains("authorization:"));
+    }
+
+    #[test]
+    fn provider_catalogs_reject_api_key_reflection_in_ids_and_display_names() {
+        fn validate_catalog(provider: Provider, key: &[u8], body: &str) -> ValidationAttempt {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let (endpoint, _request) = one_response(response);
+            validate_provider_at(provider, key, &endpoint, false)
+        }
+
+        for (provider, key, body) in [
+            (
+                Provider::Openai,
+                b"gpt-5.6-".as_slice(),
+                r#"{"data":[{"id":"gpt-5.6-terra"}]}"#,
+            ),
+            (
+                Provider::Openai,
+                b"sentinel-openai-key".as_slice(),
+                r#"{"data":[{"id":"gpt-5.6-terra","display_name":"GPT sentinel-openai-key"}]}"#,
+            ),
+            (
+                Provider::Anthropic,
+                b"claude-opus".as_slice(),
+                r#"{"data":[{"id":"claude-opus-4-6","display_name":"Claude Opus"}]}"#,
+            ),
+            (
+                Provider::Anthropic,
+                b"sentinel-anthropic-key".as_slice(),
+                r#"{"data":[{"id":"claude-opus-4-6","display_name":"Claude sentinel-anthropic-key"}]}"#,
+            ),
+        ] {
+            let attempt = validate_catalog(provider, key, body);
+            assert_eq!(attempt.status, ValidationStatus::InvalidProviderResponse);
+            assert!(attempt.chat_models.is_empty());
+            assert!(attempt.request_id.is_none());
+        }
     }
 
     #[test]

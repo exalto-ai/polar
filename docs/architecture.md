@@ -453,6 +453,25 @@ action owned by the feature that needs it.
 **Cost:** setup requires macOS-specific code and signed-build Keychain testing. Provider status is
 deliberately less detailed than raw API errors.
 
+### AD-24 — Built-in chat is local, partitioned, and not provenance
+
+Native Rust reads the configured key, calls fixed OpenAI or Anthropic endpoints, streams visible
+output, classifies failures, and owns cancellation. Keys and authorization headers never enter the
+webview. Each document and provider has a separate local transcript and revision; no provider-side
+conversation identifier is reused.
+
+Before the first send to each provider in a window, the person acknowledges that the visible chat
+and new message leave the device and may incur charges. Setup consent does not cover sending
+content. Only completed visible turns are replayed as context. Partial, stopped, failed, or
+interrupted output may remain visible but is excluded from later requests.
+
+The transcript is private app state, not a document or evidence record. Clearing it does not alter
+the CRDT, lineage, reviewers, or suggestions. This layer sends no files, selection, or document text
+and cannot claim provider-verified provenance.
+
+**Cost:** the native layer owns provider-specific streaming state and a private transcript store.
+Stopping a request cannot prove the provider stopped processing immediately.
+
 ### AD-15 — The local editor writes directly; configured reviewers propose
 
 The bundled editor writes through the daemon's observed editor routes. Durable reviewer

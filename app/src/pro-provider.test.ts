@@ -72,7 +72,11 @@ describe("Pro provider setup", () => {
       revalidate: vi.fn(),
       remove: vi.fn(),
     };
-    const controller = installProProvider(document, { bridge });
+    const changed = vi.fn();
+    const controller = installProProvider(document, {
+      bridge,
+      onConfigurationsChange: changed,
+    });
     controller.setActive(true);
     await vi.waitFor(() => expect(bridge.list).toHaveBeenCalledTimes(1));
 
@@ -102,6 +106,67 @@ describe("Pro provider setup", () => {
     expect(document.querySelector("#pro-provider-live")?.textContent).not.toContain(
       "ready",
     );
+    expect(changed).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ provider: "openai", configured: true }),
+    ]));
+    controller.destroy();
+  });
+
+  it("blocks provider-key changes while chat is using a provider", async () => {
+    const bridge: ProProviderBridge = {
+      list: vi.fn().mockResolvedValue([configuration("openai", true, "model_access_checked")]),
+      configure: vi.fn(),
+      revalidate: vi.fn(),
+      remove: vi.fn(),
+    };
+    const controller = installProProvider(document, { bridge });
+    controller.setActive(true);
+    await vi.waitFor(() => expect(bridge.list).toHaveBeenCalled());
+    const acknowledgement = document.querySelector<HTMLInputElement>(
+      "#pro-cost-acknowledgement",
+    )!;
+    acknowledgement.checked = true;
+    acknowledgement.dispatchEvent(new Event("change", { bubbles: true }));
+
+    controller.setChatBusy("openai");
+    expect(providerButton("openai", "configure").disabled).toBe(true);
+    expect(providerButton("openai", "revalidate").disabled).toBe(true);
+    expect(providerButton("openai", "remove").disabled).toBe(true);
+    expect(
+      document.querySelector('[data-pro-provider-card="openai"]')?.getAttribute("aria-busy"),
+    ).toBe("true");
+
+    controller.setChatBusy(null);
+    expect(providerButton("openai", "configure").disabled).toBe(false);
+    controller.destroy();
+  });
+
+  it("notifies chat when a refresh sees configuration changes from another window", async () => {
+    const initial = configuration("openai");
+    const configured = configuration("openai", true, "model_access_checked");
+    const list = vi.fn()
+      .mockResolvedValueOnce([initial])
+      .mockResolvedValueOnce([configured]);
+    const changed = vi.fn();
+    const controller = installProProvider(document, {
+      bridge: {
+        list,
+        configure: vi.fn(),
+        revalidate: vi.fn(),
+        remove: vi.fn(),
+      },
+      onConfigurationsChange: changed,
+    });
+    controller.setActive(true);
+    await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+    changed.mockClear();
+
+    await controller.refresh();
+
+    expect(changed).toHaveBeenCalledOnce();
+    expect(changed).toHaveBeenCalledWith([
+      expect.objectContaining({ provider: "openai", configured: true }),
+    ]);
     controller.destroy();
   });
 
