@@ -1769,6 +1769,7 @@ dependencies = [
  "core-foundation",
  "security-framework",
  "tempfile",
+ "zeroize",
 ]
 
 [[package]]

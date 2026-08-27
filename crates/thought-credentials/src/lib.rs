@@ -1,9 +1,10 @@
-//! Private reviewer credential storage shared by the daemon and STDIO shim.
+//! Private credential storage for reviewer routes and built-in providers.
 //!
 //! Production macOS builds use the login Keychain. Tests and non-macOS
 //! development use an explicit user-only file store so CI does not depend on a
-//! desktop secret-service session. Callers receive secret bytes only inside
-//! native Rust processes. The webview and setup command carry a connection ID.
+//! desktop secret-service session. Reviewer credentials are shared only with
+//! the daemon helpers. Provider keys use a separate app-owned Keychain service
+//! and never cross into the webview.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -11,9 +12,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(target_os = "macos")]
-const KEYCHAIN_SERVICE: &str = "ai.exalto.thought.reviewer";
+const REVIEWER_KEYCHAIN_SERVICE: &str = "ai.exalto.thought.reviewer";
 #[cfg(target_os = "macos")]
-const KEYCHAIN_DESCRIPTION: &str = "Proof of Thought reviewer connection";
+const REVIEWER_KEYCHAIN_DESCRIPTION: &str = "Proof of Thought reviewer connection";
+#[cfg(target_os = "macos")]
+const PROVIDER_KEYCHAIN_SERVICE: &str = "ai.exalto.thought.provider";
+#[cfg(target_os = "macos")]
+const PROVIDER_KEYCHAIN_DESCRIPTION: &str = "Proof of Thought AI provider key";
 #[cfg(target_os = "macos")]
 const ERR_SEC_DUPLICATE_ITEM: i32 = -25_299;
 #[cfg(target_os = "macos")]
@@ -25,7 +30,11 @@ static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
 mod macos_keychain {
-    use super::{CredentialError, ERR_SEC_DUPLICATE_ITEM, KEYCHAIN_DESCRIPTION, KEYCHAIN_SERVICE};
+    use super::{
+        CredentialError, ERR_SEC_DUPLICATE_ITEM, ERR_SEC_ITEM_NOT_FOUND,
+        PROVIDER_KEYCHAIN_DESCRIPTION, PROVIDER_KEYCHAIN_SERVICE, REVIEWER_KEYCHAIN_DESCRIPTION,
+        REVIEWER_KEYCHAIN_SERVICE,
+    };
     use core_foundation::array::{CFArray, CFArrayRef};
     use core_foundation::base::{CFType, CFTypeID, CFTypeRef, TCFType};
     use core_foundation::data::CFData;
@@ -65,20 +74,21 @@ mod macos_keychain {
             access: *mut AccessRef,
         ) -> i32;
         fn SecItemAdd(attributes: CFDictionaryRef, result: *mut CFTypeRef) -> i32;
+        fn SecItemCopyMatching(query: CFDictionaryRef, result: *mut CFTypeRef) -> i32;
         fn SecItemUpdate(query: CFDictionaryRef, attributes: CFDictionaryRef) -> i32;
         static kSecAttrAccess: CFStringRef;
         static kSecValueData: CFStringRef;
     }
 
-    pub(super) fn set_password(
+    pub(super) fn set_reviewer_password(
         connection_id: &str,
         credential: &[u8],
     ) -> Result<(), CredentialError> {
         let executable = std::env::current_exe().map_err(CredentialError::Io)?;
         let paths = trusted_executable_paths(&executable)?;
-        let access = access_for_paths(&paths)?;
+        let access = access_for_paths(&paths, REVIEWER_KEYCHAIN_DESCRIPTION)?;
         let mut options = security_framework::passwords::PasswordOptions::new_generic_password(
-            KEYCHAIN_SERVICE,
+            REVIEWER_KEYCHAIN_SERVICE,
             connection_id,
         );
         #[allow(deprecated)]
@@ -103,7 +113,7 @@ mod macos_keychain {
         }
 
         let query = security_framework::passwords::PasswordOptions::new_generic_password(
-            KEYCHAIN_SERVICE,
+            REVIEWER_KEYCHAIN_SERVICE,
             connection_id,
         );
         #[allow(deprecated)]
@@ -122,6 +132,106 @@ mod macos_keychain {
         let status =
             unsafe { SecItemUpdate(query.as_concrete_TypeRef(), update.as_concrete_TypeRef()) };
         security_status("update reviewer credential and access", status)
+    }
+
+    /// Provider credentials are used only by the signed app process. Reset the
+    /// access list on both creation and replacement so another same-user app
+    /// cannot pre-create this public service/account and keep read access when
+    /// Proof of Thought stores the person's validated key.
+    pub(super) fn set_provider_password(
+        provider_id: &str,
+        credential: &[u8],
+    ) -> Result<(), CredentialError> {
+        let executable = std::env::current_exe().map_err(CredentialError::Io)?;
+        let access = access_for_paths(&[executable], PROVIDER_KEYCHAIN_DESCRIPTION)?;
+        let mut options = security_framework::passwords::PasswordOptions::new_generic_password(
+            PROVIDER_KEYCHAIN_SERVICE,
+            provider_id,
+        );
+        #[allow(deprecated)]
+        options.query.extend([
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecAttrAccess) },
+                access.clone().into_CFType(),
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecValueData) },
+                CFData::from_buffer(credential).into_CFType(),
+            ),
+        ]);
+        #[allow(deprecated)]
+        let add = CFDictionary::from_CFType_pairs(&options.query);
+        let status = unsafe { SecItemAdd(add.as_concrete_TypeRef(), ptr::null_mut()) };
+        if status == 0 {
+            return Ok(());
+        }
+        if status != ERR_SEC_DUPLICATE_ITEM {
+            return security_status("create provider credential", status);
+        }
+
+        let query = security_framework::passwords::PasswordOptions::new_generic_password(
+            PROVIDER_KEYCHAIN_SERVICE,
+            provider_id,
+        );
+        #[allow(deprecated)]
+        let query = CFDictionary::from_CFType_pairs(&query.query);
+        let update: [(CFString, CFType); 2] = [
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecAttrAccess) },
+                access.into_CFType(),
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecValueData) },
+                CFData::from_buffer(credential).into_CFType(),
+            ),
+        ];
+        let update = CFDictionary::from_CFType_pairs(&update);
+        let status =
+            unsafe { SecItemUpdate(query.as_concrete_TypeRef(), update.as_concrete_TypeRef()) };
+        security_status("replace provider credential and access", status)
+    }
+
+    /// Check for a provider item without asking Security.framework to return
+    /// its secret bytes. Status surfaces can therefore stay metadata-only.
+    pub(super) fn provider_password_exists(provider_id: &str) -> Result<bool, CredentialError> {
+        let options = security_framework::passwords::PasswordOptions::new_generic_password(
+            PROVIDER_KEYCHAIN_SERVICE,
+            provider_id,
+        );
+        #[allow(deprecated)]
+        let query = CFDictionary::from_CFType_pairs(&options.query);
+        let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), ptr::null_mut()) };
+        match status {
+            0 => Ok(true),
+            ERR_SEC_ITEM_NOT_FOUND => Ok(false),
+            status => security_status("inspect provider credential", status).map(|()| false),
+        }
+    }
+
+    /// Reassert app-only access before returning any provider bytes. This also
+    /// makes a same-user item preseed fail closed if its existing access list
+    /// does not permit Proof of Thought to replace that list.
+    pub(super) fn harden_provider_password(provider_id: &str) -> Result<(), CredentialError> {
+        let executable = std::env::current_exe().map_err(CredentialError::Io)?;
+        let access = access_for_paths(&[executable], PROVIDER_KEYCHAIN_DESCRIPTION)?;
+        let query = security_framework::passwords::PasswordOptions::new_generic_password(
+            PROVIDER_KEYCHAIN_SERVICE,
+            provider_id,
+        );
+        #[allow(deprecated)]
+        let query = CFDictionary::from_CFType_pairs(&query.query);
+        let update = [(
+            unsafe { CFString::wrap_under_get_rule(kSecAttrAccess) },
+            access.into_CFType(),
+        )];
+        let update = CFDictionary::from_CFType_pairs(&update);
+        let status =
+            unsafe { SecItemUpdate(query.as_concrete_TypeRef(), update.as_concrete_TypeRef()) };
+        if status == ERR_SEC_ITEM_NOT_FOUND {
+            Err(CredentialError::Missing)
+        } else {
+            security_status("protect provider credential access", status)
+        }
     }
 
     fn trusted_executable_paths(executable: &Path) -> Result<[PathBuf; 2], CredentialError> {
@@ -147,13 +257,13 @@ mod macos_keychain {
         ])
     }
 
-    fn access_for_paths(paths: &[PathBuf]) -> Result<Access, CredentialError> {
+    fn access_for_paths(paths: &[PathBuf], description: &str) -> Result<Access, CredentialError> {
         let trusted = paths
             .iter()
             .map(|path| trusted_application(path))
             .collect::<Result<Vec<_>, _>>()?;
         let trusted_list = CFArray::from_CFTypes(&trusted);
-        let descriptor = CFString::new(KEYCHAIN_DESCRIPTION);
+        let descriptor = CFString::new(description);
         let mut access = ptr::null_mut();
         let status = unsafe {
             SecAccessCreate(
@@ -162,7 +272,7 @@ mod macos_keychain {
                 &mut access,
             )
         };
-        security_status("create reviewer credential access", status)?;
+        security_status("create credential access", status)?;
         Ok(unsafe { Access::wrap_under_create_rule(access) })
     }
 
@@ -218,7 +328,17 @@ mod macos_keychain {
         #[test]
         fn native_access_object_can_be_built_without_keychain_io() {
             let current = std::env::current_exe().unwrap();
-            access_for_paths(&[current.clone(), current]).unwrap();
+            access_for_paths(
+                &[current.clone(), current],
+                super::REVIEWER_KEYCHAIN_DESCRIPTION,
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn provider_access_object_trusts_only_the_running_app() {
+            let current = std::env::current_exe().unwrap();
+            access_for_paths(&[current], super::PROVIDER_KEYCHAIN_DESCRIPTION).unwrap();
         }
     }
 }
@@ -226,6 +346,7 @@ mod macos_keychain {
 #[derive(Debug)]
 pub enum CredentialError {
     InvalidConnectionId,
+    InvalidProviderId,
     Missing,
     Io(io::Error),
     Platform(String),
@@ -236,6 +357,7 @@ impl std::fmt::Display for CredentialError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidConnectionId => formatter.write_str("invalid reviewer connection ID"),
+            Self::InvalidProviderId => formatter.write_str("invalid provider ID"),
             Self::Missing => formatter.write_str("reviewer credential is missing"),
             Self::Io(error) => write!(formatter, "credential storage: {error}"),
             Self::Platform(error) => write!(formatter, "native credential storage: {error}"),
@@ -309,7 +431,7 @@ impl CredentialStore {
         }
         match &self.backend {
             #[cfg(target_os = "macos")]
-            Backend::Keychain => macos_keychain::set_password(connection_id, credential),
+            Backend::Keychain => macos_keychain::set_reviewer_password(connection_id, credential),
             Backend::Files(directory) => write_private_file(directory, connection_id, credential),
         }
     }
@@ -320,7 +442,7 @@ impl CredentialStore {
             #[cfg(target_os = "macos")]
             Backend::Keychain => security_framework::passwords::generic_password(
                 security_framework::passwords::PasswordOptions::new_generic_password(
-                    KEYCHAIN_SERVICE,
+                    REVIEWER_KEYCHAIN_SERVICE,
                     connection_id,
                 ),
             )
@@ -345,7 +467,7 @@ impl CredentialStore {
             #[cfg(target_os = "macos")]
             Backend::Keychain => {
                 match security_framework::passwords::delete_generic_password(
-                    KEYCHAIN_SERVICE,
+                    REVIEWER_KEYCHAIN_SERVICE,
                     connection_id,
                 ) {
                     Ok(()) => Ok(()),
@@ -355,6 +477,158 @@ impl CredentialStore {
             }
             Backend::Files(directory) => {
                 let path = credential_path(directory, connection_id);
+                match std::fs::remove_file(path) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error.into()),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ProviderBackend {
+    #[cfg(target_os = "macos")]
+    Keychain,
+    #[cfg(not(target_os = "macos"))]
+    Unavailable,
+    Files(PathBuf),
+}
+
+/// Native-only storage for a person's OpenAI or Anthropic API key.
+///
+/// The production macOS backend uses a service separate from reviewer route
+/// credentials. Only the app process needs these keys. The explicit file
+/// backend exists for isolated tests and non-macOS development, not as a
+/// release-grade desktop vault.
+#[derive(Debug, Clone)]
+pub struct ProviderCredentialStore {
+    backend: ProviderBackend,
+}
+
+impl ProviderCredentialStore {
+    pub fn platform(application_home: impl AsRef<Path>) -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = application_home;
+            Self {
+                backend: ProviderBackend::Keychain,
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = application_home;
+            Self {
+                backend: ProviderBackend::Unavailable,
+            }
+        }
+    }
+
+    pub fn files(directory: impl Into<PathBuf>) -> Self {
+        Self {
+            backend: ProviderBackend::Files(directory.into()),
+        }
+    }
+
+    pub fn set(&self, provider_id: &str, credential: &[u8]) -> Result<(), CredentialError> {
+        validate_provider_id(provider_id)?;
+        validate_credential(credential)?;
+        match &self.backend {
+            #[cfg(target_os = "macos")]
+            ProviderBackend::Keychain => {
+                macos_keychain::set_provider_password(provider_id, credential)
+            }
+            #[cfg(not(target_os = "macos"))]
+            ProviderBackend::Unavailable => Err(CredentialError::Platform(
+                "secure provider storage is unavailable on this platform".into(),
+            )),
+            ProviderBackend::Files(directory) => {
+                write_private_file(directory, provider_id, credential)
+            }
+        }
+    }
+
+    pub fn get(&self, provider_id: &str) -> Result<zeroize::Zeroizing<Vec<u8>>, CredentialError> {
+        validate_provider_id(provider_id)?;
+        let credential = match &self.backend {
+            #[cfg(target_os = "macos")]
+            ProviderBackend::Keychain => {
+                macos_keychain::harden_provider_password(provider_id)?;
+                security_framework::passwords::generic_password(
+                    security_framework::passwords::PasswordOptions::new_generic_password(
+                        PROVIDER_KEYCHAIN_SERVICE,
+                        provider_id,
+                    ),
+                )
+                .map_err(|error| {
+                    if error.code() == ERR_SEC_ITEM_NOT_FOUND {
+                        CredentialError::Missing
+                    } else {
+                        CredentialError::Platform(error.to_string())
+                    }
+                })?
+            }
+            #[cfg(not(target_os = "macos"))]
+            ProviderBackend::Unavailable => {
+                return Err(CredentialError::Platform(
+                    "secure provider storage is unavailable on this platform".into(),
+                ));
+            }
+            ProviderBackend::Files(directory) => read_private_file(directory, provider_id)
+                .map_err(|error| match error {
+                    CredentialError::Io(ref source) if source.kind() == io::ErrorKind::NotFound => {
+                        CredentialError::Missing
+                    }
+                    other => other,
+                })?,
+        };
+        validate_credential(&credential)?;
+        Ok(zeroize::Zeroizing::new(credential))
+    }
+
+    pub fn contains(&self, provider_id: &str) -> Result<bool, CredentialError> {
+        validate_provider_id(provider_id)?;
+        match &self.backend {
+            #[cfg(target_os = "macos")]
+            ProviderBackend::Keychain => macos_keychain::provider_password_exists(provider_id),
+            #[cfg(not(target_os = "macos"))]
+            ProviderBackend::Unavailable => Err(CredentialError::Platform(
+                "secure provider storage is unavailable on this platform".into(),
+            )),
+            ProviderBackend::Files(directory) => {
+                let path = credential_path(directory, provider_id);
+                match std::fs::symlink_metadata(path) {
+                    Ok(metadata) => {
+                        Ok(metadata.file_type().is_file() && !metadata.file_type().is_symlink())
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                    Err(error) => Err(error.into()),
+                }
+            }
+        }
+    }
+
+    pub fn delete(&self, provider_id: &str) -> Result<(), CredentialError> {
+        validate_provider_id(provider_id)?;
+        match &self.backend {
+            #[cfg(target_os = "macos")]
+            ProviderBackend::Keychain => {
+                match security_framework::passwords::delete_generic_password(
+                    PROVIDER_KEYCHAIN_SERVICE,
+                    provider_id,
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+                    Err(error) => Err(CredentialError::Platform(error.to_string())),
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            ProviderBackend::Unavailable => Err(CredentialError::Platform(
+                "secure provider storage is unavailable on this platform".into(),
+            )),
+            ProviderBackend::Files(directory) => {
+                let path = credential_path(directory, provider_id);
                 match std::fs::remove_file(path) {
                     Ok(()) => Ok(()),
                     Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -380,6 +654,22 @@ fn validate_connection_id(connection_id: &str) -> Result<(), CredentialError> {
         return Err(CredentialError::InvalidConnectionId);
     }
     Ok(())
+}
+
+fn validate_provider_id(provider_id: &str) -> Result<(), CredentialError> {
+    if matches!(provider_id, "openai" | "anthropic") {
+        Ok(())
+    } else {
+        Err(CredentialError::InvalidProviderId)
+    }
+}
+
+fn validate_credential(credential: &[u8]) -> Result<(), CredentialError> {
+    if credential.is_empty() || credential.len() > MAX_CREDENTIAL_LENGTH {
+        Err(CredentialError::InvalidStoredCredential)
+    } else {
+        Ok(())
+    }
 }
 
 fn credential_path(directory: &Path, connection_id: &str) -> PathBuf {
@@ -469,7 +759,9 @@ fn sync_directory(directory: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CredentialError, CredentialStore, debug_file_backend_requested};
+    use super::{
+        CredentialError, CredentialStore, ProviderCredentialStore, debug_file_backend_requested,
+    };
 
     #[test]
     fn debug_file_backend_override_is_exact() {
@@ -515,6 +807,30 @@ mod tests {
         assert!(matches!(
             store.set(id, &[b'x'; 4097]),
             Err(CredentialError::InvalidStoredCredential)
+        ));
+    }
+
+    #[test]
+    fn provider_file_store_has_a_separate_fixed_namespace() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProviderCredentialStore::files(directory.path());
+
+        assert!(!store.contains("openai").unwrap());
+        store.set("openai", b"first-provider-secret").unwrap();
+        assert!(store.contains("openai").unwrap());
+        assert_eq!(&*store.get("openai").unwrap(), b"first-provider-secret");
+        store.set("openai", b"replacement-provider-secret").unwrap();
+        assert_eq!(
+            &*store.get("openai").unwrap(),
+            b"replacement-provider-secret"
+        );
+        store.delete("openai").unwrap();
+        assert!(!store.contains("openai").unwrap());
+        store.delete("openai").unwrap();
+
+        assert!(matches!(
+            store.set("custom-provider", b"secret"),
+            Err(CredentialError::InvalidProviderId)
         ));
     }
 

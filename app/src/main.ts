@@ -8,6 +8,7 @@ import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { Editor } from "@tiptap/core";
 import { installAiSupport } from "./ai-support";
+import { tauriProProviderBridge } from "./pro-provider-bridge";
 import { createEditor } from "./editor";
 import { EditorApi } from "./editor-api";
 import { installCurrentSources } from "./current-sources";
@@ -93,7 +94,10 @@ function reason(error: unknown): string {
   return text.length > 160 ? `${text.slice(0, 157)}…` : text;
 }
 
-const aiSupport = installAiSupport(document, { onNotice: notify });
+const aiSupport = installAiSupport(document, {
+  providerBridge: tauriProProviderBridge(),
+  onNotice: notify,
+});
 
 async function visibleWordingRevision(): Promise<string | null> {
   const current = open;

@@ -212,6 +212,7 @@ fn credential_failure_code(error: &CredentialError) -> FailureCode {
             FailureCode::CredentialMissing
         }
         CredentialError::InvalidConnectionId
+        | CredentialError::InvalidProviderId
         | CredentialError::Io(_)
         | CredentialError::Platform(_)
         | CredentialError::InvalidStoredCredential => FailureCode::CredentialStore,

@@ -224,18 +224,24 @@ jobs:
             "ai.exalto.thought.thought-mcp-stdio"
 
           if [ "$SIGN" = "true" ]; then
-            # The Keychain ACL tracks each helper's designated requirement.
-            # Stable identifiers keep existing reviewer connections usable
-            # after updates, while the signing identity prevents spoofing.
-            app_team="$(codesign -dvv "$app/Contents/MacOS/thought" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+            # Keychain ACLs track the main app for provider keys and the two
+            # helpers for reviewer routes. Stable designated requirements keep
+            # both credential classes usable across updates.
+            app_binary="$app/Contents/MacOS/thought"
+            app_identifier="$(codesign -dvv "$app_binary" 2>&1 | sed -n 's/^Identifier=//p')"
+            if [ "$app_identifier" != "ai.exalto.thought" ]; then
+              echo "::error::The main app signing identifier is not ai.exalto.thought."
+              exit 1
+            fi
+            app_team="$(codesign -dvv "$app_binary" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
             if [ -z "$EXPECTED_APPLE_TEAM_ID" ] || [ "$app_team" != "$EXPECTED_APPLE_TEAM_ID" ]; then
               echo "::error::The app is not signed by the configured Apple team."
               exit 1
             fi
-            for binary in thoughtd thought-mcp-stdio; do
+            for binary in thought thoughtd thought-mcp-stdio; do
               binary_path="$app/Contents/MacOS/$binary"
-              helper_team="$(codesign -dvv "$binary_path" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
-              if [ "$helper_team" != "$EXPECTED_APPLE_TEAM_ID" ]; then
+              binary_team="$(codesign -dvv "$binary_path" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+              if [ "$binary_team" != "$EXPECTED_APPLE_TEAM_ID" ]; then
                 echo "::error::$binary is not signed by the configured Apple team."
                 exit 1
               fi

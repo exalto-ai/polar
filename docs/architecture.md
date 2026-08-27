@@ -439,6 +439,20 @@ historical questions, and legacy content stays unknown. Exact editor ranges pay 
 the op log answers history; neither justifies inventing missing provenance for the third. The
 window briefly hides current sources while a local edit is still saving.
 
+### AD-23 — Provider keys stay native, and setup is not provenance
+
+The window may choose OpenAI or Anthropic, but key entry stays in a native macOS secure field.
+Native Rust checks the provider's fixed TLS model-catalog endpoint and stores a successful key in
+the login Keychain. The webview never receives key text. Redirects are rejected, decoded bodies
+are bounded, and raw provider errors do not cross into the interface.
+
+The check establishes only that the key could list models at that moment. It creates no document
+mutation, attribution, verified trace, or publication. Sending document content remains a separate
+action owned by the feature that needs it.
+
+**Cost:** setup requires macOS-specific code and signed-build Keychain testing. Provider status is
+deliberately less detailed than raw API errors.
+
 ### AD-15 — The local editor writes directly; configured reviewers propose
 
 The bundled editor writes through the daemon's observed editor routes. Durable reviewer
