@@ -41,10 +41,12 @@ before it is released.
 Provider keys use the separate `ai.exalto.thought.provider` Keychain service with fixed `openai`
 and `anthropic` accounts. Reviewer helpers are not trusted for this service.
 
-Creation and replacement set both the secret value and an access list limited to the running app.
-The access list is reset when an existing item is replaced, so another same-user app cannot
-precreate a broad-access item and keep that access after Proof of Thought stores a validated key.
-Reads reassert the same app-only access list before returning bytes to native code.
+Creation and replacement set both the secret value and a trusted-app list that gives the running
+app silent access. The list is reset when an existing item is replaced, so another same-user app
+cannot precreate a broad-access item and keep silent access after Proof of Thought stores a
+validated key. Ordinary reads never change the item's owner or access list and explicitly prohibit
+Keychain authentication UI. If the saved access policy no longer permits a silent read, the app
+fails closed and directs the person to replace the key in Settings.
 
 The nonsecret settings file stores validation status, timestamps, model count, bounded request ID,
 disclosure version, and cost-acknowledgement time. It uses private permissions and atomic replace.
@@ -116,6 +118,7 @@ boundary above and must not claim the stronger properties of App Attest.
 - no sentinel key in serialized command input, output, metadata, logs, document state, or exports
 - private settings permissions, symlink rejection, atomic rollback, and conservative crash states
 - app-only Keychain access construction and signed-build update continuity
+- repeated capability checks and chat reads never mutate Keychain access or open authentication UI
 - keyboard, focus, narrow-window, screen-reader, cancellation, offline, and recovery behavior
 
 ## Official references

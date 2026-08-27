@@ -23,6 +23,8 @@ const PROVIDER_KEYCHAIN_DESCRIPTION: &str = "Proof of Thought AI provider key";
 const ERR_SEC_DUPLICATE_ITEM: i32 = -25_299;
 #[cfg(target_os = "macos")]
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25_300;
+#[cfg(target_os = "macos")]
+const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25_308;
 #[cfg(debug_assertions)]
 const FILE_BACKEND_ENV: &str = "THOUGHT_CREDENTIAL_BACKEND";
 const MAX_CREDENTIAL_LENGTH: usize = 4096;
@@ -31,9 +33,9 @@ static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 #[cfg(target_os = "macos")]
 mod macos_keychain {
     use super::{
-        CredentialError, ERR_SEC_DUPLICATE_ITEM, ERR_SEC_ITEM_NOT_FOUND,
-        PROVIDER_KEYCHAIN_DESCRIPTION, PROVIDER_KEYCHAIN_SERVICE, REVIEWER_KEYCHAIN_DESCRIPTION,
-        REVIEWER_KEYCHAIN_SERVICE,
+        CredentialError, ERR_SEC_DUPLICATE_ITEM, ERR_SEC_INTERACTION_NOT_ALLOWED,
+        ERR_SEC_ITEM_NOT_FOUND, PROVIDER_KEYCHAIN_DESCRIPTION, PROVIDER_KEYCHAIN_SERVICE,
+        REVIEWER_KEYCHAIN_DESCRIPTION, REVIEWER_KEYCHAIN_SERVICE,
     };
     use core_foundation::array::{CFArray, CFArrayRef};
     use core_foundation::base::{CFType, CFTypeID, CFTypeRef, TCFType};
@@ -78,6 +80,8 @@ mod macos_keychain {
         fn SecItemUpdate(query: CFDictionaryRef, attributes: CFDictionaryRef) -> i32;
         static kSecAttrAccess: CFStringRef;
         static kSecValueData: CFStringRef;
+        static kSecUseAuthenticationUI: CFStringRef;
+        static kSecUseAuthenticationUIFail: CFStringRef;
     }
 
     pub(super) fn set_reviewer_password(
@@ -192,46 +196,57 @@ mod macos_keychain {
     }
 
     /// Check for a provider item without asking Security.framework to return
-    /// its secret bytes. Status surfaces can therefore stay metadata-only.
+    /// its secret bytes or display authentication UI. Status surfaces can
+    /// therefore stay metadata-only and cannot block the editor.
     pub(super) fn provider_password_exists(provider_id: &str) -> Result<bool, CredentialError> {
-        let options = security_framework::passwords::PasswordOptions::new_generic_password(
-            PROVIDER_KEYCHAIN_SERVICE,
-            provider_id,
-        );
+        let options = provider_password_no_ui_options(provider_id);
         #[allow(deprecated)]
         let query = CFDictionary::from_CFType_pairs(&options.query);
         let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), ptr::null_mut()) };
         match status {
             0 => Ok(true),
             ERR_SEC_ITEM_NOT_FOUND => Ok(false),
-            status => security_status("inspect provider credential", status).map(|()| false),
+            status => Err(provider_access_error(
+                status,
+                security_framework::base::Error::from_code(status).to_string(),
+            )),
         }
     }
 
-    /// Reassert app-only access before returning any provider bytes. This also
-    /// makes a same-user item preseed fail closed if its existing access list
-    /// does not permit Proof of Thought to replace that list.
-    pub(super) fn harden_provider_password(provider_id: &str) -> Result<(), CredentialError> {
-        let executable = std::env::current_exe().map_err(CredentialError::Io)?;
-        let access = access_for_paths(&[executable], PROVIDER_KEYCHAIN_DESCRIPTION)?;
-        let query = security_framework::passwords::PasswordOptions::new_generic_password(
+    /// Read a provider key without changing its owner or access list and
+    /// without allowing Security.framework to display application-modal UI.
+    /// Add and Replace are the only operations that may change access.
+    pub(super) fn provider_password(provider_id: &str) -> Result<Vec<u8>, CredentialError> {
+        let options = provider_password_no_ui_options(provider_id);
+        security_framework::passwords::generic_password(options).map_err(|error| {
+            match error.code() {
+                ERR_SEC_ITEM_NOT_FOUND => CredentialError::Missing,
+                status => provider_access_error(status, error.to_string()),
+            }
+        })
+    }
+
+    fn provider_access_error(status: i32, message: String) -> CredentialError {
+        if status == ERR_SEC_INTERACTION_NOT_ALLOWED {
+            CredentialError::InteractionRequired
+        } else {
+            CredentialError::Platform(message)
+        }
+    }
+
+    fn provider_password_no_ui_options(
+        provider_id: &str,
+    ) -> security_framework::passwords::PasswordOptions {
+        let mut options = security_framework::passwords::PasswordOptions::new_generic_password(
             PROVIDER_KEYCHAIN_SERVICE,
             provider_id,
         );
         #[allow(deprecated)]
-        let query = CFDictionary::from_CFType_pairs(&query.query);
-        let update = [(
-            unsafe { CFString::wrap_under_get_rule(kSecAttrAccess) },
-            access.into_CFType(),
-        )];
-        let update = CFDictionary::from_CFType_pairs(&update);
-        let status =
-            unsafe { SecItemUpdate(query.as_concrete_TypeRef(), update.as_concrete_TypeRef()) };
-        if status == ERR_SEC_ITEM_NOT_FOUND {
-            Err(CredentialError::Missing)
-        } else {
-            security_status("protect provider credential access", status)
-        }
+        options.query.push((
+            unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
+            unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUIFail) }.into_CFType(),
+        ));
+        options
     }
 
     fn trusted_executable_paths(executable: &Path) -> Result<[PathBuf; 2], CredentialError> {
@@ -303,7 +318,12 @@ mod macos_keychain {
 
     #[cfg(test)]
     mod tests {
-        use super::{access_for_paths, trusted_executable_path_names};
+        use super::{
+            access_for_paths, provider_access_error, provider_password_no_ui_options,
+            trusted_executable_path_names,
+        };
+        use core_foundation::base::TCFType as _;
+        use core_foundation::string::CFString;
         use std::path::Path;
 
         #[test]
@@ -340,6 +360,36 @@ mod macos_keychain {
             let current = std::env::current_exe().unwrap();
             access_for_paths(&[current], super::PROVIDER_KEYCHAIN_DESCRIPTION).unwrap();
         }
+
+        #[test]
+        fn provider_lookups_disable_ui_and_never_include_an_access_rewrite() {
+            let options = provider_password_no_ui_options("openai");
+            let authentication_ui =
+                unsafe { CFString::wrap_under_get_rule(super::kSecUseAuthenticationUI) };
+            let authentication_ui_fail =
+                unsafe { CFString::wrap_under_get_rule(super::kSecUseAuthenticationUIFail) }
+                    .into_CFType();
+            let access = unsafe { CFString::wrap_under_get_rule(super::kSecAttrAccess) };
+
+            #[allow(deprecated)]
+            let configured_ui = options
+                .query
+                .iter()
+                .find(|(key, _)| key == &authentication_ui)
+                .map(|(_, value)| value);
+            assert_eq!(configured_ui, Some(&authentication_ui_fail));
+            #[allow(deprecated)]
+            let includes_access = options.query.iter().any(|(key, _)| key == &access);
+            assert!(!includes_access);
+        }
+
+        #[test]
+        fn blocked_provider_lookup_has_a_distinct_recovery_error() {
+            assert!(matches!(
+                provider_access_error(super::ERR_SEC_INTERACTION_NOT_ALLOWED, "ignored".into()),
+                super::CredentialError::InteractionRequired
+            ));
+        }
     }
 }
 
@@ -348,6 +398,7 @@ pub enum CredentialError {
     InvalidConnectionId,
     InvalidProviderId,
     Missing,
+    InteractionRequired,
     Io(io::Error),
     Platform(String),
     InvalidStoredCredential,
@@ -359,6 +410,9 @@ impl std::fmt::Display for CredentialError {
             Self::InvalidConnectionId => formatter.write_str("invalid reviewer connection ID"),
             Self::InvalidProviderId => formatter.write_str("invalid provider ID"),
             Self::Missing => formatter.write_str("reviewer credential is missing"),
+            Self::InteractionRequired => {
+                formatter.write_str("credential access requires explicit authorization")
+            }
             Self::Io(error) => write!(formatter, "credential storage: {error}"),
             Self::Platform(error) => write!(formatter, "native credential storage: {error}"),
             Self::InvalidStoredCredential => {
@@ -553,22 +607,7 @@ impl ProviderCredentialStore {
         validate_provider_id(provider_id)?;
         let credential = match &self.backend {
             #[cfg(target_os = "macos")]
-            ProviderBackend::Keychain => {
-                macos_keychain::harden_provider_password(provider_id)?;
-                security_framework::passwords::generic_password(
-                    security_framework::passwords::PasswordOptions::new_generic_password(
-                        PROVIDER_KEYCHAIN_SERVICE,
-                        provider_id,
-                    ),
-                )
-                .map_err(|error| {
-                    if error.code() == ERR_SEC_ITEM_NOT_FOUND {
-                        CredentialError::Missing
-                    } else {
-                        CredentialError::Platform(error.to_string())
-                    }
-                })?
-            }
+            ProviderBackend::Keychain => macos_keychain::provider_password(provider_id)?,
             #[cfg(not(target_os = "macos"))]
             ProviderBackend::Unavailable => {
                 return Err(CredentialError::Platform(
