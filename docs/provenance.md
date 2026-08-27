@@ -80,3 +80,9 @@ window computes the same revision from its visible editor tree and displays sour
 two match. Pending saves, invalid editor trees, and stale responses fail closed. This binds the
 labels to the wording and formatting on screen; it is not a signature, timestamp, or proof of
 origin.
+
+## Provider setup
+
+Built-in provider keys are entered and stored by native macOS code. A model-catalog check does not
+change the document and creates no lineage or verified evidence. Later features must bind any
+provider exchange to the exact accepted change before presenting it as provider-verified.

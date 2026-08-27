@@ -217,6 +217,14 @@ jobs:
           done
 
           if [ "$SIGN" = "true" ]; then
+            # Provider keys are restricted to the signed main app.
+            app_binary="$app/Contents/MacOS/thought"
+            app_identifier="$(codesign -dvv "$app_binary" 2>&1 | sed -n 's/^Identifier=//p')"
+            app_team="$(codesign -dvv "$app_binary" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+            if [ "$app_identifier" != "ai.exalto.thought" ] || [ "$app_team" != "$EXPECTED_APPLE_TEAM_ID" ]; then
+              echo "::error::The main app does not have the expected signing identity."
+              exit 1
+            fi
             codesign --verify --deep --strict --verbose=2 "$app"
 
             # What a downloading user's machine will conclude.
