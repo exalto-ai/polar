@@ -198,11 +198,42 @@ impl ProviderSettings {
 }
 
 struct ProviderStateInner {
-    credentials: ProviderCredentialStore,
+    credentials: Arc<dyn ProviderCredentials>,
     settings_path: PathBuf,
     validator: Arc<dyn ProviderValidator>,
     state_lock: Mutex<()>,
     operation_busy: AtomicBool,
+}
+
+trait ProviderCredentials: Send + Sync {
+    fn set(&self, provider_id: &str, credential: &[u8]) -> Result<(), CredentialError>;
+    fn get(&self, provider_id: &str) -> Result<Zeroizing<Vec<u8>>, CredentialError>;
+    fn contains(&self, provider_id: &str) -> Result<bool, CredentialError>;
+    fn delete(&self, provider_id: &str) -> Result<(), CredentialError>;
+}
+
+impl ProviderCredentials for ProviderCredentialStore {
+    fn set(&self, provider_id: &str, credential: &[u8]) -> Result<(), CredentialError> {
+        ProviderCredentialStore::set(self, provider_id, credential)
+    }
+
+    fn get(&self, provider_id: &str) -> Result<Zeroizing<Vec<u8>>, CredentialError> {
+        ProviderCredentialStore::get(self, provider_id)
+    }
+
+    fn contains(&self, provider_id: &str) -> Result<bool, CredentialError> {
+        ProviderCredentialStore::contains(self, provider_id)
+    }
+
+    fn delete(&self, provider_id: &str) -> Result<(), CredentialError> {
+        ProviderCredentialStore::delete(self, provider_id)
+    }
+}
+
+enum PreviousProviderCredential {
+    Absent,
+    Readable(Zeroizing<Vec<u8>>),
+    Inaccessible,
 }
 
 #[derive(Clone)]
@@ -220,6 +251,14 @@ impl ProviderState {
 
     fn new(
         credentials: ProviderCredentialStore,
+        settings_path: PathBuf,
+        validator: Arc<dyn ProviderValidator>,
+    ) -> Self {
+        Self::new_with_credentials(Arc::new(credentials), settings_path, validator)
+    }
+
+    fn new_with_credentials(
+        credentials: Arc<dyn ProviderCredentials>,
         settings_path: PathBuf,
         validator: Arc<dyn ProviderValidator>,
     ) -> Self {
@@ -256,10 +295,27 @@ impl ProviderState {
             .collect()
     }
 
+    #[cfg(test)]
     fn configuration(&self, provider: Provider) -> Result<ProviderConfiguration, String> {
         let _lock = self.lock();
         let settings = load_settings(&self.0.settings_path)?;
         self.configuration_locked(provider, &settings)
+    }
+
+    fn unchanged_configuration(&self, provider: Provider) -> Result<ProviderConfiguration, String> {
+        let _lock = self.lock();
+        let settings = load_settings(&self.0.settings_path)?;
+        self.unchanged_configuration_locked(provider, &settings)
+    }
+
+    fn prompt_is_replacement(&self, provider: Provider) -> Result<bool, String> {
+        let _lock = self.lock();
+        let settings = load_settings(&self.0.settings_path)?;
+        Ok(settings.record(provider).is_some_and(|record| {
+            record.disclosure_version == Some(DISCLOSURE_VERSION)
+                && record.charges_acknowledged_at.is_some()
+                && !record.removal_pending
+        }))
     }
 
     fn configuration_locked(
@@ -272,6 +328,38 @@ impl ProviderState {
             .credentials
             .contains(provider.id())
             .map_err(credential_store_error)?;
+        Ok(Self::configuration_with_presence(
+            provider,
+            settings,
+            credential_present,
+        ))
+    }
+
+    fn unchanged_configuration_locked(
+        &self,
+        provider: Provider,
+        settings: &ProviderSettings,
+    ) -> Result<ProviderConfiguration, String> {
+        let credential_present = match self.0.credentials.contains(provider.id()) {
+            Ok(present) => present,
+            // Cancel and validation failure do not change the existing item.
+            // Preserve its prior metadata in the action result even when the
+            // current build cannot read it silently.
+            Err(CredentialError::InteractionRequired) => true,
+            Err(error) => return Err(credential_store_error(error)),
+        };
+        Ok(Self::configuration_with_presence(
+            provider,
+            settings,
+            credential_present,
+        ))
+    }
+
+    fn configuration_with_presence(
+        provider: Provider,
+        settings: &ProviderSettings,
+        credential_present: bool,
+    ) -> ProviderConfiguration {
         let record = settings.record(provider);
         // A Keychain item without our acknowledged metadata may be an orphan
         // from an interrupted save or a same-user preseed. Do not present it as
@@ -291,7 +379,7 @@ impl ProviderState {
         } else {
             ValidationStatus::NotChecked
         };
-        Ok(ProviderConfiguration {
+        ProviderConfiguration {
             provider,
             configured,
             removal_pending: record.is_some_and(|record| record.removal_pending),
@@ -302,7 +390,7 @@ impl ProviderState {
             request_id: record.and_then(|record| record.request_id.clone()),
             disclosure_version: record.and_then(|record| record.disclosure_version),
             charges_acknowledged_at: record.and_then(|record| record.charges_acknowledged_at),
-        })
+        }
     }
 
     fn configure(
@@ -320,32 +408,49 @@ impl ProviderState {
             let settings = load_settings(&self.0.settings_path)?;
             return Ok(ProviderActionResult {
                 outcome: ProviderActionOutcome::ValidationFailed,
-                configuration: self.configuration_locked(provider, &settings)?,
+                configuration: self.unchanged_configuration_locked(provider, &settings)?,
                 attempt_status: Some(attempt.status),
                 request_id: attempt.request_id,
             });
         }
 
         let mut settings = load_settings(&self.0.settings_path)?;
-        let had_previous = self
-            .0
-            .credentials
-            .contains(provider.id())
-            .map_err(credential_store_error)?;
-        let previous = if had_previous {
-            Some(
-                self.0
-                    .credentials
-                    .get(provider.id())
-                    .map_err(credential_store_error)?,
-            )
-        } else {
-            None
+        let had_previous = match self.0.credentials.contains(provider.id()) {
+            Ok(present) => present,
+            // InteractionRequired means Security.framework found a matching
+            // item that cannot be used silently. Treat it as an existing item
+            // so the explicit Replace flow can repair its access policy.
+            Err(CredentialError::InteractionRequired) => true,
+            Err(error) => return Err(credential_store_error(error)),
         };
-        self.0
-            .credentials
-            .set(provider.id(), &key)
-            .map_err(credential_store_error)?;
+        let previous = if had_previous {
+            match self.0.credentials.get(provider.id()) {
+                Ok(previous) => PreviousProviderCredential::Readable(previous),
+                Err(CredentialError::InteractionRequired) => {
+                    PreviousProviderCredential::Inaccessible
+                }
+                Err(error) => return Err(credential_store_error(error)),
+            }
+        } else {
+            PreviousProviderCredential::Absent
+        };
+        if matches!(&previous, PreviousProviderCredential::Inaccessible) {
+            // The existing bytes cannot be snapshotted for rollback. Persist a
+            // conservative state first so a crash or later metadata failure
+            // can leave only an unconfigured orphan, never acknowledged
+            // metadata pointing at an inaccessible or partially replaced item.
+            settings.remove(provider);
+            save_settings(&self.0.settings_path, &settings)?;
+        }
+        if let Err(error) = self.0.credentials.set(provider.id(), &key) {
+            let message = credential_store_error(error);
+            if matches!(&previous, PreviousProviderCredential::Inaccessible) {
+                return Err(format!(
+                    "{message} The prior inaccessible key remains unconfigured; try Replace again."
+                ));
+            }
+            return Err(message);
+        }
 
         let now = epoch_seconds();
         settings.upsert(ProviderRecord {
@@ -361,8 +466,16 @@ impl ProviderState {
         });
         if let Err(error) = save_settings(&self.0.settings_path, &settings) {
             let rollback = match previous {
-                Some(previous) => self.0.credentials.set(provider.id(), &previous),
-                None => self.0.credentials.delete(provider.id()),
+                PreviousProviderCredential::Readable(previous) => {
+                    self.0.credentials.set(provider.id(), &previous)
+                }
+                PreviousProviderCredential::Absent => self.0.credentials.delete(provider.id()),
+                PreviousProviderCredential::Inaccessible => {
+                    return Err(
+                        "The API key was saved securely, but its local settings could not be saved. It remains disabled; replace it again."
+                            .to_string(),
+                    );
+                }
             };
             if rollback.is_err() {
                 return Err(
@@ -425,7 +538,9 @@ impl ProviderState {
             last_validated_at: if attempt.status.authenticated() {
                 Some(now)
             } else {
-                previous.as_ref().and_then(|record| record.last_validated_at)
+                previous
+                    .as_ref()
+                    .and_then(|record| record.last_validated_at)
             },
             model_count: if attempt.status.authenticated() {
                 attempt.model_count
@@ -515,17 +630,16 @@ pub async fn configure_provider_key(
     let state = state.inner().clone();
     let _operation = state.begin_operation()?;
     let status_state = state.clone();
-    let replacing = tauri::async_runtime::spawn_blocking(move || {
-        status_state.configuration(provider).map(|value| value.configured)
-    })
-    .await
-    .map_err(|_| "Provider settings stopped unexpectedly.".to_string())??;
+    let replacing =
+        tauri::async_runtime::spawn_blocking(move || status_state.prompt_is_replacement(provider))
+            .await
+            .map_err(|_| "Provider settings stopped unexpectedly.".to_string())??;
 
     let key = native_prompt(app, provider, replacing).await?;
     let Some(key) = key else {
         let status_state = state.clone();
         let configuration = tauri::async_runtime::spawn_blocking(move || {
-            status_state.configuration(provider)
+            status_state.unchanged_configuration(provider)
         })
         .await
         .map_err(|_| "Provider settings stopped unexpectedly.".to_string())??;
@@ -536,11 +650,9 @@ pub async fn configure_provider_key(
             request_id: None,
         });
     };
-    tauri::async_runtime::spawn_blocking(move || {
-        state.configure(provider, key, disclosure_version)
-    })
-    .await
-    .map_err(|_| "Provider validation stopped unexpectedly.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || state.configure(provider, key, disclosure_version))
+        .await
+        .map_err(|_| "Provider validation stopped unexpectedly.".to_string())?
 }
 
 #[tauri::command]
@@ -752,8 +864,7 @@ fn classify_provider_error(
         {
             return ValidationStatus::SpendOrUsageLimit;
         }
-        if matches!(code, Some("billing_not_active"))
-            || matches!(kind, Some("billing_not_active"))
+        if matches!(code, Some("billing_not_active")) || matches!(kind, Some("billing_not_active"))
         {
             return ValidationStatus::BillingUnavailable;
         }
@@ -763,8 +874,7 @@ fn classify_provider_error(
         ) || matches!(
             kind,
             Some("unsupported_country_region_territory" | "unsupported_region")
-        )
-        {
+        ) {
             return ValidationStatus::UnsupportedRegion;
         }
     } else {
@@ -854,7 +964,10 @@ fn client_request_id() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("pot-provider-check-{}-{nanos}-{counter}", std::process::id())
+    format!(
+        "pot-provider-check-{}-{nanos}-{counter}",
+        std::process::id()
+    )
 }
 
 fn epoch_seconds() -> i64 {
@@ -869,6 +982,10 @@ fn epoch_seconds() -> i64 {
 fn credential_store_error(error: CredentialError) -> String {
     match error {
         CredentialError::Missing => "The saved API key is missing from Keychain.".to_string(),
+        CredentialError::InteractionRequired => {
+            "Keychain access needs attention. Open Settings and replace this API key for the current app."
+                .to_string()
+        }
         CredentialError::InvalidStoredCredential => {
             "The saved API key could not be read safely.".to_string()
         }
@@ -906,8 +1023,8 @@ fn load_settings(path: &Path) -> Result<ProviderSettings, String> {
     if bytes.len() > MAX_SETTINGS_BYTES {
         return Err("Provider settings are too large.".to_string());
     }
-    let settings: ProviderSettings = serde_json::from_slice(&bytes)
-        .map_err(|_| "Provider settings are damaged.".to_string())?;
+    let settings: ProviderSettings =
+        serde_json::from_slice(&bytes).map_err(|_| "Provider settings are damaged.".to_string())?;
     if settings.version != SETTINGS_VERSION
         || settings.providers.len() > Provider::ALL.len()
         || settings
@@ -998,6 +1115,72 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct StubCredentials {
+        credential: Mutex<Option<Vec<u8>>>,
+        deny_reads: AtomicBool,
+        fail_next_set: AtomicBool,
+        after_next_set: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl StubCredentials {
+        fn deny_reads(&self) {
+            self.deny_reads.store(true, Ordering::Release);
+        }
+
+        fn current(&self) -> Option<Vec<u8>> {
+            self.credential.lock().unwrap().clone()
+        }
+
+        fn fail_next_set(&self) {
+            self.fail_next_set.store(true, Ordering::Release);
+        }
+
+        fn after_next_set(&self, callback: impl FnOnce() + Send + 'static) {
+            *self.after_next_set.lock().unwrap() = Some(Box::new(callback));
+        }
+    }
+
+    impl ProviderCredentials for StubCredentials {
+        fn set(&self, _: &str, credential: &[u8]) -> Result<(), CredentialError> {
+            if self.fail_next_set.swap(false, Ordering::AcqRel) {
+                return Err(CredentialError::Platform(
+                    "simulated Keychain replacement failure".into(),
+                ));
+            }
+            *self.credential.lock().unwrap() = Some(credential.to_vec());
+            self.deny_reads.store(false, Ordering::Release);
+            if let Some(callback) = self.after_next_set.lock().unwrap().take() {
+                callback();
+            }
+            Ok(())
+        }
+
+        fn get(&self, _: &str) -> Result<Zeroizing<Vec<u8>>, CredentialError> {
+            if self.deny_reads.load(Ordering::Acquire) {
+                return Err(CredentialError::InteractionRequired);
+            }
+            self.credential
+                .lock()
+                .unwrap()
+                .clone()
+                .map(Zeroizing::new)
+                .ok_or(CredentialError::Missing)
+        }
+
+        fn contains(&self, _: &str) -> Result<bool, CredentialError> {
+            if self.deny_reads.load(Ordering::Acquire) {
+                return Err(CredentialError::InteractionRequired);
+            }
+            Ok(self.credential.lock().unwrap().is_some())
+        }
+
+        fn delete(&self, _: &str) -> Result<(), CredentialError> {
+            *self.credential.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
     fn valid_attempt() -> ValidationAttempt {
         ValidationAttempt {
             status: ValidationStatus::ModelAccessChecked,
@@ -1015,6 +1198,185 @@ mod tests {
             directory.path().join("settings.json"),
             Arc::new(StubValidator::new(attempts)),
         )
+    }
+
+    #[test]
+    fn keychain_interaction_error_directs_people_to_explicit_replacement() {
+        assert_eq!(
+            credential_store_error(CredentialError::InteractionRequired),
+            "Keychain access needs attention. Open Settings and replace this API key for the current app."
+        );
+    }
+
+    #[test]
+    fn explicit_replacement_repairs_an_inaccessible_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let credentials = Arc::new(StubCredentials::default());
+        let state = ProviderState::new_with_credentials(
+            credentials.clone(),
+            directory.path().join("settings.json"),
+            Arc::new(StubValidator::new([valid_attempt(), valid_attempt()])),
+        );
+
+        state
+            .configure(
+                Provider::Anthropic,
+                Zeroizing::new(b"original-provider-secret".to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap();
+        credentials.deny_reads();
+        assert!(state.prompt_is_replacement(Provider::Anthropic).unwrap());
+
+        let repaired = state
+            .configure(
+                Provider::Anthropic,
+                Zeroizing::new(b"replacement-provider-secret".to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap();
+
+        assert_eq!(repaired.outcome, ProviderActionOutcome::Saved);
+        assert!(repaired.configuration.configured);
+        assert_eq!(
+            credentials.current().as_deref(),
+            Some(b"replacement-provider-secret".as_slice())
+        );
+    }
+
+    #[test]
+    fn cancelled_or_invalid_repair_can_preserve_inaccessible_key_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let credentials = Arc::new(StubCredentials::default());
+        let state = ProviderState::new_with_credentials(
+            credentials.clone(),
+            directory.path().join("settings.json"),
+            Arc::new(StubValidator::new([
+                valid_attempt(),
+                ValidationAttempt::failed(ValidationStatus::InvalidKeyFormat, None),
+            ])),
+        );
+        state
+            .configure(
+                Provider::Openai,
+                Zeroizing::new(b"original-provider-secret".to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap();
+        credentials.deny_reads();
+
+        let cancelled_snapshot = state.unchanged_configuration(Provider::Openai).unwrap();
+        assert!(cancelled_snapshot.configured);
+        let invalid = state
+            .configure(
+                Provider::Openai,
+                Zeroizing::new(b"invalid-provider-secret".to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap();
+
+        assert_eq!(invalid.outcome, ProviderActionOutcome::ValidationFailed);
+        assert!(invalid.configuration.configured);
+        assert_eq!(
+            invalid.attempt_status,
+            Some(ValidationStatus::InvalidKeyFormat)
+        );
+        assert_eq!(
+            credentials.current().as_deref(),
+            Some(b"original-provider-secret".as_slice())
+        );
+    }
+
+    #[test]
+    fn failed_inaccessible_replacement_leaves_the_old_key_unconfigured() {
+        let directory = tempfile::tempdir().unwrap();
+        let credentials = Arc::new(StubCredentials::default());
+        let state = ProviderState::new_with_credentials(
+            credentials.clone(),
+            directory.path().join("settings.json"),
+            Arc::new(StubValidator::new([valid_attempt(), valid_attempt()])),
+        );
+        state
+            .configure(
+                Provider::Anthropic,
+                Zeroizing::new(b"original-provider-secret".to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap();
+        credentials.deny_reads();
+        credentials.fail_next_set();
+
+        let error = state
+            .configure(
+                Provider::Anthropic,
+                Zeroizing::new(b"replacement-provider-secret".to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap_err();
+
+        assert!(error.contains("remains unconfigured"));
+        assert_eq!(
+            credentials.current().as_deref(),
+            Some(b"original-provider-secret".as_slice())
+        );
+        assert!(
+            load_settings(&state.0.settings_path)
+                .unwrap()
+                .record(Provider::Anthropic)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn failed_metadata_commit_keeps_a_repaired_key_disabled() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_parent = directory.path().join("provider-settings");
+        std::fs::create_dir(&settings_parent).unwrap();
+        let settings_path = settings_parent.join("settings.json");
+        let credentials = Arc::new(StubCredentials::default());
+        let state = ProviderState::new_with_credentials(
+            credentials.clone(),
+            settings_path.clone(),
+            Arc::new(StubValidator::new([valid_attempt(), valid_attempt()])),
+        );
+        state
+            .configure(
+                Provider::Openai,
+                Zeroizing::new(b"original-provider-secret".to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap();
+        credentials.deny_reads();
+
+        let blocked_parent = settings_parent.clone();
+        let backup_parent = directory.path().join("provider-settings-backup");
+        let callback_backup = backup_parent.clone();
+        credentials.after_next_set(move || {
+            std::fs::rename(&blocked_parent, &callback_backup).unwrap();
+            std::fs::write(&blocked_parent, b"not a directory").unwrap();
+        });
+
+        let error = state
+            .configure(
+                Provider::Openai,
+                Zeroizing::new(b"replacement-provider-secret".to_vec()),
+                DISCLOSURE_VERSION,
+            )
+            .unwrap_err();
+
+        std::fs::remove_file(&settings_parent).unwrap();
+        std::fs::rename(&backup_parent, &settings_parent).unwrap();
+        assert!(error.contains("It remains disabled"));
+        assert_eq!(
+            credentials.current().as_deref(),
+            Some(b"replacement-provider-secret".as_slice())
+        );
+        assert!(
+            load_settings(&settings_path)
+                .unwrap()
+                .record(Provider::Openai)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1038,9 +1400,17 @@ mod tests {
             ValidationStatus::ModelAccessChecked
         );
         let settings = std::fs::read(directory.path().join("settings.json")).unwrap();
-        assert!(!settings.windows(sentinel.len()).any(|window| window == sentinel));
+        assert!(
+            !settings
+                .windows(sentinel.len())
+                .any(|window| window == sentinel)
+        );
         let serialized = serde_json::to_vec(&result).unwrap();
-        assert!(!serialized.windows(sentinel.len()).any(|window| window == sentinel));
+        assert!(
+            !serialized
+                .windows(sentinel.len())
+                .any(|window| window == sentinel)
+        );
     }
 
     #[test]
@@ -1240,12 +1610,8 @@ mod tests {
             body.len()
         );
         let (endpoint, request) = one_response(response);
-        let attempt = validate_provider_at(
-            Provider::Openai,
-            b"sentinel-openai-key",
-            &endpoint,
-            false,
-        );
+        let attempt =
+            validate_provider_at(Provider::Openai, b"sentinel-openai-key", &endpoint, false);
         assert_eq!(attempt.status, ValidationStatus::ModelAccessChecked);
         assert_eq!(attempt.model_count, Some(2));
         assert_eq!(attempt.request_id.as_deref(), Some("req-openai"));
@@ -1287,7 +1653,10 @@ mod tests {
     #[test]
     fn redirects_and_provider_failures_are_closed_sanitized_categories() {
         for (status_line, expected) in [
-            ("401 Unauthorized", ValidationStatus::CredentialOrAccessInvalid),
+            (
+                "401 Unauthorized",
+                ValidationStatus::CredentialOrAccessInvalid,
+            ),
             ("402 Payment Required", ValidationStatus::BillingUnavailable),
             ("403 Forbidden", ValidationStatus::PermissionDenied),
             ("429 Too Many Requests", ValidationStatus::RateLimited),
@@ -1438,7 +1807,10 @@ mod tests {
     #[test]
     fn decoded_response_and_request_id_bounds_fail_closed() {
         let body = ureq::Body::builder().data(vec![b'x'; 17]);
-        let mut response = ureq::http::Response::builder().status(200).body(body).unwrap();
+        let mut response = ureq::http::Response::builder()
+            .status(200)
+            .body(body)
+            .unwrap();
         assert!(read_bounded_body(&mut response, 16).is_err());
 
         let body = ureq::Body::builder().data(Vec::<u8>::new());
