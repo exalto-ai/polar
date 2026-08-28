@@ -12,6 +12,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   macos:
     runs-on: macos-latest
@@ -85,6 +89,9 @@ jobs:
             exit 1
           elif [ "$SIGN" != "true" ]; then
             echo "::error::Credential state disagrees with the signing mode."
+            exit 1
+          elif [[ ! "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "::error::APPLE_TEAM_ID must be a 10-character Apple team identifier."
             exit 1
           fi
 
@@ -169,7 +176,11 @@ jobs:
           set -euo pipefail
           dmg=$(find "app/src-tauri/target/$TARGET/release/bundle/dmg" -maxdepth 1 -name '*.dmg' -print -quit)
           test -n "$dmg"
-          renamed="$(dirname "$dmg")/ProofOfThought_${TAG#v}_${TARGET%%-*}.dmg"
+          suffix=""
+          if [ "$SIGN" != "true" ]; then
+            suffix="_unsigned"
+          fi
+          renamed="$(dirname "$dmg")/ProofOfThought_${TAG#v}_${TARGET%%-*}${suffix}.dmg"
           mv "$dmg" "$renamed"
           echo "$(basename "$dmg") -> $(basename "$renamed")"
 
@@ -202,9 +213,19 @@ jobs:
           test -n "$dmg"
           hdiutil verify "$dmg"
 
-          # The failure a release is most likely to have: a window with no
-          # daemon beside it.
-          app="app/src-tauri/target/$TARGET/release/bundle/macos/Proof of Thought.app"
+          mount_point="$RUNNER_TEMP/proof-of-thought-release-mount"
+          mkdir -p "$mount_point"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$dmg"
+          cleanup_mount() { hdiutil detach "$mount_point" >/dev/null; }
+          trap cleanup_mount EXIT
+
+          # Inspect the copy people will install, not only Tauri's source bundle.
+          app="$mount_point/Proof of Thought.app"
+          bundle_version=$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")
+          if [ "$TAG" != "v$bundle_version" ]; then
+            echo "::error::Release tag $TAG does not match app version $bundle_version."
+            exit 1
+          fi
           for binary in thought thoughtd thought-mcp-stdio; do
             test -x "$app/Contents/MacOS/$binary" || {
               echo "::error::$binary is missing from the bundle"
@@ -245,6 +266,14 @@ jobs:
                 echo "::error::$binary is not signed by the configured Apple team."
                 exit 1
               fi
+              signature_details="$(codesign -dvv "$binary_path" 2>&1)"
+              case "$signature_details" in
+                *"flags="*"runtime"*) ;;
+                *)
+                  echo "::error::$binary was not signed with hardened runtime."
+                  exit 1
+                  ;;
+              esac
               requirement="$(codesign -d -r- "$binary_path" 2>&1)"
               case "$requirement" in
                 *cdhash*)
@@ -268,10 +297,15 @@ jobs:
               esac
             done
             codesign --verify --deep --strict --verbose=2 "$app"
+            xcrun stapler validate "$app"
+            spctl -a -t exec -vv "$app"
 
             # What a downloading user's machine will conclude.
             spctl -a -t open --context context:primary-signature -v "$dmg"
           fi
+
+          hdiutil detach "$mount_point"
+          trap - EXIT
 
           mkdir -p release
           cp "$dmg" release/
@@ -283,14 +317,35 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          notes=$(cat <<'NOTES'
+          if [ "$SIGN" = "true" ]; then
+            notes=$(cat <<'NOTES'
           A local-first writing app where people and agents edit the same documents.
 
-          Download the `.dmg`, drag Proof of Thought to Applications, and open it. The daemon
-          ships inside the bundle and starts on first launch.
+          This draft candidate is signed and notarized. Download the `.dmg`, drag Proof of Thought
+          to Applications, and open it. The daemon ships inside the bundle and starts on first launch.
           NOTES
-          )
+            )
+          else
+            notes=$(cat <<'NOTES'
+          A local-first writing app where people and agents edit the same documents.
+
+          Developer test build only. The `_unsigned.dmg` is not signed or notarized. Do not publish
+          this draft candidate.
+          NOTES
+            )
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::Refusing to replace assets on published release $TAG."
+              exit 1
+            fi
+            for asset in $(gh release view "$TAG" --json assets --jq '.assets[].name'); do
+              case "$asset" in
+                ProofOfThought_*.dmg|SHA256SUMS) gh release delete-asset "$TAG" "$asset" --yes ;;
+              esac
+            done
+            gh release edit "$TAG" --title "Proof of Thought $TAG" --notes "$notes"
             gh release upload "$TAG" release/* --clobber
           else
             gh release create "$TAG" release/* \
