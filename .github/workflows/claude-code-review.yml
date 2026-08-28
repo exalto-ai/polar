@@ -1,0 +1,50 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+# Only the newest push to a branch gets reviewed.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  claude-review:
+    # Claude runs unrestricted below, so only review pull requests opened by
+    # people who already have write access to this repository.
+    if: contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: |
+            /code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+
+            Alongside the usual correctness review, hold the change to these standards:
+            - Scope: the PR should address one specific bug, feature, or issue. Call out changes that are unrelated to its stated purpose and belong in their own PR.
+            - Simplicity: call out speculative abstractions, configuration, or product surface that current requirements do not need. Prefer the simplest change that works, and do not ask for extra layers, options, or features.
+            - Security: call out changes that weaken an existing trust boundary — the loopback-only daemon, the agent tool surface, capability scope, secret handling, or input validation. Do not ask for new security machinery beyond what the change touches.
+            - Recorded decisions: docs/architecture.md states the architecture decisions and their costs. Call out changes that contradict one without saying so.
+
+            Report only issues you can point to in the diff, and skip nitpicks.
+          claude_args: '--permission-mode bypassPermissions --allowedTools "mcp__github_inline_comment__create_inline_comment"'
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
