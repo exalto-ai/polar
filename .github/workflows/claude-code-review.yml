@@ -38,7 +38,7 @@ jobs:
           prompt: |
             /code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
 
-            Alongside the usual correctness review, hold the change to these standards:
+            Alongside the usual correctness review, hold the change to the standards in AGENTS.md:
             - Scope: the PR should address one specific bug, feature, or issue. Call out changes that are unrelated to its stated purpose and belong in their own PR.
             - Simplicity: call out speculative abstractions, configuration, or product surface that current requirements do not need. Prefer the simplest change that works, and do not ask for extra layers, options, or features.
             - Security: call out changes that weaken an existing trust boundary — the loopback-only daemon, the agent tool surface, capability scope, secret handling, or input validation. Do not ask for new security machinery beyond what the change touches.
