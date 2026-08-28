@@ -10,6 +10,10 @@ git tag v0.1.0 && git push origin v0.1.0
 
 Or run the workflow manually from the Actions tab with a tag name.
 
+Pushing the tag starts the workflow, so do not also dispatch the same tag manually. Same-tag runs
+are serialized. A rerun may replace assets only while the GitHub release is still a draft; the
+workflow refuses to mutate a published release.
+
 ## What ships inside the bundle
 
 The window is useless without the daemon, so `thoughtd` and `thought-mcp-stdio` are
@@ -85,6 +89,9 @@ Gatekeeper rejects the download even though the app inside it is fine. The
 workflow submits the finished DMG to `notarytool` and staples it as a distinct
 step.
 
+Unsigned test artifacts include `_unsigned` in the filename and draft notes. They are never
+evidence that Gatekeeper, notarization, or signed-update credential access works.
+
 ## Checking a build locally
 
 ```bash
@@ -108,6 +115,9 @@ ls app/src-tauri/target/release/bundle/macos/'Proof of Thought.app'/Contents/Mac
 
 `thought`, `thoughtd`, and `thought-mcp-stdio` should all be present. `thought` is the
 window executable; the other two are its sidecars.
+
+CI mounts the final DMG and checks that installed copy's version, executables, architectures,
+signature, and stapled ticket before uploading it.
 
 Verify the complete local bundle before opening the DMG:
 
