@@ -24,6 +24,7 @@ mod tag {
     pub const AWARENESS: u8 = 0x05;
     pub const ERROR: u8 = 0x06;
     pub const PRESENCE: u8 = 0x07;
+    pub const ACK: u8 = 0x08;
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +61,12 @@ pub enum Frame {
         doc_id: String,
         actor: String,
     },
+    /// One client Update has been committed to durable storage. WebSocket
+    /// ordering makes this an acknowledgement of the oldest unacknowledged
+    /// update from that peer.
+    Ack {
+        doc_id: String,
+    },
 }
 
 impl Frame {
@@ -75,6 +82,7 @@ impl Frame {
             Frame::Awareness { doc_id, payload } => (tag::AWARENESS, doc_id, payload.clone()),
             Frame::Error { doc_id, message } => (tag::ERROR, doc_id, message.as_bytes().to_vec()),
             Frame::Presence { doc_id, actor } => (tag::PRESENCE, doc_id, actor.as_bytes().to_vec()),
+            Frame::Ack { doc_id } => (tag::ACK, doc_id, vec![]),
         };
         let id = doc_id.as_bytes();
         let mut out = Vec::with_capacity(5 + id.len() + body.len());
@@ -127,6 +135,7 @@ impl Frame {
                 doc_id,
                 actor: String::from_utf8_lossy(&body).into_owned(),
             },
+            tag::ACK if body.is_empty() => Frame::Ack { doc_id },
             _ => return None,
         })
     }
@@ -305,8 +314,10 @@ fn handle(
         Frame::Update { doc_id, update } => {
             match state.workspace.apply_peer_update(&doc_id, &update, actor) {
                 // A no-op update is not broadcast: Yjs updates are idempotent
-                // and a reconnecting peer resends what it already sent.
-                Ok(None) => vec![],
+                // and a reconnecting peer resends what it already sent. It is
+                // still acknowledged, because the persisted document already
+                // contains it.
+                Ok(None) => vec![Frame::Ack { doc_id }],
                 Ok(Some(_)) => {
                     if let Some(channel) = senders.get(&doc_id) {
                         let _ = channel.send((
@@ -317,7 +328,10 @@ fn handle(
                             },
                         ));
                     }
-                    vec![]
+                    // `apply_peer_update` returns only after the workspace
+                    // commit succeeds, so this is a persistence acknowledgement,
+                    // not merely a receipt acknowledgement.
+                    vec![Frame::Ack { doc_id }]
                 }
                 Err(e) => vec![Frame::Error {
                     doc_id,
@@ -344,6 +358,7 @@ fn handle(
         Frame::Sync { .. }
         | Frame::Broadcast { .. }
         | Frame::Error { .. }
-        | Frame::Presence { .. } => vec![],
+        | Frame::Presence { .. }
+        | Frame::Ack { .. } => vec![],
     }
 }

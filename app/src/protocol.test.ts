@@ -32,6 +32,7 @@ const TAG_BY_KIND: Record<string, number> = {
   awareness: Tag.Awareness,
   error: Tag.Error,
   presence: Tag.Presence,
+  ack: Tag.Ack,
 };
 
 describe("wire format agrees with the daemon", () => {

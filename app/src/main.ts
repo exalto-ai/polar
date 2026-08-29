@@ -303,11 +303,22 @@ function renderPresence(awareness: Awareness, self: number) {
   els.presence.replaceChildren(...agents, ...windows);
 }
 
+async function canLeaveCurrentDocument(): Promise<boolean> {
+  if (!open?.provider.hasPendingChanges) return true;
+  if (await open.provider.waitUntilSaved()) return true;
+  notify(
+    "This document still has changes waiting to autosave. Reconnect before switching.",
+    "error",
+  );
+  return false;
+}
+
 async function openDocument(docId: string): Promise<boolean> {
   if (open && openDocId === docId) {
     open.editor.commands.focus();
     return true;
   }
+  if (!(await canLeaveCurrentDocument())) return false;
   open?.rails.destroy();
   open?.provider.destroy();
   open?.editor.destroy();
@@ -620,6 +631,7 @@ async function trashSelected() {
   }
 
   const wasOpen = row.doc_id === openDocId;
+  if (wasOpen && !(await canLeaveCurrentDocument())) return;
   try {
     await mcp.setDocumentDeleted(row.doc_id, true);
     notify(`Moved "${row.title || "Untitled"}" to the trash · ${ACCEL_LABEL}⇧⌫ to find it`);
@@ -641,7 +653,8 @@ async function trashSelected() {
 
 async function createDocumentInNewWindow(title: string) {
   // Browser development has no native window API and falls back to replacing
-  // its preview editor after the document has been created.
+  // its preview editor, so it still needs the same durability guard.
+  if (!isTauri() && !(await canLeaveCurrentDocument())) return;
   try {
     const created = await mcp.createDocument(title);
     els.scrim.hidden = true;
@@ -855,11 +868,13 @@ async function installNativeCloseGuard(): Promise<void> {
   await nativeWindow.onCloseRequested(async (event) => {
     const target = open;
     const targetDocId = openDocId;
+    const provider = target?.provider;
     const offersExport = Boolean(targetDocId);
-    if (!offersExport) return;
+    const needsAutosave = Boolean(provider?.hasPendingChanges);
+    if (!offersExport && !needsAutosave) return;
 
     // Native close requests are cancellable only synchronously. Keep the
-    // window alive while the export choice completes.
+    // window alive while the export choice and daemon acknowledgement complete.
     event.preventDefault();
     if (closingNativeWindow) return;
     closingNativeWindow = true;
@@ -884,6 +899,17 @@ async function installNativeCloseGuard(): Promise<void> {
         return;
       }
 
+      if (provider?.hasPendingChanges) {
+        const saved = await provider.waitUntilSaved();
+        if (!saved || open !== target || provider.hasPendingChanges) {
+          notify(
+            "Window kept open because changes are still waiting to autosave.",
+            "error",
+          );
+          return;
+        }
+      }
+
       // `destroy` deliberately skips a second close-request event. Every
       // cancellable check has completed above, so another event would only
       // introduce a re-entrancy path through this guard.
@@ -903,6 +929,11 @@ async function installNativeCloseGuard(): Promise<void> {
     }
   });
 }
+
+window.addEventListener("beforeunload", (event) => {
+  if (!open?.provider.hasPendingChanges) return;
+  event.preventDefault();
+});
 
 boot().catch((error) => {
   document.title = "Could not reach the daemon";
