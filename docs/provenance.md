@@ -2,8 +2,11 @@
 
 **Status:** accepted product and architecture direction, 2026-08-26
 
-**First implementation stack:** `codex/provenance-delta-foundation`
-**Depends on:** PR #9, editor document lifecycle and provenance rails
+**First provenance branch:** `codex/provenance-delta-foundation`
+**Stack base:** `codex/tauri-ci-smoke`, after the separate
+`codex/editor-toolbar-branding`, `codex/brand-assets`, `codex/daemon-single-owner`,
+`codex/document-lifecycle`, `codex/sync-store-durability`, and
+`codex/macos-graceful-quit` branches
 
 This document records the choices behind Proof of Thought's next feature series. It is
 written for reviewers as much as implementers: the product language, evidence claims,
