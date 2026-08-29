@@ -343,9 +343,16 @@ port in a well-known file, plus a stdio shim that proxies to it and only spawns 
 absent. A plain stdio MCP server would let each agent client spawn its own daemon — two
 processes writing one SQLite store.
 
-**Cost:** startup performs an authenticated loopback probe and acquires a process-lifetime
-store lock. A stale or incompatible discovery record fails closed and requires the user to
-quit the old process or remove the record instead of being repaired automatically.
+**Cost:** startup performs bounded direct loopback probes and acquires process-lifetime home and
+store locks. On macOS and Linux, no daemon capability bearer is sent until the discovery PID owns
+the published listener and executes the exact expected `thoughtd` sidecar. The stdio bridge is
+limited to those platforms, ignores environment proxies, rejects redirects, and bounds control and
+MCP request time. A discovery record from protocol 3 through the current protocol is removed only
+when its PID is conclusively absent, its bytes remain unchanged, and both locks are available.
+Recovery never sends a signal to a published PID and never replaces a possibly live store owner.
+Ambiguous, malformed, legacy, future, live, or locked state fails closed. SIGINT and SIGTERM received
+by the daemon itself enter the graceful drain path and remove discovery after active sessions have
+been given a bounded chance to close.
 
 ### AD-11 — ⌘Z is scoped to your own edits; agent runs get "Revert this run"
 Undoing a collaborator's edit is the classic violation and agents get no exception. But agent

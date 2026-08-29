@@ -370,6 +370,27 @@ fn sigint_drains_a_live_sse_session_before_exit() {
     live_stream.join().unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn sigterm_removes_discovery_before_exit() {
+    use std::time::Duration;
+
+    let mut daemon = Daemon::start();
+    let discovery = daemon.home.path().join("daemon.json");
+    assert!(discovery.exists(), "the running daemon publishes discovery");
+
+    let status = daemon.terminate_and_wait(Duration::from_secs(6));
+    assert!(status.success(), "thoughtd exited with {status}");
+    assert!(
+        !discovery.exists(),
+        "graceful SIGTERM shutdown removes discovery"
+    );
+    assert!(
+        daemon.logs().contains("shutting down"),
+        "SIGTERM must use the graceful shutdown path"
+    );
+}
+
 #[test]
 fn current_document_permissions_filter_reads_and_deny_every_ungranted_write_class() {
     let daemon = Daemon::start();
@@ -631,7 +652,10 @@ fn discovery_probe_verifies_the_published_capabilities() {
         token: daemon.token.clone(),
         editor_token: daemon.editor_token.clone(),
     };
-    assert!(discovery::authenticated_reachable(&published));
+    assert!(discovery::mcp_authenticated_reachable(
+        &published,
+        std::path::Path::new(env!("CARGO_BIN_EXE_thoughtd"))
+    ));
     assert!(discovery::editor_authenticated_reachable(
         &published,
         std::path::Path::new(env!("CARGO_BIN_EXE_thoughtd"))
@@ -640,7 +664,10 @@ fn discovery_probe_verifies_the_published_capabilities() {
     let mut wrong_token = published;
     wrong_token.token.push_str("-wrong");
     assert!(
-        !discovery::authenticated_reachable(&wrong_token),
+        !discovery::mcp_authenticated_reachable(
+            &wrong_token,
+            std::path::Path::new(env!("CARGO_BIN_EXE_thoughtd"))
+        ),
         "an unrelated or stale bearer credential must not validate the endpoint"
     );
     assert!(
@@ -713,7 +740,10 @@ fn the_stdio_shim_refuses_to_replace_a_daemon_that_rejects_its_token() {
         editor_token: daemon.editor_token.clone(),
     };
     assert!(
-        discovery::authenticated_reachable(&original_daemon),
+        discovery::mcp_authenticated_reachable(
+            &original_daemon,
+            std::path::Path::new(env!("CARGO_BIN_EXE_thoughtd"))
+        ),
         "the shim must leave the existing process running"
     );
 }
@@ -754,7 +784,10 @@ fn the_stdio_shim_refuses_legacy_single_token_discovery() {
         editor_token: daemon.editor_token.clone(),
     };
     assert!(
-        discovery::authenticated_reachable(&original_daemon),
+        discovery::mcp_authenticated_reachable(
+            &original_daemon,
+            std::path::Path::new(env!("CARGO_BIN_EXE_thoughtd"))
+        ),
         "the shim must leave the existing process running"
     );
 }

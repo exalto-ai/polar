@@ -1842,6 +1842,7 @@ dependencies = [
  "axum",
  "futures",
  "futures-util",
+ "libc",
  "rmcp",
  "schemars",
  "serde",

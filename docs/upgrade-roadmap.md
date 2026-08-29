@@ -243,6 +243,12 @@ Owner: Seal PR plus the required Seal repository change
 - [ ] Run keyboard, focus, screen-reader, reduced-motion, narrow-window, offline, restart, and
   recovery acceptance checks for every new interactive surface.
 - [ ] Build and verify a fresh DMG for every consumer-facing PR.
+- [x] Remove only conclusively dead supported discovery under the home and store locks, reject
+  ambiguous or live publishers without signalling them, and drain SIGINT and SIGTERM through the
+  same discovery-cleanup path.
+- [x] Disable proxies and redirects for every credential-bearing loopback request, apply bounded
+  control and MCP timeouts, and verify listener ownership plus the exact sidecar before sending an
+  MCP or editor bearer.
 - [x] Verify stable Developer ID helper identities and shared Keychain access in signed releases;
   treat ad hoc DMGs as same-build tests rather than proof of cross-update credential continuity.
 

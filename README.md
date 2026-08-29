@@ -67,8 +67,12 @@ It prints its port and writes `daemon.json` (mode 0600) with separate MCP and ed
 capabilities. MCP clients that speak HTTP use only the MCP capability; the app keeps the editor
 capability for sourced sync updates. Clients that spawn a stdio server should spawn
 `thought-mcp-stdio`, which reuses the published daemon or starts one only when nothing is
-published, then proxies to it. A stale or unauthenticated discovery record is reported for
-the developer to resolve instead of causing one process to replace another.
+published, then proxies to it. The reviewer bridge is intentionally limited to macOS and Linux,
+where it can prove listener ownership and the exact daemon executable before sending a bearer.
+Its loopback requests ignore proxy settings, reject redirects, and use bounded timeouts. A
+conclusively dead discovery record from protocol 3 through the current protocol can be removed
+under the home and store locks; live, ambiguous, malformed, legacy, future, or locked records remain
+untouched.
 
 ## Shape
 

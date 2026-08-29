@@ -4442,6 +4442,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures",
+ "libc",
  "rmcp",
  "schemars 1.2.2",
  "serde",

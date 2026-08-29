@@ -131,6 +131,17 @@ pub struct Daemon {
     pub editor_token: String,
 }
 
+/// Non-secret process metadata used to assess a stale discovery record.
+/// It is deliberately insufficient on its own to authorize or terminate a
+/// process. Cleanup also requires the record to remain byte-identical, the
+/// published PID to be conclusively absent, and the store locks to be free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishedDaemon {
+    url: String,
+    protocol_version: u32,
+    pid: u32,
+}
+
 fn loopback_base(url: &str) -> Option<&str> {
     let base = url.strip_suffix("/mcp")?;
     let port = base.strip_prefix("http://127.0.0.1:")?;
@@ -148,15 +159,23 @@ fn health_url(daemon: &Daemon, path: &str) -> Option<String> {
     health_url_for(&daemon.url, path)
 }
 
+fn local_probe_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(1)))
+        .proxy(None)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .http_status_as_error(false)
+        .max_idle_connections(0)
+        .build()
+        .into()
+}
+
 fn probe_identity_version(url: &str, protocol_version: u32) -> bool {
     let Some(url) = health_url_for(url, IDENTITY_PATH) else {
         return false;
     };
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(1)))
-        .max_idle_connections(0)
-        .build()
-        .into();
+    let agent = local_probe_agent();
     let Ok(mut response) = agent.get(&url).header("Accept", "application/json").call() else {
         return false;
     };
@@ -175,13 +194,6 @@ fn probe_identity(daemon: &Daemon) -> bool {
     probe_identity_version(&daemon.url, PROTOCOL_VERSION)
 }
 
-fn probe_health(daemon: &Daemon, path: &str, token: &str, expected: &HealthResponse) -> bool {
-    if !probe_identity(daemon) {
-        return false;
-    }
-    probe_capability_health(daemon, path, token, expected)
-}
-
 fn probe_capability_health(
     daemon: &Daemon,
     path: &str,
@@ -191,11 +203,7 @@ fn probe_capability_health(
     let Some(url) = health_url(daemon, path) else {
         return false;
     };
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(1)))
-        .max_idle_connections(0)
-        .build()
-        .into();
+    let agent = local_probe_agent();
     let response = agent
         .get(&url)
         .header("Authorization", &format!("Bearer {token}"))
@@ -213,14 +221,23 @@ fn probe_capability_health(
     serde_json::from_str::<HealthResponse>(&body).is_ok_and(|actual| actual == *expected)
 }
 
-/// Confirm the MCP capability against this daemon build's exact health reply.
-pub fn authenticated_reachable(daemon: &Daemon) -> bool {
-    probe_health(
-        daemon,
-        MCP_HEALTH_PATH,
-        &daemon.token,
-        &HealthResponse::mcp(),
-    )
+fn expected_daemon_reachable(daemon: &Daemon, expected_executable: &Path) -> bool {
+    probe_identity(daemon)
+        && process_owns_published_listener(daemon.pid, &daemon.url)
+        && process_is_expected_daemon(daemon.pid, expected_executable)
+}
+
+/// Confirm the MCP capability only after the published PID owns the listener
+/// and executes the exact expected sidecar. The bearer is never sent to an
+/// identity-only or port-reused loopback service.
+pub fn mcp_authenticated_reachable(daemon: &Daemon, expected_executable: &Path) -> bool {
+    expected_daemon_reachable(daemon, expected_executable)
+        && probe_capability_health(
+            daemon,
+            MCP_HEALTH_PATH,
+            &daemon.token,
+            &HealthResponse::mcp(),
+        )
 }
 
 /// Confirm the editor capability only after the PID in discovery is proven to
@@ -228,18 +245,13 @@ pub fn authenticated_reachable(daemon: &Daemon) -> bool {
 /// identity is checked first, but the editor bearer is not sent until both OS
 /// checks pass.
 pub fn editor_authenticated_reachable(daemon: &Daemon, expected_executable: &Path) -> bool {
-    if !probe_identity(daemon)
-        || !process_owns_published_listener(daemon.pid, &daemon.url)
-        || !process_is_expected_daemon(daemon.pid, expected_executable)
-    {
-        return false;
-    }
-    probe_capability_health(
-        daemon,
-        EDITOR_HEALTH_PATH,
-        &daemon.editor_token,
-        &HealthResponse::editor(),
-    )
+    expected_daemon_reachable(daemon, expected_executable)
+        && probe_capability_health(
+            daemon,
+            EDITOR_HEALTH_PATH,
+            &daemon.editor_token,
+            &HealthResponse::editor(),
+        )
 }
 
 #[cfg(target_os = "macos")]
@@ -280,6 +292,26 @@ fn process_is_expected_daemon(pid: u32, expected: &Path) -> bool {
         .and_then(|path| path.canonicalize().ok())
         .zip(expected.canonicalize().ok())
         .is_some_and(|(actual, expected)| actual == expected)
+}
+
+/// Treat a PID as gone only when process inspection and signal zero both say
+/// it no longer exists. Permission failures and unsupported inspection remain
+/// ambiguous and therefore fail closed.
+#[cfg(unix)]
+fn process_is_definitively_absent(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if process_executable(pid.cast_unsigned()).is_some() {
+        return false;
+    }
+    (unsafe { libc::kill(pid, 0) }) == -1
+        && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn process_is_definitively_absent(_: u32) -> bool {
+    false
 }
 
 fn published_loopback_port(url: &str) -> Option<u16> {
@@ -365,16 +397,15 @@ fn process_owns_published_listener(_: u32, _: &str) -> bool {
 /// launches cannot briefly become concurrent writers while discovery is being
 /// published. The lock file remains on disk; closing this handle releases the
 /// operating-system lock.
-pub struct StoreLock(#[allow(dead_code)] File);
+pub struct DiscoveryLock(#[allow(dead_code)] File);
 
-fn store_lock_path(db_path: &Path) -> PathBuf {
-    let mut path = OsString::from(db_path.as_os_str());
-    path.push(".lock");
-    PathBuf::from(path)
+fn discovery_lock_path(path: &Path) -> PathBuf {
+    let mut lock = OsString::from(path.as_os_str());
+    lock.push(".lock");
+    PathBuf::from(lock)
 }
 
-pub fn try_lock_store(db_path: &Path) -> io::Result<Option<StoreLock>> {
-    let path = store_lock_path(db_path);
+fn try_lock_file(path: &Path) -> io::Result<Option<File>> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -385,10 +416,31 @@ pub fn try_lock_store(db_path: &Path) -> io::Result<Option<StoreLock>> {
         .write(true)
         .open(path)?;
     match file.try_lock() {
-        Ok(()) => Ok(Some(StoreLock(file))),
+        Ok(()) => Ok(Some(file)),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn try_lock_discovery_at(path: &Path) -> io::Result<Option<DiscoveryLock>> {
+    try_lock_file(&discovery_lock_path(path)).map(|lock| lock.map(DiscoveryLock))
+}
+
+pub fn try_lock_discovery() -> io::Result<Option<DiscoveryLock>> {
+    try_lock_discovery_at(&discovery_path())
+}
+
+pub struct StoreLock(#[allow(dead_code)] File);
+
+fn store_lock_path(db_path: &Path) -> PathBuf {
+    let mut path = OsString::from(db_path.as_os_str());
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
+pub fn try_lock_store(db_path: &Path) -> io::Result<Option<StoreLock>> {
+    let path = store_lock_path(db_path);
+    try_lock_file(&path).map(|lock| lock.map(StoreLock))
 }
 
 /// Read a published daemon using this build's protocol and capability format.
@@ -399,6 +451,84 @@ pub fn try_lock_store(db_path: &Path) -> io::Result<Option<StoreLock>> {
 pub fn read() -> Option<Daemon> {
     let body = std::fs::read_to_string(discovery_path()).ok()?;
     parse(&body)
+}
+
+/// Remove only a supported discovery row whose publisher is conclusively
+/// dead. Both the home-wide discovery lock and default-store lock are held
+/// through the final byte and PID rechecks.
+pub fn remove_definitively_stale_discovery() -> io::Result<bool> {
+    remove_definitively_stale_discovery_at(&discovery_path(), &default_db_path())
+}
+
+fn remove_definitively_stale_discovery_at(path: &Path, db_path: &Path) -> io::Result<bool> {
+    remove_definitively_stale_discovery_at_with_process_check(
+        path,
+        db_path,
+        process_is_definitively_absent,
+    )
+}
+
+fn remove_definitively_stale_discovery_at_with_process_check(
+    path: &Path,
+    db_path: &Path,
+    process_is_absent: fn(u32) -> bool,
+) -> io::Result<bool> {
+    let Ok(original) = std::fs::read_to_string(path) else {
+        return Ok(false);
+    };
+    let Some(published) = parse_published(&original) else {
+        return Ok(false);
+    };
+    remove_stale_candidate_if_unchanged(path, db_path, &original, &published, process_is_absent)
+}
+
+fn remove_stale_candidate_if_unchanged(
+    path: &Path,
+    db_path: &Path,
+    original: &str,
+    published: &PublishedDaemon,
+    process_is_absent: fn(u32) -> bool,
+) -> io::Result<bool> {
+    if !(3..=PROTOCOL_VERSION).contains(&published.protocol_version)
+        || !process_is_absent(published.pid)
+    {
+        return Ok(false);
+    }
+    let Some(_discovery_lock) = try_lock_discovery_at(path)? else {
+        return Ok(false);
+    };
+    let Some(_store_lock) = try_lock_store(db_path)? else {
+        return Ok(false);
+    };
+    let Ok(current) = std::fs::read_to_string(path) else {
+        return Ok(false);
+    };
+    if current.as_bytes() != original.as_bytes()
+        || parse_published(&current).as_ref() != Some(published)
+        || !process_is_absent(published.pid)
+    {
+        return Ok(false);
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_published(body: &str) -> Option<PublishedDaemon> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    let protocol_version = u32::try_from(json.get("protocol_version")?.as_u64()?).ok()?;
+    let pid = u32::try_from(json.get("pid")?.as_u64()?).ok()?;
+    let url = json.get("url")?.as_str()?.to_string();
+    if protocol_version == 0 || pid == 0 || loopback_base(&url).is_none() {
+        return None;
+    }
+    Some(PublishedDaemon {
+        url,
+        protocol_version,
+        pid,
+    })
 }
 
 fn parse(body: &str) -> Option<Daemon> {
@@ -431,7 +561,13 @@ fn parse(body: &str) -> Option<Daemon> {
 }
 
 /// Publish distinct MCP and editor capabilities, readable only by the user.
-pub fn write(port: u16, token: &str, editor_token: &str, db_path: &Path) -> io::Result<PathBuf> {
+pub fn write(
+    _discovery_lock: &DiscoveryLock,
+    port: u16,
+    token: &str,
+    editor_token: &str,
+    db_path: &Path,
+) -> io::Result<PathBuf> {
     if token == editor_token {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -515,6 +651,28 @@ fn publish_with_temporary(path: &Path, temporary: &Path, body: &[u8]) -> io::Res
 mod tests {
     use std::io::{Read as _, Write as _};
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const PROXY_PROBE_CHILD: &str = "THOUGHTD_DISCOVERY_PROXY_CHILD";
+    const PROXY_PROBE_TARGET: &str = "THOUGHTD_DISCOVERY_PROXY_TARGET";
+
+    #[cfg(unix)]
+    fn always_absent(_: u32) -> bool {
+        true
+    }
+
+    #[cfg(unix)]
+    fn published_body(protocol_version: u32, pid: u32) -> String {
+        serde_json::json!({
+            "url": "http://127.0.0.1:1/mcp",
+            "protocol_version": protocol_version,
+            "pid": pid,
+            "token": "old-mcp",
+            "editor_token": "old-editor"
+        })
+        .to_string()
+    }
 
     const STORE_LOCK_CHILD: &str = "THOUGHTD_STORE_LOCK_CHILD";
     const STORE_LOCK_DB_PATH: &str = "THOUGHTD_STORE_LOCK_DB_PATH";
@@ -603,6 +761,33 @@ mod tests {
     }
 
     #[test]
+    fn prior_protocol_metadata_is_available_only_for_loopback_process_validation() {
+        let prior = serde_json::json!({
+            "url": "http://127.0.0.1:1234/mcp",
+            "protocol_version": super::PROTOCOL_VERSION - 1,
+            "pid": 4321,
+            "token": "old-mcp",
+            "editor_token": "old-editor"
+        });
+        assert_eq!(
+            super::parse_published(&prior.to_string()),
+            Some(super::PublishedDaemon {
+                url: "http://127.0.0.1:1234/mcp".into(),
+                protocol_version: super::PROTOCOL_VERSION - 1,
+                pid: 4321,
+            })
+        );
+        assert!(super::parse(&prior.to_string()).is_none());
+
+        let remote = serde_json::json!({
+            "url": "https://example.com/mcp",
+            "protocol_version": super::PROTOCOL_VERSION - 1,
+            "pid": 4321
+        });
+        assert!(super::parse_published(&remote.to_string()).is_none());
+    }
+
+    #[test]
     fn current_discovery_never_sends_capabilities_to_a_non_loopback_url() {
         let remote = serde_json::json!({
             "url": "http://example.com/mcp",
@@ -612,6 +797,220 @@ mod tests {
             "editor_token": "editor-only"
         });
         assert!(super::parse(&remote.to_string()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conclusively_dead_supported_discovery_is_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.json");
+        let db_path = directory.path().join("thought.db");
+        let pid = 4321;
+        for protocol_version in [3, super::PROTOCOL_VERSION] {
+            std::fs::write(&path, published_body(protocol_version, pid)).unwrap();
+            assert!(
+                super::remove_definitively_stale_discovery_at_with_process_check(
+                    &path,
+                    &db_path,
+                    always_absent,
+                )
+                .unwrap()
+            );
+            assert!(!path.exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_cleanup_refuses_live_pid_busy_store_and_changed_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.json");
+        let db_path = directory.path().join("thought.db");
+        assert!(!super::process_is_definitively_absent(std::process::id()));
+        let live = published_body(super::PROTOCOL_VERSION - 1, std::process::id());
+        std::fs::write(&path, &live).unwrap();
+        assert!(!super::remove_definitively_stale_discovery_at(&path, &db_path).unwrap());
+
+        let dead = published_body(super::PROTOCOL_VERSION - 1, 4321);
+        std::fs::write(&path, &dead).unwrap();
+        let store_lock = super::try_lock_store(&db_path).unwrap().unwrap();
+        assert!(
+            !super::remove_definitively_stale_discovery_at_with_process_check(
+                &path,
+                &db_path,
+                always_absent,
+            )
+            .unwrap()
+        );
+        drop(store_lock);
+
+        let published = super::parse_published(&dead).unwrap();
+        std::fs::write(&path, format!("{dead}\n")).unwrap();
+        assert!(
+            !super::remove_stale_candidate_if_unchanged(
+                &path,
+                &db_path,
+                &dead,
+                &published,
+                always_absent,
+            )
+            .unwrap()
+        );
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_cleanup_refuses_legacy_future_and_active_home_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.json");
+        let db_path = directory.path().join("thought.db");
+        let pid = 4321;
+        for protocol_version in [2, super::PROTOCOL_VERSION + 1] {
+            let body = published_body(protocol_version, pid);
+            std::fs::write(&path, &body).unwrap();
+            assert!(
+                !super::remove_definitively_stale_discovery_at_with_process_check(
+                    &path,
+                    &db_path,
+                    always_absent,
+                )
+                .unwrap()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        }
+
+        let body = published_body(super::PROTOCOL_VERSION, pid);
+        std::fs::write(&path, &body).unwrap();
+        let publisher = super::try_lock_discovery_at(&path).unwrap().unwrap();
+        assert!(
+            !super::remove_definitively_stale_discovery_at_with_process_check(
+                &path,
+                &db_path,
+                always_absent,
+            )
+            .unwrap()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        drop(publisher);
+        assert!(
+            super::remove_definitively_stale_discovery_at_with_process_check(
+                &path,
+                &db_path,
+                always_absent,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn local_probe_proxy_child() {
+        if std::env::var(PROXY_PROBE_CHILD).as_deref() != Ok("1") {
+            return;
+        }
+        let target = std::env::var(PROXY_PROBE_TARGET).unwrap();
+        assert!(super::probe_identity_version(
+            &target,
+            super::PROTOCOL_VERSION,
+        ));
+    }
+
+    #[test]
+    fn local_probe_ignores_proxy_environment() {
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let target_address = target.local_addr().unwrap();
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        proxy.set_nonblocking(true).unwrap();
+        let proxy_address = proxy.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let target_stop = stop.clone();
+        let target_server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            while !target_stop.load(Ordering::Acquire) {
+                match target.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut request = Vec::new();
+                        let mut chunk = [0_u8; 1024];
+                        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            let read = stream.read(&mut chunk).unwrap();
+                            if read == 0 {
+                                break;
+                            }
+                            request.extend_from_slice(&chunk[..read]);
+                        }
+                        requests.push(request);
+                        let body =
+                            serde_json::to_string(&super::IdentityResponse::current()).unwrap();
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body,
+                        )
+                        .unwrap();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("unexpected target listener error: {error}"),
+                }
+            }
+            requests
+        });
+
+        let proxy_stop = stop.clone();
+        let proxy_server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            while !proxy_stop.load(Ordering::Acquire) {
+                match proxy.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut request = Vec::new();
+                        stream.read_to_end(&mut request).unwrap();
+                        requests.push(request);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("unexpected proxy listener error: {error}"),
+                }
+            }
+            requests
+        });
+
+        let proxy_url = format!("http://{proxy_address}");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "discovery::tests::local_probe_proxy_child",
+                "--nocapture",
+            ])
+            .env(PROXY_PROBE_CHILD, "1")
+            .env(PROXY_PROBE_TARGET, format!("http://{target_address}/mcp"))
+            .env("HTTP_PROXY", &proxy_url)
+            .env("HTTPS_PROXY", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env("http_proxy", &proxy_url)
+            .env("https_proxy", &proxy_url)
+            .env("all_proxy", &proxy_url)
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .output()
+            .unwrap();
+        stop.store(true, Ordering::Release);
+        let target_requests = target_server.join().unwrap();
+        let proxy_requests = proxy_server.join().unwrap();
+
+        assert!(
+            child.status.success(),
+            "child probe failed: {}",
+            String::from_utf8_lossy(&child.stderr),
+        );
+        assert_eq!(target_requests.len(), 1);
+        assert!(proxy_requests.is_empty());
     }
 
     #[test]
@@ -698,7 +1097,10 @@ mod tests {
             editor_token: "editor-only".into(),
         };
 
-        assert!(!super::authenticated_reachable(&daemon));
+        assert!(!super::mcp_authenticated_reachable(
+            &daemon,
+            &std::env::current_exe().unwrap()
+        ));
         assert!(!super::editor_authenticated_reachable(
             &daemon,
             &std::env::current_exe().unwrap()
@@ -715,29 +1117,33 @@ mod tests {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
-    fn editor_bearer_is_withheld_when_the_listener_executable_does_not_match() {
+    fn capability_bearers_are_withheld_when_the_listener_executable_does_not_match() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let read = stream.read(&mut chunk).unwrap();
-                if read == 0 {
-                    break;
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut chunk).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
                 }
-                request.extend_from_slice(&chunk[..read]);
+                let body = serde_json::to_string(&super::IdentityResponse::current()).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+                requests.push(String::from_utf8(request).unwrap());
             }
-            let body = serde_json::to_string(&super::IdentityResponse::current()).unwrap();
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .unwrap();
-            String::from_utf8(request).unwrap()
+            requests
         });
         let daemon = super::Daemon {
             url: format!("http://{address}/mcp"),
@@ -750,14 +1156,20 @@ mod tests {
         let wrong_executable = directory.path().join("thoughtd");
         std::fs::write(&wrong_executable, b"not this process").unwrap();
 
+        assert!(!super::mcp_authenticated_reachable(
+            &daemon,
+            &wrong_executable
+        ));
         assert!(!super::editor_authenticated_reachable(
             &daemon,
             &wrong_executable
         ));
-        let request = server.join().unwrap();
-        assert!(request.starts_with("GET /health/identity HTTP/1.1"));
-        assert!(!request.to_ascii_lowercase().contains("authorization:"));
-        assert!(!request.contains("editor-secret-sentinel"));
+        for request in server.join().unwrap() {
+            assert!(request.starts_with("GET /health/identity HTTP/1.1"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            assert!(!request.contains("mcp-only"));
+            assert!(!request.contains("editor-secret-sentinel"));
+        }
     }
 
     #[test]

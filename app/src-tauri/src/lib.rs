@@ -610,8 +610,14 @@ fn new_window(
 fn ensure_daemon() -> Result<Daemon, String> {
     let thoughtd =
         find_binary("thoughtd").ok_or_else(|| "could not find the thoughtd binary".to_string())?;
+    if discovery::discovery_path().exists()
+        && discovery::remove_definitively_stale_discovery()
+            .map_err(|error| format!("could not remove stale daemon discovery: {error}"))?
+    {
+        return ensure_daemon();
+    }
     if let Some(daemon) = discovery::read() {
-        if discovery::authenticated_reachable(&daemon)
+        if discovery::mcp_authenticated_reachable(&daemon, &thoughtd)
             && discovery::editor_authenticated_reachable(&daemon, &thoughtd)
         {
             return Ok(daemon);
@@ -639,7 +645,7 @@ fn ensure_daemon() -> Result<Daemon, String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Some(daemon) = discovery::read()
-            && discovery::authenticated_reachable(&daemon)
+            && discovery::mcp_authenticated_reachable(&daemon, &thoughtd)
             && discovery::editor_authenticated_reachable(&daemon, &thoughtd)
         {
             return Ok(daemon);

@@ -4,6 +4,11 @@
 //! the raw reviewer credential from native storage and uses it for loopback
 //! requests. There is deliberately no no-argument shared-token fallback.
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!(
+    "thought-mcp-stdio is supported only on macOS and Linux because reviewer credentials require OS-verified listener ownership and process identity"
+);
+
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
@@ -71,6 +76,23 @@ struct FailureReporter {
 #[derive(Default)]
 struct RuntimeFailureState(Mutex<Option<FailureCode>>);
 
+const LOCAL_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
+const LOCAL_MCP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Loopback traffic must never inherit proxy settings from the launching
+/// process. A proxy would receive reviewer or editor credentials before the
+/// request reached the verified local daemon.
+fn local_agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .proxy(None)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .max_idle_connections(0)
+        .build()
+        .into()
+}
+
 impl RuntimeFailureState {
     fn record(&self, code: FailureCode) -> bool {
         let mut current = self.0.lock().expect("runtime failure lock poisoned");
@@ -92,6 +114,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connection_id = parse_connection_id()?;
     let instance_id = discovery::random_token()
         .map_err(|error| format!("could not create a reviewer process identity: {error}"))?;
+    if discovery::discovery_path().exists() {
+        discovery::remove_definitively_stale_discovery()
+            .map_err(|error| format!("could not remove stale daemon discovery: {error}"))?;
+    }
     let mut published = discovery::read();
     let failure_daemon = native_failure_daemon(published.as_ref());
     if published.is_none() {
@@ -240,7 +266,7 @@ fn connect(
     failure_reporter: Option<FailureReporter>,
 ) -> Result<ReviewerDaemon, ShimFailure> {
     if let Some(daemon) = published {
-        if !discovery::authenticated_reachable(&daemon) {
+        if !mcp_daemon_reachable(&daemon) {
             return Err(ShimFailure::new(
                 FailureCode::Protocol,
                 format!(
@@ -307,7 +333,7 @@ fn spawn() -> Result<Daemon, ShimFailure> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Some(daemon) = discovery::read()
-            && discovery::authenticated_reachable(&daemon)
+            && mcp_daemon_reachable(&daemon)
         {
             return Ok(daemon);
         }
@@ -334,7 +360,8 @@ fn health_url(daemon: &Daemon) -> Result<String, ShimFailure> {
 
 fn ensure_reviewer_reachable(reviewer: &ReviewerDaemon) -> Result<(), ShimFailure> {
     let url = health_url(&reviewer.daemon)?;
-    let response = ureq::get(&url)
+    let response = local_agent(LOCAL_CONTROL_TIMEOUT)
+        .get(&url)
         .header("Authorization", &format!("Bearer {}", reviewer.credential))
         .header(REVIEWER_INSTANCE_HEADER, &reviewer.instance_id)
         .header("Accept", "application/json")
@@ -393,12 +420,12 @@ fn start_heartbeat(
                     // Probe with the daemon's internal MCP capability instead.
                     // Health alone never clears the pending failure.
                     let result = if runtime_failure.current().is_some() {
-                        discovery::authenticated_reachable(&reviewer.daemon)
-                            .then_some(())
-                            .ok_or(ShimFailure::new(
+                        mcp_daemon_reachable(&reviewer.daemon).then_some(()).ok_or(
+                            ShimFailure::new(
                                 FailureCode::Transport,
                                 "the daemon health probe failed",
-                            ))
+                            ),
+                        )
                     } else {
                         ensure_reviewer_reachable(&reviewer)
                     };
@@ -419,7 +446,8 @@ fn disconnect(reviewer: &ReviewerDaemon) {
     let Some(base) = reviewer.daemon.url.strip_suffix("/mcp") else {
         return;
     };
-    let _ = ureq::delete(format!("{base}/reviewer/status"))
+    let _ = local_agent(LOCAL_CONTROL_TIMEOUT)
+        .delete(format!("{base}/reviewer/status"))
         .header("Authorization", &format!("Bearer {}", reviewer.credential))
         .header(REVIEWER_INSTANCE_HEADER, &reviewer.instance_id)
         .call();
@@ -492,7 +520,9 @@ fn is_transport_failure(error: &ureq::Error) -> bool {
 
 fn failure_from_transport(error: ureq::Error) -> ShimFailure {
     let code = match &error {
-        ureq::Error::ConnectionFailed | ureq::Error::Io(_) => FailureCode::Transport,
+        ureq::Error::ConnectionFailed | ureq::Error::Io(_) | ureq::Error::Timeout(_) => {
+            FailureCode::Transport
+        }
         ureq::Error::StatusCode(401) => FailureCode::CredentialStore,
         _ => FailureCode::Protocol,
     };
@@ -546,11 +576,7 @@ fn prepare_failure_reporter(
     let base = daemon.url.strip_suffix("/mcp")?;
     let url = format!("{base}/editor/reviewer-connections/{connection_id}/failure-reporter");
     let body = serde_json::json!({ "instance_id": instance_id }).to_string();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(1)))
-        .max_idle_connections(0)
-        .build()
-        .into();
+    let agent = local_agent(LOCAL_CONTROL_TIMEOUT);
     let mut response = agent
         .post(url)
         .header("Authorization", &format!("Bearer {}", daemon.editor_token))
@@ -587,6 +613,13 @@ fn editor_daemon_reachable(daemon: &Daemon) -> bool {
         .is_some_and(|thoughtd| discovery::editor_authenticated_reachable(daemon, &thoughtd))
 }
 
+fn mcp_daemon_reachable(daemon: &Daemon) -> bool {
+    std::env::current_exe()
+        .ok()
+        .map(|executable| executable.with_file_name("thoughtd"))
+        .is_some_and(|thoughtd| discovery::mcp_authenticated_reachable(daemon, &thoughtd))
+}
+
 /// Report only through the short-lived server-side process binding. Re-verify
 /// the daemon PID, listener, and executable before the editor capability is
 /// sent, and silently skip a stale or unrelated publisher.
@@ -605,11 +638,7 @@ fn report_failure(reporter: Option<&FailureReporter>, code: FailureCode) {
         reporter.connection_id
     );
     let body = failure_report_body(reporter, code);
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(1)))
-        .max_idle_connections(0)
-        .build()
-        .into();
+    let agent = local_agent(LOCAL_CONTROL_TIMEOUT);
     let _ = agent
         .post(url)
         .header(
@@ -625,7 +654,9 @@ fn send_once(
     body: &str,
     session: &mut Option<String>,
 ) -> Result<String, ureq::Error> {
-    let mut request = ureq::post(&reviewer.daemon.url)
+    let agent = local_agent(LOCAL_MCP_TIMEOUT);
+    let mut request = agent
+        .post(&reviewer.daemon.url)
         .header("Authorization", &format!("Bearer {}", reviewer.credential))
         .header(REVIEWER_INSTANCE_HEADER, &reviewer.instance_id)
         .header("Content-Type", "application/json")
@@ -745,10 +776,137 @@ fn decode_mcp_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        FailureCode, FailureReporter, RuntimeFailureState, decode_mcp_response,
-        failure_report_body, request_id, runtime_failure_is_reportable, unavailable_response,
+        FailureCode, FailureReporter, ReviewerDaemon, RuntimeFailureState, decode_mcp_response,
+        ensure_reviewer_reachable, failure_from_transport, failure_report_body,
+        is_transport_failure, request_id, runtime_failure_is_reportable, unavailable_response,
         valid_connection_id,
     };
+    use std::io::{Read as _, Write as _};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    const LOCAL_PROXY_CHILD: &str = "THOUGHTD_STDIO_PROXY_CHILD";
+    const LOCAL_PROXY_TARGET: &str = "THOUGHTD_STDIO_PROXY_TARGET";
+
+    fn capture_http_requests(
+        listener: std::net::TcpListener,
+        stop: Arc<AtomicBool>,
+        response: &'static [u8],
+    ) -> std::thread::JoinHandle<Vec<Vec<u8>>> {
+        std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            while !stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut request = Vec::new();
+                        let mut chunk = [0_u8; 1024];
+                        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            let read = stream.read(&mut chunk).unwrap();
+                            if read == 0 {
+                                break;
+                            }
+                            request.extend_from_slice(&chunk[..read]);
+                        }
+                        requests.push(request);
+                        stream.write_all(response).unwrap();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("unexpected HTTP capture error: {error}"),
+                }
+            }
+            requests
+        })
+    }
+
+    #[test]
+    fn local_reviewer_health_proxy_child() {
+        if std::env::var(LOCAL_PROXY_CHILD).as_deref() != Ok("1") {
+            return;
+        }
+        let reviewer = ReviewerDaemon {
+            daemon: thoughtd::discovery::Daemon {
+                url: std::env::var(LOCAL_PROXY_TARGET).unwrap(),
+                protocol_version: thoughtd::discovery::PROTOCOL_VERSION,
+                pid: std::process::id(),
+                token: "mcp-capability-sentinel".into(),
+                editor_token: "editor-capability-sentinel".into(),
+            },
+            credential: "reviewer-secret-sentinel".into(),
+            instance_id: "proxy-child".into(),
+            failure_reporter: None,
+        };
+        ensure_reviewer_reachable(&reviewer).expect("reviewer health reaches the direct target");
+    }
+
+    #[test]
+    fn local_reviewer_health_ignores_proxy_environment() {
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let target_address = target.local_addr().unwrap();
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        proxy.set_nonblocking(true).unwrap();
+        let proxy_address = proxy.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let target_server = capture_http_requests(
+            target,
+            stop.clone(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let proxy_server = capture_http_requests(
+            proxy,
+            stop.clone(),
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let proxy_url = format!("http://{proxy_address}");
+
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::local_reviewer_health_proxy_child",
+                "--nocapture",
+            ])
+            .env(LOCAL_PROXY_CHILD, "1")
+            .env(LOCAL_PROXY_TARGET, format!("http://{target_address}/mcp"))
+            .env("HTTP_PROXY", &proxy_url)
+            .env("HTTPS_PROXY", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env("http_proxy", &proxy_url)
+            .env("https_proxy", &proxy_url)
+            .env("all_proxy", &proxy_url)
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .output()
+            .unwrap();
+
+        stop.store(true, Ordering::Release);
+        let target_requests = target_server.join().unwrap();
+        let proxy_requests = proxy_server.join().unwrap();
+        assert!(
+            child.status.success(),
+            "child reviewer health failed: {}",
+            String::from_utf8_lossy(&child.stderr),
+        );
+        assert_eq!(target_requests.len(), 1);
+        let request = String::from_utf8(target_requests.into_iter().next().unwrap()).unwrap();
+        assert!(request.starts_with("GET /health/mcp HTTP/1.1"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer reviewer-secret-sentinel")
+        );
+        assert!(proxy_requests.is_empty());
+    }
+
+    #[test]
+    fn timeout_is_transient_without_automatically_replaying_the_request() {
+        let timeout = ureq::Error::Timeout(ureq::Timeout::Global);
+        assert!(!is_transport_failure(&timeout));
+        assert_eq!(failure_from_transport(timeout).code, FailureCode::Transport);
+    }
 
     #[test]
     fn native_failure_payload_contains_only_non_secret_process_metadata() {

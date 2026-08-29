@@ -183,11 +183,26 @@ impl Daemon {
 
     #[cfg(unix)]
     pub fn interrupt_and_wait(&mut self, timeout: Duration) -> std::process::ExitStatus {
+        self.signal_and_wait("-INT", "SIGINT", timeout)
+    }
+
+    #[cfg(unix)]
+    pub fn terminate_and_wait(&mut self, timeout: Duration) -> std::process::ExitStatus {
+        self.signal_and_wait("-TERM", "SIGTERM", timeout)
+    }
+
+    #[cfg(unix)]
+    fn signal_and_wait(
+        &mut self,
+        signal: &str,
+        signal_name: &str,
+        timeout: Duration,
+    ) -> std::process::ExitStatus {
         let status = Command::new("kill")
-            .args(["-INT", &self.child.id().to_string()])
+            .args([signal, &self.child.id().to_string()])
             .status()
-            .expect("send SIGINT to thoughtd");
-        assert!(status.success(), "kill could not deliver SIGINT");
+            .unwrap_or_else(|error| panic!("send {signal_name} to thoughtd: {error}"));
+        assert!(status.success(), "kill could not deliver {signal_name}");
 
         let deadline = Instant::now() + timeout;
         loop {
@@ -196,7 +211,7 @@ impl Daemon {
             }
             assert!(
                 Instant::now() < deadline,
-                "thoughtd did not exit within {timeout:?} after SIGINT"
+                "thoughtd did not exit within {timeout:?} after {signal_name}"
             );
             std::thread::sleep(Duration::from_millis(10));
         }

@@ -37,6 +37,65 @@ use thought_mcp::Workspace;
 const SESSION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[cfg(unix)]
+struct ShutdownSignals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl ShutdownSignals {
+    fn install() -> std::io::Result<Self> {
+        Ok(Self {
+            interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
+            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+        })
+    }
+
+    async fn wait(&mut self) -> std::io::Result<()> {
+        let received = tokio::select! {
+            received = self.interrupt.recv() => received,
+            received = self.terminate.recv() => received,
+        };
+        received.ok_or_else(|| std::io::Error::other("shutdown signal listener closed"))
+    }
+}
+
+#[cfg(windows)]
+struct ShutdownSignals {
+    interrupt: tokio::signal::windows::CtrlC,
+}
+
+#[cfg(windows)]
+impl ShutdownSignals {
+    fn install() -> std::io::Result<Self> {
+        Ok(Self {
+            interrupt: tokio::signal::windows::ctrl_c()?,
+        })
+    }
+
+    async fn wait(&mut self) -> std::io::Result<()> {
+        self.interrupt
+            .recv()
+            .await
+            .ok_or_else(|| std::io::Error::other("shutdown signal listener closed"))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+struct ShutdownSignals;
+
+#[cfg(not(any(unix, windows)))]
+impl ShutdownSignals {
+    fn install() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn wait(&mut self) -> std::io::Result<()> {
+        tokio::signal::ctrl_c().await
+    }
+}
+
 fn bearer(req: &Request<axum::body::Body>) -> Option<String> {
     req.headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -93,6 +152,9 @@ fn reviewer_instance(headers: &axum::http::HeaderMap) -> Option<String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install signal handlers before discovery can be published. A shutdown
+    // arriving during startup is then queued for the normal cleanup path.
+    let mut shutdown_signals = ShutdownSignals::install()?;
     let db_path = std::env::args()
         .nth(1)
         .map(std::path::PathBuf::from)
@@ -105,6 +167,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Held for the process's lifetime; dropping it discards buffered lines.
     let _logs = logging::init(&discovery::home());
     tracing::info!(store = %db_path.display(), "starting");
+
+    // One publisher owns this Thought home even when a custom store path is
+    // used. Stale discovery cleanup takes the same lock before unlinking.
+    let _discovery_lock = discovery::try_lock_discovery()?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "another thought daemon already owns this discovery home",
+        )
+    })?;
 
     // This must precede `Workspace::open`: discovery is published later, so
     // app and stdio clients can race to launch here. Only the process holding
@@ -349,7 +420,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
 
-    let discovery_path = discovery::write(port, &token, &editor_token, &db_path)?;
+    let discovery_path = discovery::write(&_discovery_lock, port, &token, &editor_token, &db_path)?;
     // The readiness line stays on stderr verbatim: the app and the test harness
     // both wait for it, and a logger's prefixes would change what they match.
     eprintln!("thoughtd listening on http://127.0.0.1:{port}/mcp");
@@ -374,9 +445,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::pin!(server);
     let result = tokio::select! {
         result = &mut server => result,
-        signal = tokio::signal::ctrl_c() => {
+        signal = shutdown_signals.wait() => {
             if let Err(error) = signal {
-                tracing::warn!(%error, "could not listen for interrupt signal");
+                tracing::warn!(%error, "could not listen for shutdown signal");
             }
             // Persist the stop state before draining. The server future is not
             // polled during the drain, so it accepts no new sockets, and the
