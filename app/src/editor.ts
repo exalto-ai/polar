@@ -60,6 +60,40 @@ function renderCaret(user: Actor): HTMLElement {
   return caret;
 }
 
+/**
+ * Treat the quiet writing canvas as part of the editor, not as dead space.
+ *
+ * ProseMirror only handles a press whose target is inside its document DOM.
+ * Short documents leave most of the blue page outside any text block, so a
+ * press there otherwise keeps focus in the toolbar or AI sidebar. The three
+ * direct background targets below deliberately exclude real blocks, toolbar
+ * controls, suggestion cards, and provenance rails, which retain their own
+ * selection and activation behavior.
+ */
+export function installEditorCanvasFocus(editor: Editor, element: HTMLElement): () => void {
+  const canvas = element.closest<HTMLElement>(".page") ?? element;
+  const editorDom = editor.view.dom;
+  const backgroundTargets = new Set<EventTarget>([canvas, element, editorDom]);
+  const focusAtEnd = (event: MouseEvent) => {
+    if (
+      event.button !== 0 ||
+      !editor.isEditable ||
+      event.target === null ||
+      !backgroundTargets.has(event.target)
+    ) return;
+
+    event.preventDefault();
+    editor.commands.focus("end");
+    // TipTap's command may schedule the DOM focus for the next frame. A canvas
+    // press must be ready for the very next keystroke, including in a window
+    // that was focused in the AI sidebar immediately beforehand.
+    editor.view.focus();
+  };
+
+  canvas.addEventListener("mousedown", focusAtEnd);
+  return () => canvas.removeEventListener("mousedown", focusAtEnd);
+}
+
 export function createEditor(
   host: HTMLElement,
   element: HTMLElement,
@@ -92,6 +126,7 @@ export function createEditor(
     if (hydrated && shouldAutoFocus()) editor.commands.focus("end");
   });
 
+  const destroyCanvasFocus = installEditorCanvasFocus(editor, element);
   const destroySlashMenu = installSlashMenu(editor, host);
   const links = installLinkShortcut(editor, host);
   const destroyToolbar = installToolbar(editor, element, {
@@ -104,6 +139,7 @@ export function createEditor(
   // cannot remove them when a document switch destroys the editor.
   editor.on("destroy", () => {
     destroySlashMenu();
+    destroyCanvasFocus();
     links.destroy();
     destroyToolbar();
     unsubscribeHydration();
