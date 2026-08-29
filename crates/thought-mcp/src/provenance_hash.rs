@@ -35,10 +35,10 @@ pub const UPDATE_LOG_DIGEST_VERSION: u32 = 1;
 pub const LINEAGE_DIGEST_VERSION: u32 = 1;
 pub const CURRENT_EVENT_CHAIN_VERSION: u32 = 1;
 
-const DOCUMENT_DOMAIN: &str = "proof-of-thought/document";
-const EVENT_DOMAIN: &str = "proof-of-thought/event-chain";
-const UPDATE_LOG_DOMAIN: &str = "proof-of-thought/yjs-update-log";
-const LINEAGE_DOMAIN: &str = "proof-of-thought/live-lineage";
+const DOCUMENT_DOMAIN: &str = "thought/document";
+const EVENT_DOMAIN: &str = "thought/event-chain";
+const UPDATE_LOG_DOMAIN: &str = "thought/yjs-update-log";
+const LINEAGE_DOMAIN: &str = "thought/live-lineage";
 
 /// The durable action represented by one provenance event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,7 +372,7 @@ impl Encoder {
 
     fn root(domain: &str, version: u32) -> Self {
         let mut encoder = Self::new();
-        encoder.fixed(1, b"ProofOfThought canonical evidence");
+        encoder.fixed(1, b"thought/canonical-evidence");
         encoder.string(2, domain);
         encoder.u32(3, version);
         encoder

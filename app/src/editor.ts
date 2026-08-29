@@ -22,7 +22,7 @@ export type Actor = { name: string; color: string; id: number };
 export type EditorActions = Omit<ToolbarOptions, "openLink" | "subscribeSaveStatus">;
 
 /** App commands may set this on their TipTap transaction explicitly. */
-export const INPUT_SOURCE_META = "pot.inputSource";
+export const INPUT_SOURCE_META = "thought.inputSource";
 
 function isLocalInputSource(value: unknown): value is LocalInputSourceValue {
   return Object.values(LocalInputSource).includes(value as LocalInputSourceValue);
@@ -84,7 +84,7 @@ function inputSourceExtension(
   tracker: InputSourceTracker,
 ): Extension {
   return Extension.create({
-    name: "proofOfThoughtInputSource",
+    name: "thoughtInputSource",
     // Wrap the complete dispatch chain, including transactions appended by
     // input and paste rules, while the final document is written into Yjs.
     priority: 10_000,

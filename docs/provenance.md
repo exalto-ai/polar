@@ -239,6 +239,13 @@ build rejects every other chain version. A future version must first add a schem
 version-dispatched verifier and reconciler so old evidence remains readable; the individual
 internal digest constants are not independent compatibility promises.
 
+The V1 digest root and domain separators use the machine namespace `thought`, including
+`thought/canonical-evidence`, `thought/document`, `thought/event-chain`,
+`thought/yjs-update-log`, and `thought/live-lineage`. This namespace correction predates a
+release and intentionally invalidates evidence produced by development builds that used the old
+product-name strings. Once released, changing any of these bytes requires a new format version,
+a migration plan, and a verifier that can dispatch across every supported version.
+
 A normal edit commits its actor registration, Yjs update, event, ordered changes, complete live
 spans, lineage watermark, title, deletion state, search projection, and compatibility block rails
 in one transaction. A rejected edit cannot rewrite the mutable actor display row. The app
