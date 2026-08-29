@@ -780,7 +780,25 @@ describe("Pro chat", () => {
     document.querySelector<HTMLButtonElement>("#pro-chat-clear")!.click();
     const confirmation = document.querySelector<HTMLElement>("#pro-chat-clear-confirmation")!;
     expect(confirmation.hidden).toBe(false);
+    expect(confirmation.getAttribute("role")).toBe("dialog");
+    expect(confirmation.hasAttribute("aria-modal")).toBe(false);
+    expect(confirmation.getAttribute("aria-labelledby")).toBe("pro-chat-clear-title");
+    expect(confirmation.getAttribute("aria-describedby")).toBe("pro-chat-clear-description");
     expect(confirmation.textContent).toContain("document and reviewer history stay intact");
+    await vi.waitFor(() => {
+      expect(document.activeElement).toBe(
+        document.querySelector<HTMLButtonElement>("#pro-chat-clear-cancel"),
+      );
+    });
+    document.querySelector<HTMLButtonElement>("#pro-chat-clear-cancel")!.click();
+    expect(confirmation.hidden).toBe(true);
+    expect(document.activeElement).toBe(document.querySelector("#pro-chat-clear"));
+    document.querySelector<HTMLButtonElement>("#pro-chat-clear")!.click();
+    await vi.waitFor(() => {
+      expect(document.activeElement).toBe(
+        document.querySelector<HTMLButtonElement>("#pro-chat-clear-cancel"),
+      );
+    });
     document.querySelector<HTMLButtonElement>("#pro-chat-clear-confirm")!.click();
 
     await vi.waitFor(() => expect(chatBridge.clear).toHaveBeenCalledWith("doc-1", "openai", 8));

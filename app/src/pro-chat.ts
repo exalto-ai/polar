@@ -223,6 +223,7 @@ export function installProChat(
   let clearing = false;
   let stopping = false;
   let clearOpen = false;
+  let clearReturnFocus: HTMLButtonElement | null = null;
   let loadError: string | null = null;
   let retryLoad: (() => void) | null = null;
   let capabilityGeneration = 0;
@@ -1029,14 +1030,26 @@ export function installProChat(
   listen(stop, "click", () => void stopRunning());
   listen(clearButton, "click", () => {
     if (clearButton.disabled) return;
+    clearReturnFocus = clearButton;
     clearOpen = true;
     render();
-    queueMicrotask(() => clearConfirm.focus());
+    queueMicrotask(() => clearCancel.focus());
   });
   listen(clearCancel, "click", () => {
     clearOpen = false;
     render();
-    clearButton.focus();
+    const returnFocus = clearReturnFocus;
+    clearReturnFocus = null;
+    returnFocus?.focus();
+  });
+  listen(clearConfirmation, "keydown", (event) => {
+    if (event.key !== "Escape" || !clearOpen || clearing) return;
+    event.preventDefault();
+    clearOpen = false;
+    render();
+    const returnFocus = clearReturnFocus;
+    clearReturnFocus = null;
+    returnFocus?.focus();
   });
   listen(clearConfirm, "click", () => void clearHistory());
   listen(errorRetry, "click", () => retryLoad?.());
