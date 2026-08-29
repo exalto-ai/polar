@@ -67,7 +67,9 @@ cargo run -p thoughtd
 
 It prints its port and writes `daemon.json` (mode 0600) with a bearer token. MCP clients
 that speak HTTP can use the URL inside; clients that spawn a stdio server should spawn
-`thought-mcp-stdio`, which finds or starts the daemon and proxies to it.
+`thought-mcp-stdio`, which reuses the published daemon or safely starts a replacement when
+discovery is stale, then proxies to it. Process-lifetime home and store locks decide which
+daemon may publish and open SQLite; file presence and PIDs do not.
 
 ## Shape
 
