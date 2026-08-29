@@ -651,11 +651,21 @@ fn publish_with_temporary(path: &Path, temporary: &Path, body: &[u8]) -> io::Res
 mod tests {
     use std::io::{Read as _, Write as _};
     use std::path::Path;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     const PROXY_PROBE_CHILD: &str = "THOUGHTD_DISCOVERY_PROXY_CHILD";
     const PROXY_PROBE_TARGET: &str = "THOUGHTD_DISCOVERY_PROXY_TARGET";
+    // A spawned child can briefly inherit an advisory-lock file descriptor
+    // before exec closes it. Serialize tests that own a lock or spawn a child
+    // so lock-release assertions exercise the intended parent lifetime.
+    static LOCK_AND_SUBPROCESS_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn serialize_lock_and_subprocess_test() -> MutexGuard<'static, ()> {
+        LOCK_AND_SUBPROCESS_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[cfg(unix)]
     fn always_absent(_: u32) -> bool {
@@ -823,6 +833,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stale_cleanup_refuses_live_pid_busy_store_and_changed_bytes() {
+        let _subprocess_guard = serialize_lock_and_subprocess_test();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("daemon.json");
         let db_path = directory.path().join("thought.db");
@@ -862,6 +873,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stale_cleanup_refuses_legacy_future_and_active_home_lock() {
+        let _subprocess_guard = serialize_lock_and_subprocess_test();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("daemon.json");
         let db_path = directory.path().join("thought.db");
@@ -917,6 +929,7 @@ mod tests {
 
     #[test]
     fn local_probe_ignores_proxy_environment() {
+        let _subprocess_guard = serialize_lock_and_subprocess_test();
         let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         target.set_nonblocking(true).unwrap();
         let target_address = target.local_addr().unwrap();
@@ -1118,6 +1131,7 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn capability_bearers_are_withheld_when_the_listener_executable_does_not_match() {
+        let _subprocess_guard = serialize_lock_and_subprocess_test();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -1174,6 +1188,7 @@ mod tests {
 
     #[test]
     fn only_one_process_can_lock_a_store() {
+        let _subprocess_guard = serialize_lock_and_subprocess_test();
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("thought.db");
         let first = super::try_lock_store(&db_path)
