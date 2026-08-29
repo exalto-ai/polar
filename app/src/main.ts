@@ -59,6 +59,7 @@ let open: {
   editor: Editor;
   rails: Rails;
   suggestions: SuggestionReviewController;
+  stopChatHydration: () => void;
 } | null = null;
 let openDocId = "";
 let closingAfterAutosave = false;
@@ -94,6 +95,7 @@ const aiSupport = installAiSupport(document, {
   providerBridge: tauriProProviderBridge(),
   chatBridge: tauriProChatBridge(),
   onNotice: notify,
+  onChatResponseCopied: () => open?.editor.commands.focus(),
 });
 
 async function visibleWordingRevision(): Promise<string | null> {
@@ -189,7 +191,19 @@ function refreshTitle(editor: Editor) {
   document.title = title;
   void getCurrentWindow?.()?.setTitle(title);
   if (open?.editor === editor && openDocId) {
-    aiSupport.setCurrentDocument({ id: openDocId, title });
+    if (!open.provider.isHydrated) {
+      aiSupport.setCurrentDocument(null);
+      return;
+    }
+    aiSupport.setCurrentDocument({
+      id: openDocId,
+      title,
+      snapshot: () => {
+        if (open?.editor !== editor) throw new Error("This document is no longer open.");
+        if (!open.provider.isHydrated) throw new Error("This document is still opening.");
+        return editor.getJSON();
+      },
+    });
   }
 }
 
@@ -303,6 +317,7 @@ async function openDocument(docId: string): Promise<boolean> {
   currentSources.setDocument(null);
   open?.suggestions.destroy();
   open?.rails.destroy();
+  open?.stopChatHydration();
   open?.provider.destroy();
   open?.editor.destroy();
   els.editor.replaceChildren();
@@ -352,10 +367,26 @@ async function openDocument(docId: string): Promise<boolean> {
   });
 
   provider.connect();
-  open = { doc, awareness, provider, editor, rails, suggestions };
+  open = {
+    doc,
+    awareness,
+    provider,
+    editor,
+    rails,
+    suggestions,
+    stopChatHydration: () => {},
+  };
   openDocId = docId;
-  aiSupport.setCurrentDocument({ id: docId, title: deriveTitle(editor) });
   currentSources.setDocument(docId);
+  const opened = open;
+  opened.stopChatHydration = provider.subscribeHydration((hydrated) => {
+    if (open !== opened) return;
+    if (!hydrated) {
+      aiSupport.setCurrentDocument(null);
+      return;
+    }
+    refreshTitle(editor);
+  });
 
   // Exposed in development so the editor can be driven directly. Synthetic
   // key events do not reach ProseMirror's input handling reliably, which makes

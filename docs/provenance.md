@@ -89,7 +89,7 @@ provider exchange to the exact accepted change before presenting it as provider-
 
 ## Built-in chat
 
-Built-in chat is separate by document and provider. After explicit per-provider consent, it sends
-only completed visible chat turns and the new message—never document text, selection, or files by
-default. Its local transcript is not lineage or verified evidence, and clearing it does not rewrite
-document or reviewer history.
+Built-in chat is separate by document and provider. After explicit per-provider consent, each
+request sends the current document title and contents, including formatting and links, completed
+visible chat turns, and the new message. It sends no selected ranges or files. Its local transcript
+is not lineage or verified evidence, and clearing it does not rewrite document or reviewer history.

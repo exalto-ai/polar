@@ -34,6 +34,16 @@ describe("Pro chat bridge", () => {
     const bridge = tauriProChatBridge();
     const request: ProChatStartRequest = {
       document_id: "doc-1",
+      document_title: "Draft",
+      document: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: "Current text" }],
+          },
+        ],
+      },
       provider: "openai",
       expected_revision: 4,
       model: "gpt-current",
@@ -78,13 +88,15 @@ describe("Pro chat bridge", () => {
     const onEvent = vi.fn();
     const request: ProChatStartRequest = {
       document_id: "doc-1",
+      document_title: "Draft",
+      document: { type: "doc", content: [{ type: "paragraph" }] },
       provider: "openai",
       expected_revision: 0,
       model: "gpt-current",
       thinking: "default",
       message: "Hello",
       retry_turn_id: null,
-      disclosure_version: 1,
+      disclosure_version: PRO_CHAT_DISCLOSURE_VERSION,
     };
 
     await bridge.start(request, onEvent);
