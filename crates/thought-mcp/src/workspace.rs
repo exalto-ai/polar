@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use thought_core::{BlockError, Document, Position};
 use thought_markdown::{from_markdown, to_markdown_with_spans};
 use thought_schema::{Node, Schema, normalize};
-use thought_store::{Actor, Origin, Store};
+use thought_store::{Actor, InitialDocument, Origin, Store};
 
 /// The caller, as asserted by the MCP session. Not authenticated (AD-6) — this
 /// is identity so that attribution and per-run revert have something to key on.
@@ -284,45 +284,87 @@ impl Workspace {
         title: &str,
         actor: &ActorRef,
     ) -> Result<DocumentView, WorkspaceError> {
+        // Seed the title as a heading rather than storing metadata that the
+        // first read would immediately discard. Always leave a paragraph after
+        // it so there is somewhere to start typing.
+        let mut blocks = Vec::new();
+        if !title.trim().is_empty() {
+            blocks.push(
+                Node::element("heading", vec![Node::text(title.trim(), vec![])])
+                    .with_attr("level", 1.into()),
+            );
+        }
+        blocks.push(Node::element("paragraph", vec![]));
+        self.create_document_tree(Node::element("doc", blocks), actor)
+    }
+
+    /// Import a Markdown snapshot as one new collaborative document.
+    ///
+    /// Import belongs on creation, before a document id is visible. Building a
+    /// blank document and then replacing its first block would expose a
+    /// transient seed state, create two attribution entries, and leave an
+    /// orphan if parsing failed halfway through.
+    pub fn create_document_from_markdown(
+        &self,
+        _title: &str,
+        markdown: &str,
+        actor: &ActorRef,
+    ) -> Result<DocumentView, WorkspaceError> {
+        let mut tree = normalize(&from_markdown(markdown.trim_start_matches('\u{feff}')));
+        // ProseMirror requires at least one block. An empty Markdown file maps
+        // to the same truly blank document as File > New.
+        if tree.content.is_empty() {
+            tree.content.push(Node::element("paragraph", vec![]));
+        }
+        if let Err(errs) = Schema::v0().validate(&tree) {
+            return Err(WorkspaceError::InvalidMarkdown(
+                errs.iter().map(ToString::to_string).collect(),
+            ));
+        }
+        self.create_document_tree(tree, actor)
+    }
+
+    fn create_document_tree(
+        &self,
+        tree: Node,
+        actor: &ActorRef,
+    ) -> Result<DocumentView, WorkspaceError> {
+        let tree = normalize(&tree);
+        if let Err(errs) = Schema::v0().validate(&tree) {
+            return Err(WorkspaceError::InvalidMarkdown(
+                errs.iter().map(ToString::to_string).collect(),
+            ));
+        }
+
         let doc_id = self.with(|inner| -> Result<String, WorkspaceError> {
             inner.register(actor)?;
             let doc_id = uuid::Uuid::now_v7().to_string();
-            inner.store.create_document(&doc_id, title)?;
-
-            // Seed the title as a heading rather than starting empty.
-            //
-            // The title *is* the first heading (that is how both the daemon and
-            // the window derive it), so a document created with a name and no
-            // heading is called "Untitled" the moment anyone reads it — the
-            // name you typed is discarded on the way in. Agents hit the same
-            // thing: `create_document(title: "Roadmap")` produced a document
-            // that did not say Roadmap anywhere.
             let doc = Document::new();
-            let mut blocks = Vec::new();
-            if !title.trim().is_empty() {
-                blocks.push(
-                    Node::element("heading", vec![Node::text(title.trim(), vec![])])
-                        .with_attr("level", 1.into()),
-                );
-            }
-            // Always a paragraph after it, so there is somewhere to start typing.
-            blocks.push(Node::element("paragraph", vec![]));
-            doc.set_document(&normalize(&Node::element("doc", blocks)));
-            inner.store.append_update(
-                &doc_id,
-                &doc.encode_state(),
-                &actor.id,
-                actor.origin(),
-                actor.session_id.as_deref(),
-            )?;
-            inner.store.reindex(&doc_id, title, "")?;
-            inner.docs.insert(doc_id.clone(), doc);
+            doc.set_document(&tree);
+            let state = doc.encode_state();
+            let (markdown, _) = to_markdown_with_spans(&tree);
+            let title = derive_title(&tree);
+            let block_ids = doc
+                .blocks()
+                .into_iter()
+                .map(|block| block.block_id)
+                .collect::<Vec<_>>();
+            let attributed_at = now_ms();
+            inner.store.create_initial_document(InitialDocument {
+                id: &doc_id,
+                title: &title,
+                payload: &state,
+                actor_id: &actor.id,
+                origin: actor.origin(),
+                session_id: actor.session_id.as_deref(),
+                markdown: &markdown,
+                block_ids: &block_ids,
+                attributed_at,
+            })?;
 
-            // Creation writes its update directly rather than through `commit`,
-            // so it has to attribute its own first block. Without this the
-            // baseline is empty and the *next* actor to write is credited with
-            // the paragraph this call made.
-            inner.attribute(&doc_id, actor, now_ms())?;
+            let prints = Inner::fingerprints(&doc);
+            inner.docs.insert(doc_id.clone(), doc);
+            inner.prints.insert(doc_id.clone(), prints);
             Ok(doc_id)
         })?;
         self.read_document(&doc_id)
@@ -568,14 +610,52 @@ impl Workspace {
     ) -> Result<Option<String>, WorkspaceError> {
         self.with(|inner| {
             inner.register(actor)?;
-            let doc = inner.doc(doc_id)?;
-            let before = doc.state_vector();
-            doc.apply_update(update)
+
+            // Apply to a candidate first. If SQLite refuses the commit, the
+            // cached authority must remain at its persisted state. Mutating the
+            // cached document in place made a retry look like a no-op, which
+            // could then be acknowledged even though the update never reached
+            // disk.
+            let current_state = inner.doc(doc_id)?.encode_state();
+            let candidate = Document::new();
+            candidate.apply_update(&current_state).map_err(|e| {
+                WorkspaceError::NotFound(format!("could not clone document state: {e}"))
+            })?;
+            let before = candidate.state_vector();
+            candidate
+                .apply_update(update)
                 .map_err(|e| WorkspaceError::NotFound(format!("bad update: {e}")))?;
-            if doc.state_vector() == before {
+            // State vectors track inserted structs, not deletion sets. A
+            // deletion-only update can therefore leave the vector unchanged
+            // while materially changing the document. Compare complete CRDT
+            // state so those updates are persisted and acknowledged too.
+            if candidate.encode_state() == current_state {
                 return Ok(None);
             }
-            Ok(Some(inner.commit(doc_id, &before, actor)?))
+
+            let original = inner
+                .docs
+                .insert(doc_id.to_string(), candidate)
+                .expect("document was loaded above");
+            let original_prints = inner.prints.get(doc_id).cloned();
+            let pending_before = inner.pending.len();
+
+            match inner.commit(doc_id, &before, actor) {
+                Ok(version) => Ok(Some(version)),
+                Err(error) => {
+                    inner.docs.insert(doc_id.to_string(), original);
+                    match original_prints {
+                        Some(prints) => {
+                            inner.prints.insert(doc_id.to_string(), prints);
+                        }
+                        None => {
+                            inner.prints.remove(doc_id);
+                        }
+                    }
+                    inner.pending.truncate(pending_before);
+                    Err(error)
+                }
+            }
         })
     }
 

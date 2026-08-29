@@ -11,9 +11,10 @@ import { extensions } from "./schema";
 import type { SyncProvider } from "./provider";
 import { installLinkShortcut } from "./link";
 import { installSlashMenu } from "./slash";
-import { installToolbar } from "./toolbar";
+import { installToolbar, type ToolbarOptions } from "./toolbar";
 
 export type Actor = { name: string; color: string; id: number };
+export type EditorActions = Omit<ToolbarOptions, "openLink">;
 
 /**
  * The caret each peer leaves behind.
@@ -43,6 +44,7 @@ export function createEditor(
   awareness: Awareness,
   provider: SyncProvider,
   user: Actor,
+  actions: EditorActions,
 ): Editor {
   const editor = new Editor({
     element,
@@ -61,7 +63,10 @@ export function createEditor(
 
   const destroySlashMenu = installSlashMenu(editor, host);
   const links = installLinkShortcut(editor, host);
-  const destroyToolbar = installToolbar(editor, element, links.open);
+  const destroyToolbar = installToolbar(editor, element, {
+    ...actions,
+    openLink: links.open,
+  });
 
   // Menus and toolbar controls live outside ProseMirror's element, so TipTap
   // cannot remove them when a document switch destroys the editor.

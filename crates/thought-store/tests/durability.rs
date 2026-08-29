@@ -3,7 +3,7 @@
 
 use thought_core::Document;
 use thought_schema::{Node, normalize};
-use thought_store::{Actor, Origin, Store};
+use thought_store::{Actor, InitialDocument, Origin, Store};
 
 fn actor(id: &str, kind: &str) -> Actor {
     Actor {
@@ -226,4 +226,40 @@ fn search_finds_documents_by_body() {
             .iter()
             .any(|d| d.id == "doc-4" && d.title == "Meeting notes")
     );
+}
+
+#[test]
+fn initial_document_creation_rolls_back_every_visible_row_on_failure() {
+    let store = Store::open_in_memory().unwrap();
+    let document = Document::new();
+    document.set_document(&Node::element(
+        "doc",
+        vec![Node::element(
+            "paragraph",
+            vec![Node::text("draft", vec![])],
+        )],
+    ));
+    let block_ids = document
+        .blocks()
+        .into_iter()
+        .map(|block| block.block_id)
+        .collect::<Vec<_>>();
+
+    let result = store.create_initial_document(InitialDocument {
+        id: "rolled-back",
+        title: "Draft",
+        payload: &document.encode_state(),
+        actor_id: "missing-actor",
+        origin: Origin::Human,
+        session_id: None,
+        markdown: "draft",
+        block_ids: &block_ids,
+        attributed_at: 1,
+    });
+
+    assert!(result.is_err());
+    assert!(store.list_documents(false).unwrap().is_empty());
+    let restored = store.restore("rolled-back").unwrap();
+    assert!(restored.snapshot.is_none());
+    assert!(restored.updates.is_empty());
 }

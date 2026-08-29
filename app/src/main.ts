@@ -8,6 +8,11 @@ import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { Editor } from "@tiptap/core";
 import { createEditor } from "./editor";
+import {
+  exportMarkdownDocument,
+  importMarkdownDocument,
+  nativeFileBridge,
+} from "./files";
 import { ACCEL_LABEL, accel, relabelShortcutHints } from "./keys";
 import { Mcp, type DocumentSummary } from "./mcp";
 import { colorFor, playfulName, seedFrom } from "./names";
@@ -228,7 +233,11 @@ function renderPresence(awareness: Awareness, self: number) {
   els.presence.replaceChildren(...agents, ...windows);
 }
 
-async function openDocument(docId: string) {
+async function openDocument(docId: string): Promise<boolean> {
+  if (open && openDocId === docId) {
+    open.editor.commands.focus();
+    return true;
+  }
   open?.rails.destroy();
   open?.provider.destroy();
   open?.editor.destroy();
@@ -254,7 +263,21 @@ async function openDocument(docId: string) {
     color: colorFor(doc.clientID),
     id: doc.clientID,
   };
-  const editor = createEditor(document.body, els.editor, doc, awareness, provider, user);
+  const editor = createEditor(
+    document.body,
+    els.editor,
+    doc,
+    awareness,
+    provider,
+    user,
+    {
+      newDocument: createNewDocument,
+      importMarkdown: importMarkdownFile,
+      exportMarkdown: async () => {
+        await exportMarkdownFile();
+      },
+    },
+  );
   awareness.setLocalStateField("user", user);
 
   const rails = installProvenanceRails(editor, doc, els.editor, connection.actor_id);
@@ -278,6 +301,7 @@ async function openDocument(docId: string) {
   renderPeers();
   rememberOpenDocument(docId);
   void refreshProvenance();
+  return true;
 }
 
 /**
@@ -404,7 +428,8 @@ document.addEventListener("mousedown", (e) => {
   }
 });
 document.getElementById("new-window")!.addEventListener("click", () => {
-  void invoke("new_window");
+  toggleConnections(false);
+  void createNewDocument();
 });
 document.getElementById("copy-command")!.addEventListener("click", async (e) => {
   await navigator.clipboard.writeText(connection.stdio_command);
@@ -490,11 +515,10 @@ function closeSwitcher() {
   open?.editor.commands.focus();
 }
 
-function choose(index: number) {
+async function choose(index: number) {
   const row = results[index];
   if (!row) return;
-  closeSwitcher();
-  void openDocument(row.doc_id);
+  if (await openDocument(row.doc_id)) closeSwitcher();
 }
 
 async function toggleTrashMode() {
@@ -545,19 +569,111 @@ async function trashSelected() {
   }
 }
 
+async function createDocumentInNewWindow(title: string) {
+  // Browser development has no native window API and falls back to replacing
+  // its preview editor after the document has been created.
+  try {
+    const created = await mcp.createDocument(title);
+    els.scrim.hidden = true;
+    toggleConnections(false);
+    try {
+      await showDocumentInNewWindow(created.doc_id);
+    } catch (error) {
+      notify(
+        `Document was created, but its window could not open: ${reason(error)}`,
+        "error",
+      );
+    }
+  } catch (error) {
+    notify(`Could not create document: ${reason(error)}`, "error");
+  }
+}
+
+async function createNewDocument() {
+  await createDocumentInNewWindow("");
+}
+
 async function createFromQuery() {
-  const title = els.input.value.trim() || "Untitled";
-  const created = await mcp.createDocument(title);
-  closeSwitcher();
-  await openDocument(created.doc_id);
+  await createDocumentInNewWindow(els.input.value.trim());
+}
+
+async function importMarkdownFile() {
+  els.scrim.hidden = true;
+  toggleConnections(false);
+  try {
+    const file = await importMarkdownDocument(
+      nativeFileBridge,
+      mcp,
+      showDocumentInNewWindow,
+    );
+    if (file) notify(`Imported “${file.file_name}” as a new document`);
+  } catch (error) {
+    notify(`Could not import Markdown: ${reason(error)}`, "error");
+  }
+}
+
+async function exportMarkdownFile(target = open): Promise<boolean> {
+  if (!target) return false;
+  try {
+    // The live editor tree is the exact visible state. Exporting through it
+    // also keeps the native file command independent from daemon transport.
+    const exported = await exportMarkdownDocument(
+      nativeFileBridge,
+      target.editor.getJSON(),
+      deriveTitle(target.editor),
+    );
+    if (!exported) return false;
+    notify(`Exported “${exported.file_name}”`);
+    return true;
+  } catch (error) {
+    notify(`Could not export Markdown: ${reason(error)}`, "error");
+    return false;
+  }
+}
+
+/**
+ * Native windows are document-scoped. Browser development has no window API,
+ * so it deliberately falls back to replacing the one preview editor.
+ */
+async function showDocumentInNewWindow(docId: string): Promise<void> {
+  if (isTauri()) {
+    await invoke("new_window", { docId });
+    return;
+  }
+  await openDocument(docId);
 }
 
 // ---------------------------------------------------------------- keys
 
 document.addEventListener("keydown", (event) => {
-  if (accel(event) && event.key.toLowerCase() === "n") {
+  if (
+    accel(event) &&
+    !event.shiftKey &&
+    !event.altKey &&
+    event.key.toLowerCase() === "n"
+  ) {
     event.preventDefault();
-    void invoke("new_window");
+    void createNewDocument();
+    return;
+  }
+  if (
+    accel(event) &&
+    !event.shiftKey &&
+    !event.altKey &&
+    event.key.toLowerCase() === "o"
+  ) {
+    event.preventDefault();
+    void importMarkdownFile();
+    return;
+  }
+  if (
+    accel(event) &&
+    !event.shiftKey &&
+    !event.altKey &&
+    event.key.toLowerCase() === "s"
+  ) {
+    event.preventDefault();
+    void exportMarkdownFile();
     return;
   }
   // Shift+accelerator+K belongs to the link editor. Keeping this exact avoids
@@ -601,11 +717,14 @@ els.scrim.addEventListener("mousedown", (e) => {
 
 /** Under Tauri the daemon details come from Rust; in a dev browser, from Vite. */
 async function loadConnection(): Promise<Connection> {
-  if ((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
+  if (isTauri()) {
     return invoke<Connection>("connection");
   }
   const response = await fetch("/__thought/connection");
-  if (!response.ok) throw new Error("no daemon is running");
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error || "no daemon is running");
+  }
   return response.json();
 }
 
@@ -617,20 +736,38 @@ async function boot() {
   await mcp.connect();
 
   const documents = await mcp.listDocuments();
+  const requested = new URL(window.location.href).searchParams.get("doc");
   const last = lastOpenDocument();
-  const target =
-    documents.find((d) => d.doc_id === last) ??
-    documents[0] ??
-    (await mcp.createDocument("Untitled"));
+  let targetId: string;
+  if (requested) {
+    // The list is intentionally paginated for the switcher. A native document
+    // window is pinned to its query id, so validate that id directly instead
+    // of silently falling back when it is outside the first page.
+    targetId = (await mcp.readDocument(requested)).doc_id;
+  } else {
+    targetId =
+      documents.find((document) => document.doc_id === last)?.doc_id ??
+      documents[0]?.doc_id ??
+      (await mcp.createDocument("")).doc_id;
+  }
 
-  await openDocument("doc_id" in target ? target.doc_id : (target as any).doc_id);
+  await openDocument(targetId);
+  if (requested) {
+    // Keep the pin through all fallible startup work. A transient read or sync
+    // failure must not turn Reload into a different document.
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
+  }
 }
 
 /** Only under Tauri; in a dev browser there is no native window to title. */
 function getCurrentWindow() {
-  return (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
-    ? tauriWindow()
-    : null;
+  return isTauri() ? tauriWindow() : null;
+}
+
+function isTauri(): boolean {
+  return Boolean(
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__,
+  );
 }
 
 boot().catch((error) => {
