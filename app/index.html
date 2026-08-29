@@ -123,9 +123,12 @@
                 <button type="button" data-pro-provider-action="revalidate" hidden>Check again</button>
                 <button type="button" data-pro-provider-action="remove" hidden>Remove</button>
               </div>
-              <div class="pro-remove-confirmation" data-pro-provider-remove-confirmation hidden>
-                <p><strong>Remove OpenAI?</strong> This deletes the local Keychain copy. It does not revoke the key.</p>
-                <div class="pro-provider-actions"><button type="button" data-pro-provider-action="cancel-remove">Cancel</button><button class="danger-button" type="button" data-pro-provider-action="confirm-remove">Remove local key</button></div>
+              <div class="pro-remove-confirmation" data-pro-provider-remove-confirmation role="dialog" aria-labelledby="pro-remove-openai-title" aria-describedby="pro-remove-openai-description" hidden>
+                <p><strong id="pro-remove-openai-title">Remove OpenAI from Proof of Thought?</strong> <span id="pro-remove-openai-description">This deletes the local Keychain copy. It does not revoke the key in OpenAI, so revoke it on the provider site if it may be exposed.</span></p>
+                <div class="pro-provider-actions">
+                  <button type="button" data-pro-provider-action="cancel-remove">Cancel</button>
+                  <button class="danger-button" type="button" data-pro-provider-action="confirm-remove">Remove local key</button>
+                </div>
               </div>
             </article>
             <article class="pro-provider-card" data-pro-provider-card="anthropic" aria-busy="false">
@@ -137,9 +140,12 @@
                 <button type="button" data-pro-provider-action="revalidate" hidden>Check again</button>
                 <button type="button" data-pro-provider-action="remove" hidden>Remove</button>
               </div>
-              <div class="pro-remove-confirmation" data-pro-provider-remove-confirmation hidden>
-                <p><strong>Remove Anthropic?</strong> This deletes the local Keychain copy. It does not revoke the key.</p>
-                <div class="pro-provider-actions"><button type="button" data-pro-provider-action="cancel-remove">Cancel</button><button class="danger-button" type="button" data-pro-provider-action="confirm-remove">Remove local key</button></div>
+              <div class="pro-remove-confirmation" data-pro-provider-remove-confirmation role="dialog" aria-labelledby="pro-remove-anthropic-title" aria-describedby="pro-remove-anthropic-description" hidden>
+                <p><strong id="pro-remove-anthropic-title">Remove Anthropic from Proof of Thought?</strong> <span id="pro-remove-anthropic-description">This deletes the local Keychain copy. It does not revoke the key in Anthropic, so revoke it on the provider site if it may be exposed.</span></p>
+                <div class="pro-provider-actions">
+                  <button type="button" data-pro-provider-action="cancel-remove">Cancel</button>
+                  <button class="danger-button" type="button" data-pro-provider-action="confirm-remove">Remove local key</button>
+                </div>
               </div>
             </article>
           </div>
