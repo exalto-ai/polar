@@ -965,7 +965,7 @@ fn client_request_id() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!(
-        "pot-provider-check-{}-{nanos}-{counter}",
+        "thought-provider-check-{}-{nanos}-{counter}",
         std::process::id()
     )
 }
@@ -1617,7 +1617,7 @@ mod tests {
         assert_eq!(attempt.request_id.as_deref(), Some("req-openai"));
         let request = request.recv().unwrap().to_ascii_lowercase();
         assert!(request.contains("authorization: bearer sentinel-openai-key"));
-        assert!(request.contains("x-client-request-id: pot-provider-check-"));
+        assert!(request.contains("x-client-request-id: thought-provider-check-"));
 
         let body = "{\"data\":[]}";
         let response = format!(
