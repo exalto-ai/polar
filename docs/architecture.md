@@ -545,6 +545,11 @@ font size is a `fontSize` mark with a canonical whole-pixel value from 8px throu
 the projection uses an exact `<span style="font-size: 18px">` wrapper. The parser rejects
 other CSS spellings so arbitrary style data cannot enter the document.
 
+**Cost:** Title and font size are not native CommonMark. Their exact marker and HTML subset must
+stay aligned across the TypeScript schema, Rust parser, Rust serializer, and generated round-trip
+tests. External Markdown tools may strip those extensions, so export preserves wording but cannot
+promise that another editor will preserve the same presentation.
+
 This is more work than one line of an ADR makes it sound, and it should be sized as such.
 The property test in M1.0 is the guard: a node that cannot survive `parse(serialize(x))`
 does not ship.
