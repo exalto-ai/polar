@@ -10,29 +10,29 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  macos:
-    runs-on: macos-latest
-    env:
-      TARGET: universal-apple-darwin
-      TAG: ${{ github.event.inputs.tag || github.ref_name }}
-      # Signing is all-or-nothing: without a certificate the build is unsigned,
-      # and an unsigned build cannot be notarized either.
-      SIGN: ${{ secrets.APPLE_CERTIFICATE != '' }}
-
+  release-ref:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.verify.outputs.commit }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - name: Verify release tag and checkout
+      - name: Verify trusted release tag
+        id: verify
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
@@ -47,6 +47,42 @@ jobs:
           head_commit="$(git rev-parse HEAD)"
           if [ "$head_commit" != "$tag_commit" ]; then
             echo "::error::Checked-out commit $head_commit does not match $TAG at $tag_commit."
+            exit 1
+          fi
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+            echo "::error::Release tag $TAG is not contained in origin/main."
+            exit 1
+          fi
+          echo "commit=$tag_commit" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: release-ref
+    runs-on: macos-latest
+    environment: release
+    permissions:
+      contents: write
+    env:
+      TARGET: universal-apple-darwin
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      # Signing is all-or-nothing: without a certificate the build is unsigned,
+      # and an unsigned build cannot be notarized either.
+      SIGN: ${{ secrets.APPLE_CERTIFICATE != '' }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.release-ref.outputs.commit }}
+
+      - name: Recheck approved release checkout
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse "${TAG}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          approved_commit="${{ needs.release-ref.outputs.commit }}"
+          if [ "$head_commit" != "$tag_commit" ] || [ "$head_commit" != "$approved_commit" ]; then
+            echo "::error::The approved release commit changed before the protected job."
             exit 1
           fi
 
@@ -230,6 +266,10 @@ jobs:
               exit 1
             }
           done
+          cmp THIRD_PARTY_NOTICES.md "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" || {
+            echo "::error::The packaged third-party notices do not match the reviewed source."
+            exit 1
+          }
           for binary in thought thoughtd thought-mcp-stdio; do
             lipo "$app/Contents/MacOS/$binary" -verify_arch arm64 x86_64 || {
               echo "::error::$binary is not a universal arm64 and x86_64 binary"
@@ -302,11 +342,12 @@ jobs:
       - name: Create draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPROVED_COMMIT: ${{ needs.release-ref.outputs.commit }}
         run: |
           set -euo pipefail
           if [ "$SIGN" = "true" ]; then
             notes=$(cat <<'NOTES'
-          A local-first writing app where people and agents edit the same documents.
+          A local-first writing app where AI reviewers suggest changes for a person to accept.
 
           This draft candidate is signed and notarized. Download the `.dmg`, drag Proof of Thought
           to Applications, and open it. The daemon ships inside the bundle and starts on first launch.
@@ -314,12 +355,18 @@ jobs:
             )
           else
             notes=$(cat <<'NOTES'
-          A local-first writing app where people and agents edit the same documents.
+          A local-first writing app where AI reviewers suggest changes for a person to accept.
 
           Developer test build only. The `_unsigned.dmg` is not signed or notarized. Do not publish
           this draft candidate.
           NOTES
             )
+          fi
+          git fetch --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+          remote_tag_commit="$(git rev-parse "${TAG}^{commit}")"
+          if [ "$remote_tag_commit" != "$APPROVED_COMMIT" ]; then
+            echo "::error::Release tag $TAG moved after approval."
+            exit 1
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             is_draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
