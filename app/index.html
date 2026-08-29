@@ -39,14 +39,134 @@
         <header class="ai-sidebar-header">
           <div>
             <span class="eyebrow">AI support</span>
-            <h2 id="ai-support-title">Connect an agent</h2>
+            <h2 id="ai-support-title">Reviewers</h2>
           </div>
           <button class="icon-button" id="ai-sidebar-close" type="button" aria-label="Close AI support">×</button>
         </header>
-        <p class="ai-sidebar-note">Point any MCP client at this command. It finds the running daemon, or starts one.</p>
-        <pre id="stdio-command"></pre>
-        <button class="ghost" id="copy-command" type="button" disabled>Copy</button>
+        <section class="reviewer-manager" id="reviewer-manager" aria-labelledby="reviewer-manager-title">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Local connections</span>
+              <h3 id="reviewer-manager-title">Your reviewers</h3>
+            </div>
+            <button class="primary-button compact" id="reviewer-add" type="button">Add reviewer</button>
+          </div>
+          <p class="reviewer-manager-intro">Each saved route has its own Proof of Thought access that you can change or remove here.</p>
+          <p class="reviewer-loading" id="reviewer-loading">Finishing secure connection setup…</p>
+          <div class="reviewer-error" id="reviewer-error" role="alert" hidden>
+            <span id="reviewer-error-message"></span>
+            <button class="text-button" id="reviewer-retry" type="button">Try again</button>
+          </div>
+          <p class="sr-only" id="reviewer-live" aria-live="polite"></p>
+          <p class="reviewer-empty" id="reviewer-empty" hidden>No reviewers have access yet.</p>
+          <ul class="reviewer-list" id="reviewer-list" aria-label="Active reviewers" hidden></ul>
+
+          <details class="reviewer-revoked" id="reviewer-revoked-section" hidden>
+            <summary tabindex="0">Removed reviewers (<span id="reviewer-revoked-count">0</span>)</summary>
+            <ul class="reviewer-list revoked" id="reviewer-revoked-list" aria-label="Removed reviewers"></ul>
+          </details>
+
+          <section class="reviewer-add-flow" id="reviewer-add-flow" hidden aria-labelledby="reviewer-add-title">
+            <h4 id="reviewer-add-title" tabindex="-1">Add a reviewer</h4>
+            <form id="reviewer-add-form">
+              <fieldset>
+                <legend>AI app</legend>
+                <label class="reviewer-choice">
+                  <input type="radio" name="reviewer-client" value="chatgpt" checked />
+                  <span><strong>ChatGPT</strong><small>Desktop app</small></span>
+                </label>
+                <label class="reviewer-choice">
+                  <input type="radio" name="reviewer-client" value="codex" />
+                  <span><strong>Codex</strong><small>Local app</small></span>
+                </label>
+                <label class="reviewer-choice" aria-describedby="claude-desktop-unavailable">
+                  <input type="radio" name="reviewer-client" value="claude-desktop" disabled />
+                  <span><strong>Claude Desktop</strong><small id="claude-desktop-unavailable">Unavailable until the local extension ships</small></span>
+                </label>
+                <label class="reviewer-choice">
+                  <input type="radio" name="reviewer-client" value="claude-code" />
+                  <span><strong>Claude Code</strong><small>Local app</small></span>
+                </label>
+              </fieldset>
+
+              <p class="reviewer-client-description" id="reviewer-client-description"></p>
+              <p class="ai-caveat" id="reviewer-client-caveat" hidden></p>
+
+              <label class="reviewer-field" for="reviewer-display-label">
+                Reviewer name
+                <input id="reviewer-display-label" name="display_label" type="text" maxlength="80" required autocomplete="off" />
+                <small>Use a name that distinguishes this reviewer from others in the same app.</small>
+              </label>
+
+              <fieldset>
+                <legend>Documents</legend>
+                <label class="reviewer-choice">
+                  <input type="radio" name="reviewer-document-scope" value="current" checked />
+                  <span><strong id="reviewer-current-document-label">This document is still opening</strong><small>Access stays with this document</small></span>
+                </label>
+                <label class="reviewer-choice">
+                  <input type="radio" name="reviewer-document-scope" value="all" />
+                  <span><strong>All documents</strong><small>Includes documents created later</small></span>
+                </label>
+              </fieldset>
+
+              <fieldset>
+                <legend>Allowed actions</legend>
+                <label class="reviewer-choice">
+                  <input type="checkbox" name="can_read" checked disabled />
+                  <span><strong>Read</strong><small>Required so the reviewer can work with allowed documents</small></span>
+                </label>
+                <p class="reviewer-permission-note">Reviewer connections are read-only. Reviewable suggestions arrive in a later update.</p>
+              </fieldset>
+
+              <div class="reviewer-privacy-note">
+                <strong>Before you connect</strong>
+                <p>A tool using this saved route can use its allowed access even when no Proof of Thought window is open. When it reads content, the tool may send that content to an AI provider under its own privacy settings. These controls apply to this Proof of Thought route, not other Mac access the tool already has.</p>
+              </div>
+              <div class="reviewer-form-actions">
+                <button id="reviewer-add-cancel" type="button">Cancel</button>
+                <button class="primary-button compact" id="reviewer-add-submit" type="submit">Create reviewer</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="reviewer-setup-panel" id="reviewer-setup" hidden aria-labelledby="reviewer-setup-title">
+            <div class="reviewer-card-header">
+              <h4 id="reviewer-setup-title" tabindex="-1">Reviewer setup</h4>
+              <span class="reviewer-status" id="reviewer-setup-status"></span>
+            </div>
+            <p id="reviewer-setup-instructions"></p>
+            <p class="ai-caveat" id="reviewer-setup-caveat" hidden></p>
+            <pre id="reviewer-setup-command"></pre>
+            <div class="reviewer-form-actions">
+              <button class="primary-button compact" id="reviewer-setup-copy" type="button">Copy setup</button>
+              <button id="reviewer-setup-reset" type="button">Reset connection</button>
+              <button id="reviewer-setup-done" type="button">Done</button>
+            </div>
+            <div class="reviewer-reset-warning" id="reviewer-reset-warning" hidden>
+              <p><strong>Reset this connection?</strong> Existing sessions will immediately lose access. The reviewer keeps the same name, permissions, and history.</p>
+              <div class="reviewer-form-actions">
+                <button id="reviewer-reset-cancel" type="button">Cancel</button>
+                <button class="danger-button" id="reviewer-reset-confirm" type="button">Reset now</button>
+              </div>
+            </div>
+          </section>
+        </section>
+
       </aside>
+    </div>
+
+    <div class="reviewer-modal-backdrop" id="reviewer-revoke-backdrop" hidden>
+      <section class="reviewer-revoke-dialog" id="reviewer-revoke-dialog" role="alertdialog" aria-modal="true" aria-labelledby="reviewer-revoke-title" aria-describedby="reviewer-revoke-description">
+        <span class="eyebrow">Remove reviewer access</span>
+        <h2 id="reviewer-revoke-title">Remove <span id="reviewer-revoke-name"></span>?</h2>
+        <p id="reviewer-revoke-description">This immediately blocks new reads, including sessions that are already open. Prior proof history stays intact.</p>
+        <p class="reviewer-modal-error" id="reviewer-revoke-error" role="alert" tabindex="-1" hidden></p>
+        <div class="reviewer-form-actions">
+          <button id="reviewer-revoke-cancel" type="button">Cancel</button>
+          <button class="danger-button" id="reviewer-revoke-confirm" type="button">Remove access</button>
+        </div>
+      </section>
     </div>
 
     <!-- Errors used to have nowhere to go: a failed call left the status dot

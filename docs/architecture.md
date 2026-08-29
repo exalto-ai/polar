@@ -448,6 +448,20 @@ signing, notarization, and packaged-executable checks to be repeated. The bundle
 and application-data paths stay stable so a package rename does not strand documents or
 daemon discovery state.
 
+### AD-21 — Reviewer authorization is connection-bound
+
+Each configured reviewer has one durable connection id, one unique bearer credential, and an
+explicit document scope. Reviewer credentials authorize only bounded MCP reads until the
+suggestion layer or an expiring direct-write grant exists. The local window keeps using the
+daemon's private bearer; it is not presented as a reviewer identity.
+
+The configured app and reported model are attribution labels, not proof of upstream provider
+identity. A session is bound to the connection that authenticated it, and revocation immediately
+invalidates that connection without affecting the others.
+
+**Cost:** connection state and credentials need lifecycle management, while permissions only
+constrain calls routed through Proof of Thought; they do not sandbox another local process.
+
 ## 7. Explicit non-goals for MVP
 
 Folders and hierarchy · accounts and authentication · end-to-end encryption · mobile ·

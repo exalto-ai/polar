@@ -229,6 +229,32 @@ fn search_finds_documents_by_body() {
 }
 
 #[test]
+fn scoped_lists_and_searches_exclude_large_unrelated_workspaces_before_limiting() {
+    let store = Store::open_in_memory().unwrap();
+    store.create_document("selected", "Selected").unwrap();
+    store
+        .reindex("selected", "Selected", "shared searchable phrase")
+        .unwrap();
+    for index in 0..150 {
+        let id = format!("unrelated-{index}");
+        store.create_document(&id, "Unrelated").unwrap();
+        store
+            .reindex(&id, "Unrelated", "shared searchable phrase")
+            .unwrap();
+    }
+
+    let listed = store
+        .list_documents_scoped(false, 1, Some("selected"))
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "selected");
+
+    let hits = store.search_scoped("shared", 1, Some("selected")).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0, "selected");
+}
+
+#[test]
 fn initial_document_creation_rolls_back_every_visible_row_on_failure() {
     let store = Store::open_in_memory().unwrap();
     let document = Document::new();
