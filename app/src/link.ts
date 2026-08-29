@@ -239,11 +239,10 @@ export function installLinkShortcut(editor: Editor, host: HTMLElement): LinkCont
 
   function apply() {
     const href = field.value.trim();
-    const chain = editor.chain().focus();
     const applied = !href
       // An empty field removes the link rather than setting a broken one.
-      ? chain.unsetLink().run()
-      : chain.setLink({ href: normalize(href) }).run();
+      ? editor.commands.unsetLink()
+      : editor.commands.setLink({ href: normalize(href) });
     if (!applied) {
       field.setCustomValidity("Enter a valid link");
       field.reportValidity();
@@ -252,6 +251,7 @@ export function installLinkShortcut(editor: Editor, host: HTMLElement): LinkCont
     }
     field.setCustomValidity("");
     closeField(false);
+    editor.commands.focus();
   }
 
   const onEditorClick = (event: MouseEvent) => {
@@ -418,7 +418,9 @@ export function normalize(href: string): string {
   }
   // A hostname followed by a port looks like a URI scheme to a generic scheme
   // regex. Recognize that common local-development shape first.
-  if (/^(?:localhost|[a-z0-9.-]+):\d+(?:[/?#]|$)/i.test(href)) return `https://${href}`;
+  if (/^(?:localhost|(?:[a-z0-9-]+\.)+[a-z0-9-]+):\d+(?:[/?#]|$)/i.test(href)) {
+    return `https://${href}`;
+  }
   if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return href;
   return `https://${href}`;
 }

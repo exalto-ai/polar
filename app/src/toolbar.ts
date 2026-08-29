@@ -183,7 +183,8 @@ export function installToolbar(
   const update = () => {
     block.value = selectedBlockStyle(editor);
     const fontSize = selectedFontSize(editor);
-    size.value = fontSize === "mixed" || size.querySelector(`option[value="${fontSize}"]`)
+    const supported = FONT_SIZES.some((pixels) => fontSize === `${pixels}px`);
+    size.value = fontSize === "mixed" || supported
       ? fontSize
       : "";
     bold.setAttribute("aria-pressed", String(editor.isActive("bold")));

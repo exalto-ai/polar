@@ -68,6 +68,9 @@ describe("link normalisation", () => {
     expect(normalize("https://example.com")).toBe("https://example.com");
     expect(normalize("http://example.com")).toBe("http://example.com");
     expect(normalize("mailto:someone@example.com")).toBe("mailto:someone@example.com");
+    expect(normalize("tel:15551234")).toBe("tel:15551234");
+    expect(normalize("sms:15551234")).toBe("sms:15551234");
+    expect(normalize("urn:1234")).toBe("urn:1234");
   });
 
   it("completes a protocol-relative link", () => {
@@ -232,6 +235,10 @@ describe("link command", () => {
     const { editor, host } = linkedEditor();
     editor.commands.setTextSelection({ from: 1, to: 6 });
     const links = installLinkShortcut(editor, host);
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
 
     expect(links.open()).toBe(true);
     const field = host.querySelector<HTMLInputElement>(".link-input")!;
@@ -250,6 +257,8 @@ describe("link command", () => {
         title: null,
       },
     });
+    expect(field.hidden).toBe(true);
+    expect(document.activeElement).toBe(editor.view.dom);
     links.destroy();
   });
 
@@ -272,18 +281,24 @@ describe("link command", () => {
     links.destroy();
   });
 
-  it("keeps an invalid URL open for correction", () => {
+  it("keeps an invalid URL open for correction even when editor focus is synchronous", () => {
     const { editor, host } = linkedEditor();
     editor.commands.setTextSelection({ from: 1, to: 6 });
     const links = installLinkShortcut(editor, host);
     links.open();
     const field = host.querySelector<HTMLInputElement>(".link-input")!;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
 
     field.value = "javascript:alert(1)";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
 
     expect(field.hidden).toBe(false);
+    expect(field.value).toBe("javascript:alert(1)");
     expect(field.validationMessage).toBe("Enter a valid link");
+    expect(document.activeElement).toBe(field);
     expect(editor.getJSON().content?.[0].content?.[0].marks).toBeUndefined();
     links.destroy();
   });

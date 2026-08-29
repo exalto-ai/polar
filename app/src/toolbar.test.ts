@@ -192,6 +192,20 @@ describe("installed toolbar", () => {
     cleanup();
   });
 
+  it("ignores unsupported collaborative font-size attributes without parsing selectors", () => {
+    const { editor, element } = makeEditor();
+    selectText(editor);
+    const cleanup = installToolbar(editor, element, vi.fn());
+    const size = document.querySelector<HTMLSelectElement>('[aria-label="Font size"]')!;
+    const untrusted = editor.schema.marks.fontSize.create({ size: '18px"]' });
+
+    expect(() => {
+      editor.view.dispatch(editor.state.tr.addMark(1, 6, untrusted));
+    }).not.toThrow();
+    expect(size.value).toBe("");
+    cleanup();
+  });
+
   it("toggles bold and italic without losing the editor selection", () => {
     const { editor, element } = makeEditor();
     selectText(editor);
