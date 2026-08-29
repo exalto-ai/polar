@@ -12,6 +12,7 @@ import {
   reviewerSetupCommand,
   type ReviewerClient,
 } from "./reviewer-setup";
+import { writeClipboardText } from "./clipboard";
 
 export type ReviewerDocumentContext = { id: string; title: string };
 
@@ -151,7 +152,7 @@ export function installReviewerConnections(
   const revokeCancel = required<HTMLButtonElement>(root, "#reviewer-revoke-cancel");
   const revokeConfirm = required<HTMLButtonElement>(root, "#reviewer-revoke-confirm");
 
-  const copyText = options.copyText ?? ((text: string) => navigator.clipboard.writeText(text));
+  const copyText = options.copyText ?? writeClipboardText;
   const pollIntervalMs = options.pollIntervalMs ?? 5_000;
   const disposers: Array<() => void> = [];
   const connections = new Map<string, ReviewerConnection>();

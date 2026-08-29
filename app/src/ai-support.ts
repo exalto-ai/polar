@@ -1,4 +1,5 @@
 import type { ReviewerBridge } from "./reviewer-bridge";
+import { writeClipboardText } from "./clipboard";
 import type { ProChatBridge } from "./pro-chat-bridge";
 import { installProChat, type ProChatDocumentContext } from "./pro-chat";
 import type { ProProviderBridge } from "./pro-provider-bridge";
@@ -43,13 +44,14 @@ export function installAiSupport(
   root: Document,
   options: AiSupportOptions = {},
 ): AiSupportController {
+  const copyText = options.copyText ?? writeClipboardText;
   const toggle = required<HTMLButtonElement>(root, "#ai-support-toggle");
   const sidebar = required<HTMLElement>(root, "#ai-support-sidebar");
   const closeButton = required<HTMLButtonElement>(root, "#ai-sidebar-close");
   const disposers: Array<() => void> = [];
   const reviewers = installReviewerConnections(root, {
     bridge: options.reviewerBridge,
-    copyText: options.copyText,
+    copyText,
     onNotice: options.onNotice,
   });
   let providers: ProProviderController | null = null;
@@ -58,7 +60,7 @@ export function installAiSupport(
         bridge: options.chatBridge,
         onOpenSettings: () => root.querySelector("#ai-pro-panel")?.scrollIntoView(),
         onBusyChange: (provider) => providers?.setChatBusy(provider),
-        copyText: options.copyText,
+        copyText,
         onResponseCopied: options.onChatResponseCopied,
         onNotice: options.onNotice,
       })
