@@ -193,9 +193,9 @@
           <p class="pro-chat-empty" id="pro-chat-empty" hidden>Ask about this document or request a revision.</p>
           <ol class="pro-chat-messages" id="pro-chat-messages" role="log" aria-live="off" aria-label="Conversation" tabindex="0"></ol>
 
-          <div class="pro-chat-clear-confirmation" id="pro-chat-clear-confirmation" hidden>
-            <strong>Clear this document’s chat?</strong>
-            <p>This removes the local chat only. Your document and reviewer history stay intact.</p>
+          <div class="pro-chat-clear-confirmation" id="pro-chat-clear-confirmation" role="dialog" aria-labelledby="pro-chat-clear-title" aria-describedby="pro-chat-clear-description" hidden>
+            <strong id="pro-chat-clear-title">Clear this document’s chat?</strong>
+            <p id="pro-chat-clear-description">This removes the local chat only. Your document and reviewer history stay intact.</p>
             <div class="pro-chat-actions">
               <button id="pro-chat-clear-cancel" type="button">Keep conversation</button>
               <button class="danger-button" id="pro-chat-clear-confirm" type="button">Clear chat</button>
