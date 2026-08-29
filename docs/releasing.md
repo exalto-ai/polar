@@ -118,24 +118,3 @@ test -n "$local_dmg"
 codesign --verify --deep --strict --verbose=2 "$local_app"
 hdiutil verify "$local_dmg"
 ```
-
-## Planned credential upgrade checks
-
-This release-preflight layer only stages and verifies the complete local bundle. Reviewer-capability
-probes, stable helper identities, and signed-update Keychain continuity arrive in their owning
-reviewer and release-hardening layers later in the stack. The paragraphs below record those future
-acceptance requirements; they are not claims about this intermediate branch.
-
-The same PID, listener-owner, and exact-executable proof must pass before the app or native reviewer
-launcher sends the editor capability. Exercise the negative probe test in the release build so a
-lookalike loopback service receives only the public identity request, never an Authorization header.
-
-Developer ID releases give `thoughtd` and `thought-mcp-stdio` stable signed identities. The release
-workflow verifies those identities, their common Apple team, their designated requirements, and
-both CPU architectures before accepting the DMG. This is what lets both helpers share a reviewer
-credential and keep that Keychain access across signed app updates.
-
-Unsigned test builds are ad hoc signed only so the two helpers in that exact build can share a
-Keychain item. Their designated requirements contain a build-specific code hash, so replacing an
-unsigned build can require the tester to reset its reviewer connections. An unsigned DMG must not
-be presented as testing the signed-update Keychain guarantee.
