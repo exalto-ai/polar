@@ -57,18 +57,8 @@ the editor you are already using, and each new window is visibly cascaded from i
 ⌘W closes the window without prompting because Proof of Thought's CRDT store remains
 authoritative. Export is an explicit one-time action and never establishes a mirrored file.
 
-To watch an agent edit a document you have open, from another terminal:
-
-```bash
-scripts/agent watch 2
-```
-
-Rails appear in the left margin as it writes — dashed for an agent, solid for a person.
-Hover one to see who wrote the block and when. A document only you have written shows
-none, which is the point.
-
-The daemon can also be run on its own, which is the whole point — agents do not need a
-window:
+The daemon can also be run on its own. Reviewers connect through the verified stdio bridge,
+so no development script or browser endpoint reads bearer capabilities directly:
 
 ```bash
 cargo run -p thoughtd
