@@ -27,14 +27,15 @@ function selectControl(label: string, className: string): HTMLSelectElement {
 
 function buttonControl(
   label: string,
-  content: string | Node,
+  content: string | SVGSVGElement,
   className = "",
+  toggle = false,
 ): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = `format-button ${className}`.trim();
   button.setAttribute("aria-label", label);
-  button.setAttribute("aria-pressed", "false");
+  if (toggle) button.setAttribute("aria-pressed", "false");
   button.title = label;
   if (typeof content === "string") button.textContent = content;
   else button.append(content);
@@ -124,6 +125,13 @@ export function applyBlockStyle(editor: Editor, style: BlockStyle): boolean {
   }
 }
 
+export type ToolbarOptions = {
+  openLink: () => boolean;
+  newDocument: () => void | Promise<void>;
+  importMarkdown: () => void | Promise<void>;
+  exportMarkdown: () => void | Promise<void>;
+};
+
 /**
  * Attach the one formatting surface for the current editor instance.
  *
@@ -133,12 +141,28 @@ export function applyBlockStyle(editor: Editor, style: BlockStyle): boolean {
 export function installToolbar(
   editor: Editor,
   editorElement: HTMLElement,
-  openLink: () => boolean,
+  actions: ToolbarOptions,
 ): () => void {
   const toolbar = document.createElement("div");
   toolbar.className = "format-toolbar";
-  toolbar.setAttribute("role", "toolbar");
-  toolbar.setAttribute("aria-label", "Text formatting");
+  toolbar.setAttribute("role", "group");
+  toolbar.setAttribute("aria-label", "Editor tools");
+
+  const newDocument = buttonControl(
+    "New document",
+    icon(ICONS.filePlus),
+    "is-icon is-new-document",
+  );
+  const importMarkdown = buttonControl(
+    "Import Markdown file",
+    icon(ICONS.folderOpen),
+    "is-icon is-open-markdown",
+  );
+  const exportMarkdown = buttonControl(
+    "Export Markdown copy",
+    icon(ICONS.save),
+    "is-icon is-export-markdown",
+  );
 
   const zoom = selectControl("Editor zoom", "zoom-select");
   for (const level of ZOOM_LEVELS) zoom.append(option(String(level), `${level}%`));
@@ -161,11 +185,29 @@ export function installToolbar(
   size.append(mixedSize, option("", "Size"));
   for (const pixels of FONT_SIZES) size.append(option(`${pixels}px`, `${pixels} px`));
 
-  const bold = buttonControl("Bold", "B", "is-bold");
-  const italic = buttonControl("Italic", "I", "is-italic");
-  const link = buttonControl("Add or edit link", icon(ICONS.link2), "is-icon is-link");
+  const bold = buttonControl("Bold", "B", "is-bold", true);
+  const italic = buttonControl("Italic", "I", "is-italic", true);
+  const link = buttonControl(
+    "Add or edit link",
+    icon(ICONS.link2),
+    "is-icon is-link",
+    true,
+  );
 
-  toolbar.append(zoom, divider(), block, size, divider(), bold, italic, link);
+  toolbar.append(
+    newDocument,
+    importMarkdown,
+    exportMarkdown,
+    divider(),
+    zoom,
+    divider(),
+    block,
+    size,
+    divider(),
+    bold,
+    italic,
+    link,
+  );
   editorElement.before(toolbar);
 
   const applyZoom = (level: number) => {
@@ -206,9 +248,12 @@ export function installToolbar(
     else chain.unsetMark("fontSize").run();
     update();
   });
+  newDocument.addEventListener("click", () => void actions.newDocument());
+  importMarkdown.addEventListener("click", () => void actions.importMarkdown());
+  exportMarkdown.addEventListener("click", () => void actions.exportMarkdown());
   bold.addEventListener("click", () => editor.chain().focus().toggleBold().run());
   italic.addEventListener("click", () => editor.chain().focus().toggleItalic().run());
-  link.addEventListener("click", () => openLink());
+  link.addEventListener("click", () => actions.openLink());
 
   editor.on("selectionUpdate", update);
   editor.on("transaction", update);

@@ -21,7 +21,7 @@
       <section>
         <h2>Windows</h2>
         <ul id="peers"></ul>
-        <button class="ghost" id="new-window">Open another window <kbd>⌘N</kbd></button>
+        <button class="ghost" id="new-window">New document window</button>
       </section>
       <section>
         <h2>Agents</h2>
@@ -42,6 +42,18 @@
     <!-- Errors used to have nowhere to go: a failed call left the status dot
          green and the window silently wrong. -->
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <div class="close-prompt-backdrop" id="close-prompt" hidden>
+      <section class="close-prompt" role="alertdialog" aria-modal="true" aria-labelledby="close-prompt-title" aria-describedby="close-prompt-description">
+        <h2 id="close-prompt-title">Export a Markdown copy?</h2>
+        <p id="close-prompt-description">Export creates a separate one-time Markdown snapshot. Closing without exporting does not create a Markdown file.</p>
+        <div class="close-prompt-actions">
+          <button type="button" id="close-cancel">Cancel</button>
+          <button type="button" id="close-without-exporting">Close without exporting</button>
+          <button type="button" class="primary" id="close-export">Export…</button>
+        </div>
+      </section>
+    </div>
 
     <div class="scrim" id="scrim" hidden>
       <div class="switcher" role="dialog" aria-label="Open document">

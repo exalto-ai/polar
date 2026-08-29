@@ -281,13 +281,49 @@ fn wrap(s: &str, mark: &Mark) -> String {
                 .get("href")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let destination = link_destination(href);
             match mark.attrs.get("title").and_then(|v| v.as_str()) {
-                Some(t) => format!("[{s}]({href} \"{t}\")"),
-                None => format!("[{s}]({href})"),
+                Some(title) => format!("[{s}]({destination} \"{}\")", link_title(title)),
+                None => format!("[{s}]({destination})"),
             }
         }
         _ => s.to_string(),
     }
+}
+
+/// Angle-bracket destinations keep spaces and balanced punctuation out of the
+/// Markdown parser's grammar. Escape only the characters that terminate that
+/// form so the parser reconstructs the exact href.
+fn link_destination(href: &str) -> String {
+    let mut out = String::with_capacity(href.len() + 2);
+    out.push('<');
+    for character in href.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '\\' | '<' | '>' => {
+                out.push('\\');
+                out.push(character);
+            }
+            _ => out.push(character),
+        }
+    }
+    out.push('>');
+    out
+}
+
+fn link_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    for character in title.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(character);
+            }
+            _ => out.push(character),
+        }
+    }
+    out
 }
 
 /// Escape anything that would otherwise re-parse as structure. Conservative on

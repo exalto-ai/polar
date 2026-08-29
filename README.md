@@ -46,7 +46,12 @@ for how one is built and signed.
 npm run tauri dev --prefix app
 ```
 
-The app starts the daemon itself. Press ⌘K to switch documents, ⌘↵ to make one.
+The app starts the daemon itself. Press ⌘K to switch documents, ⌘N to create a blank
+document in its own window, ⌘O to import a Markdown snapshot into its own window, and ⌘S
+to export a one-time Markdown copy of the visible document. New documents never replace the
+editor you are already using, and each new window is visibly cascaded from its source. ⌘W
+offers to export a Markdown copy before closing. Proof of Thought's CRDT store remains
+authoritative; an export does not establish a mirrored file on disk.
 
 To watch an agent edit a document you have open, from another terminal:
 
