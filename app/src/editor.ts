@@ -14,7 +14,7 @@ import { installSlashMenu } from "./slash";
 import { installToolbar, type ToolbarOptions } from "./toolbar";
 
 export type Actor = { name: string; color: string; id: number };
-export type EditorActions = Omit<ToolbarOptions, "openLink">;
+export type EditorActions = Omit<ToolbarOptions, "openLink" | "subscribeSaveStatus">;
 
 /**
  * The caret each peer leaves behind.
@@ -66,6 +66,7 @@ export function createEditor(
   const destroyToolbar = installToolbar(editor, element, {
     ...actions,
     openLink: links.open,
+    subscribeSaveStatus: (listener) => provider.subscribeSaveStatus(listener),
   });
 
   // Menus and toolbar controls live outside ProseMirror's element, so TipTap

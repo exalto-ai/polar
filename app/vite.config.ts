@@ -38,9 +38,13 @@ function thoughtConnection() {
               actor_id: "human:editor",
             }),
           );
-        } catch {
+        } catch (error) {
           res.statusCode = 503;
-          res.end(JSON.stringify({ error: "no daemon is running" }));
+          res.end(
+            JSON.stringify({
+              error: error instanceof Error ? error.message : "no daemon is running",
+            }),
+          );
         }
       });
     },
