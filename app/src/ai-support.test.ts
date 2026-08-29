@@ -4,7 +4,6 @@ import {
   installAiSupport,
   readAiSupportMode,
   safeLocalStorage,
-  setupCommand,
   writeAiSupportMode,
 } from "./ai-support";
 
@@ -106,35 +105,6 @@ describe("AI support preference", () => {
       },
     };
     expect(safeLocalStorage(denied)).toBeNull();
-  });
-});
-
-describe("client setup commands", () => {
-  const stdio = "/Applications/Proof of Thought.app/Contents/MacOS/thought-mcp-stdio";
-
-  it("uses the raw command for ChatGPT desktop", () => {
-    expect(setupCommand("chatgpt", stdio)).toBe(stdio);
-  });
-
-  it("builds valid Codex and Claude Code commands", () => {
-    expect(setupCommand("codex", stdio)).toBe(
-      `codex mcp add proof-of-thought -- '${stdio}'`,
-    );
-    expect(setupCommand("claude-code", stdio)).toBe(
-      `claude mcp add --scope user proof-of-thought -- '${stdio}'`,
-    );
-  });
-
-  it("shell-quotes an executable path containing an apostrophe", () => {
-    const quoted = "/Applications/Proof's Thought.app/Contents/MacOS/thought-mcp-stdio";
-    expect(setupCommand("codex", quoted)).toBe(
-      `codex mcp add proof-of-thought -- '/Applications/Proof'"'"'s Thought.app/Contents/MacOS/thought-mcp-stdio'`,
-    );
-  });
-
-  it("does not pretend the Claude Desktop installer exists", () => {
-    expect(setupCommand("claude-desktop", stdio)).toBeNull();
-    expect(setupCommand("codex", "  ")).toBeNull();
   });
 });
 
@@ -249,30 +219,29 @@ describe("AI support surfaces", () => {
       "incompatible daemon protocol",
     );
     expect(document.querySelector("#ai-connection-command")?.textContent).toContain(
-      "unavailable until Proof of Thought starts",
+      "available in the next update",
     );
     expect(document.querySelector<HTMLButtonElement>("#copy-ai-command")!.disabled).toBe(true);
-    expect(document.querySelector("#copy-ai-command")?.textContent).toBe("Unavailable");
+    expect(document.querySelector("#copy-ai-command")?.textContent).toBe(
+      "Available in the next update",
+    );
     controller.destroy();
   });
 
-  it("suppresses an already loaded setup command after startup fails", () => {
+  it("keeps setup unavailable after startup fails", () => {
     const values = storage();
     writeAiSupportMode(values, "connect");
-    const copyText = vi.fn(async () => {});
-    const controller = installAiSupport(document, { storage: values, copyText });
+    const controller = installAiSupport(document, { storage: values });
     const copy = document.querySelector<HTMLButtonElement>("#copy-ai-command")!;
-    controller.setConnectionCommand("thought-mcp-stdio");
-    expect(copy.disabled).toBe(false);
+    expect(copy.disabled).toBe(true);
 
     controller.setStartupError("connection failed");
     copy.click();
 
     expect(copy.disabled).toBe(true);
     expect(document.querySelector("#ai-connection-command")?.textContent).toContain(
-      "unavailable until Proof of Thought starts",
+      "available in the next update",
     );
-    expect(copyText).not.toHaveBeenCalled();
     controller.destroy();
   });
 
@@ -332,36 +301,20 @@ describe("AI support surfaces", () => {
     controller.destroy();
   });
 
-  it("copies the command for the selected guided client", async () => {
-    const values = storage();
-    writeAiSupportMode(values, "connect");
-    const copyText = vi.fn(async () => {});
-    const controller = installAiSupport(document, { storage: values, copyText });
-    controller.setConnectionCommand("thought-mcp-stdio");
-
-    document.querySelector<HTMLButtonElement>('[data-ai-client="claude-code"]')!.click();
-    expect(document.querySelector("#ai-connection-command")?.textContent).toBe(
-      "claude mcp add --scope user proof-of-thought -- thought-mcp-stdio",
-    );
-    document.querySelector<HTMLButtonElement>("#copy-ai-command")!.click();
-    await Promise.resolve();
-    expect(copyText).toHaveBeenCalledWith(
-      "claude mcp add --scope user proof-of-thought -- thought-mcp-stdio",
-    );
-    controller.destroy();
-  });
-
-  it("keeps the planned Claude Desktop path visibly unavailable", () => {
+  it("keeps setup disabled for every previewed client", () => {
     const values = storage();
     writeAiSupportMode(values, "connect");
     const controller = installAiSupport(document, { storage: values });
-    controller.setConnectionCommand("thought-mcp-stdio");
+    const copy = document.querySelector<HTMLButtonElement>("#copy-ai-command")!;
 
-    document.querySelector<HTMLButtonElement>('[data-ai-client="claude-desktop"]')!.click();
-    expect(document.querySelector<HTMLButtonElement>("#copy-ai-command")!.disabled).toBe(true);
-    expect(document.querySelector("#ai-connection-command")?.textContent).toContain(
-      "next connection PR",
-    );
+    for (const button of document.querySelectorAll<HTMLButtonElement>("[data-ai-client]")) {
+      button.click();
+      expect(copy.disabled).toBe(true);
+      expect(copy.textContent).toBe("Available in the next update");
+      expect(document.querySelector("#ai-connection-command")?.textContent).toContain(
+        "available in the next update",
+      );
+    }
     controller.destroy();
   });
 
@@ -371,7 +324,7 @@ describe("AI support surfaces", () => {
     const controller = installAiSupport(document, { storage: values });
 
     expect(document.querySelector("#ai-mode-evidence")?.textContent).toBe(
-      "Setup choice, not connection proof",
+      "Planned setup, not connection proof",
     );
     controller.destroy();
   });

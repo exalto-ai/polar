@@ -32,7 +32,6 @@ type Connection = {
   mcp_url: string;
   editor_token: string;
   mcp_token: string;
-  stdio_command: string;
   /** Who this window writes as, from `thought_mcp::EDITOR_ACTOR_ID`. */
   actor_id: string;
 };
@@ -893,7 +892,6 @@ async function boot() {
   }
   mcp = new Mcp(connection.mcp_url, connection.mcp_token);
   editorApi = new EditorApi(connection.mcp_url, connection.editor_token);
-  aiSupport.setConnectionCommand(connection.stdio_command);
   await mcp.connect();
   // A first launch is genuinely onboarding, not a document created invisibly
   // behind a modal. Existing preferences resolve immediately.

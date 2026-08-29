@@ -12,7 +12,7 @@ export type AiClientDefinition = {
   id: AiClient;
   name: string;
   shortName: string;
-  availability: "guide" | "planned";
+  availability: "planned";
   setup: string;
   caveat: string | null;
 };
@@ -22,19 +22,19 @@ export const AI_CLIENTS: readonly AiClientDefinition[] = [
     id: "chatgpt",
     name: "ChatGPT desktop",
     shortName: "ChatGPT",
-    availability: "guide",
+    availability: "planned",
     setup:
-      "Open Settings, choose MCP servers, then Add server. Choose STDIO, name it Proof of Thought, paste the command below, save, and restart.",
+      "A guided local reviewer connection for ChatGPT desktop is coming in the next update.",
     caveat: "ChatGPT on the web cannot reach this local editor.",
   },
   {
     id: "codex",
     name: "Codex",
     shortName: "Codex",
-    availability: "guide",
+    availability: "planned",
     setup:
-      "Run this once in Terminal. The ChatGPT desktop app and Codex share this MCP configuration on the same host.",
-    caveat: "This invokes the Codex CLI already installed on your Mac. Proof of Thought does not install or validate that executable.",
+      "A guided local reviewer connection for Codex is coming in the next update.",
+    caveat: "Proof of Thought will not install or validate the Codex executable.",
   },
   {
     id: "claude-desktop",
@@ -42,17 +42,17 @@ export const AI_CLIENTS: readonly AiClientDefinition[] = [
     shortName: "Claude",
     availability: "planned",
     setup:
-      "Claude Desktop uses a local desktop extension. The one-click Proof of Thought extension is tracked in the next connection PR.",
-    caveat: "Use Claude Code today if you want to connect through Claude immediately.",
+      "A guided local reviewer connection for Claude Desktop is coming in the next update.",
+    caveat: "Claude Desktop will require a packaged and tested local extension.",
   },
   {
     id: "claude-code",
     name: "Claude Code",
     shortName: "Claude Code",
-    availability: "guide",
+    availability: "planned",
     setup:
-      "Run this once in Terminal to add Proof of Thought for your user, then check the connection with /mcp inside Claude Code.",
-    caveat: "This invokes the Claude CLI already installed on your Mac. Proof of Thought does not install or validate that executable.",
+      "A guided local reviewer connection for Claude Code is coming in the next update.",
+    caveat: "Proof of Thought will not install or validate the Claude executable.",
   },
 ] as const;
 
@@ -88,24 +88,8 @@ export function writeAiSupportMode(storage: Storage | null, mode: AiSupportMode)
   }
 }
 
-export function setupCommand(client: AiClient, stdioCommand: string): string | null {
-  const command = stdioCommand.trim();
-  if (!command || client === "claude-desktop") return null;
-  if (client === "codex") return `codex mcp add proof-of-thought -- ${shellArgument(command)}`;
-  if (client === "claude-code") {
-    return `claude mcp add --scope user proof-of-thought -- ${shellArgument(command)}`;
-  }
-  return command;
-}
-
-function shellArgument(value: string): string {
-  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
 type AiSupportControllerOptions = {
   storage?: Storage | null;
-  copyText?: (text: string) => Promise<void>;
   onModeChange?: (mode: AiSupportMode) => void;
   onNotice?: (message: string, kind?: "info" | "error") => void;
 };
@@ -115,7 +99,6 @@ export type AiSupportController = {
   isChoosingMode(): boolean;
   isSidebarOpen(): boolean;
   whenInitialChoiceMade(): Promise<AiSupportMode>;
-  setConnectionCommand(command: string): void;
   setStartupError(message: string): void;
   openSidebar(): void;
   closeSidebar(): void;
@@ -135,7 +118,6 @@ export function installAiSupport(
   options: AiSupportControllerOptions = {},
 ): AiSupportController {
   const storage = options.storage === undefined ? safeLocalStorage(window) : options.storage;
-  const copyText = options.copyText ?? ((text: string) => navigator.clipboard.writeText(text));
   const toggle = required<HTMLButtonElement>(root, "#ai-support-toggle");
   const sidebar = required<HTMLElement>(root, "#ai-support-sidebar");
   const sidebarClose = required<HTMLButtonElement>(root, "#ai-sidebar-close");
@@ -165,7 +147,6 @@ export function installAiSupport(
 
   let currentMode = readAiSupportMode(storage);
   let currentClient: AiClient = "chatgpt";
-  let connectionCommand: string | null = null;
   let startupFailure: string | null = null;
   let sidebarOpen = false;
   let modalOpen = currentMode === null;
@@ -220,26 +201,10 @@ export function installAiSupport(
     clientCaveat.textContent = selected.caveat ?? "";
     clientCaveat.hidden = !selected.caveat;
 
-    const command = startupFailure !== null || connectionCommand === null
-      ? null
-      : setupCommand(currentClient, connectionCommand);
-    const placeholder = selected.availability === "planned"
-      ? "Available in the next connection PR"
-      : startupFailure
-        ? "Local setup is unavailable until Proof of Thought starts"
-        : connectionCommand === null
-          ? "Loading local setup…"
-          : "Local setup command unavailable";
-    commandBox.textContent = command ?? placeholder;
-    commandBox.dataset.placeholder = String(!command);
-    copyButton.disabled = !command;
-    copyButton.textContent = command
-      ? "Copy setup"
-      : selected.availability === "planned"
-        ? "Coming next"
-        : startupFailure
-          ? "Unavailable"
-          : "Loading…";
+    commandBox.textContent = "Connection setup will be available in the next update.";
+    commandBox.dataset.placeholder = "true";
+    copyButton.disabled = true;
+    copyButton.textContent = "Available in the next update";
   }
 
   function renderMode() {
@@ -248,13 +213,13 @@ export function installAiSupport(
       button.setAttribute("aria-pressed", String(button.dataset.aiMode === currentMode));
     }
     toggle.dataset.mode = currentMode ?? "unconfigured";
-    toggle.textContent = currentMode === null ? "AI support" : connected ? "AI setup" : "Basic";
+    toggle.textContent = currentMode === null ? "AI support" : connected ? "AI preview" : "Basic";
     summaryTitle.textContent = connected ? "Reviewer setup" : "Basic recording";
     summaryDescription.textContent = connected
-      ? "Choose an AI app to set up. Proof of Thought will record AI tool edits when they arrive, without treating setup as proof of a live connection."
+      ? "Choose an AI app to preview how reviewer setup will work. Connection setup is available in the next update."
       : "Proof of Thought records how the visible document changed without setting up or calling an AI service.";
     summaryEvidence.textContent = connected
-      ? "Setup choice, not connection proof"
+      ? "Planned setup, not connection proof"
       : "Local edit evidence";
     summaryEvidence.dataset.assurance = connected ? "setup" : "observed";
     summaryCost.textContent = connected
@@ -374,17 +339,6 @@ export function installAiSupport(
       renderClient();
     });
   }
-  listen(copyButton, "click", () => {
-    if (connectionCommand === null || startupFailure !== null) return;
-    const command = setupCommand(currentClient, connectionCommand);
-    if (!command) return;
-    void copyText(command)
-      .then(() => {
-        copyButton.textContent = "Copied";
-        window.setTimeout(() => renderClient(), 1200);
-      })
-      .catch(() => options.onNotice?.("Could not copy the setup command.", "error"));
-  });
   listen(window, "storage", (event) => {
     if (event.key !== AI_SUPPORT_STORAGE_KEY) return;
     const mode = readAiSupportMode(storage);
@@ -435,12 +389,6 @@ export function installAiSupport(
     isChoosingMode: () => modalOpen,
     isSidebarOpen: () => sidebarOpen,
     whenInitialChoiceMade: () => initialChoice,
-    setConnectionCommand(command: string) {
-      connectionCommand = command;
-      startupFailure = null;
-      renderClient();
-      renderSurfaces();
-    },
     setStartupError(message: string) {
       startupFailure = message.trim() || "Unknown startup problem.";
       modalOpen = true;

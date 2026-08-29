@@ -2,14 +2,15 @@ import { describe, expect, it } from "vitest";
 import markup from "../index.html?raw";
 
 describe("AI support product claims", () => {
-  it("discloses the current whole-workspace connection access", () => {
-    expect(markup).toContain("Current access");
+  it("keeps reviewer setup unavailable until the bounded connection layer", () => {
+    expect(markup).toContain("Connection preview");
     expect(markup).toContain(
-      "temporary shared setup lets the AI app read, search, create, edit, and move any document in this local Proof of Thought workspace to Trash",
+      "does not provide connection setup yet",
     );
-    expect(markup).toContain("even when no Proof of Thought window is open");
-    expect(markup).toContain("it may send that content to its AI provider");
-    expect(markup).toContain("remove Proof of Thought from that AI app");
+    expect(markup).toContain("bounded read-only reviewer connections");
+    expect(markup).toContain("Available in the next update");
+    expect(markup).not.toContain("Copy setup");
+    expect(markup).not.toContain("can edit directly");
   });
 
   it("keeps Basic attribution conservative", () => {

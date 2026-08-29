@@ -58,20 +58,17 @@ Owner: current branch
 - [x] The interface explains that connecting never publishes a document.
 - [x] Reported and verified are explained without implying correctness, safety, usefulness, or
   human authorship.
-- [x] ChatGPT desktop, Codex, and Claude Code receive setup guidance derived from the daemon's
-  current local STDIO command. These are setup guides, not validated installed-client status.
-- [x] Selecting Connect or copying setup is not treated as proof of a live connection. The shell
-  makes no inferred connection-status claim from daemon health or caller-controlled actor data.
+- [x] ChatGPT desktop, Codex, Claude Desktop, and Claude Code appear as clear connection previews.
+  No setup command is displayed or copied in this pull request.
+- [x] Selecting Connect is not treated as proof of a live connection. The shell makes no inferred
+  connection-status claim from daemon health or caller-controlled actor data.
 - [x] ChatGPT web is not presented as able to reach the local editor.
 - [x] Claude Desktop is visibly tracked but cannot be marked ready until its local desktop
   extension is packaged and tested.
-- [x] The shell prominently discloses that the current shared setup can read, search, create,
-  edit, and trash documents across the local workspace, can work with no editor window open, can
-  edit directly, may send returned content to the AI provider, and must currently be removed in
-  the configured AI app.
-- [x] The actionable command is explicitly a temporary broad legacy setup, not a durable reviewer
-  connection. Per-connection credentials, permissions, status, and in-app revocation are release
-  gates for the next connection pull request.
+- [x] Every client card keeps setup disabled with the consumer label `Available in the next
+  update` until the connection layer exposes bounded read-only routes.
+- [x] The preview explains that a future connected AI app may send document content to its
+  provider under that app's privacy settings.
 - [x] The old raw connection-command popover is removed so it cannot bypass the choice,
   disclosure, or client availability guidance.
 - [x] Pro is a disabled preview. It is described as an add-on that can coexist with Connect.
@@ -83,7 +80,7 @@ Owner: current branch
 - [x] Browser visual review covers keyboard selection, startup failure, the narrow sidebar, and
   the expanded onboarding disclosure at 560×400 and 1040×400.
 - [ ] Manual visual review in the macOS WKWebView at normal and narrow window sizes.
-- [x] A fresh unsigned Apple Silicon DMG was built and verified for this stack.
+- [ ] Build and verify a fresh Apple Silicon DMG from the final reviewed stack before release.
 
 ## 2. Reviewer connections
 

@@ -79,18 +79,18 @@
             <p id="ai-client-setup"></p>
             <p class="ai-caveat" id="ai-client-caveat" hidden></p>
             <div class="ai-access-warning">
-              <strong>Current access</strong>
-              <p>This temporary shared setup lets the AI app read, search, create, edit, and move any document in this local Proof of Thought workspace to Trash. Configured AI sessions can use it even when no Proof of Thought window is open, and can edit directly, not only suggest changes.</p>
-              <p>When the AI app reads or searches a document, it may send that content to its AI provider under that app’s privacy settings.</p>
-              <p>To stop access, remove Proof of Thought from that AI app. Per-reviewer document permissions and in-app revocation are next in this upgrade.</p>
+              <strong>Connection preview</strong>
+              <p>This version explains the supported reviewer choices, but does not provide connection setup yet.</p>
+              <p>The next update will add bounded read-only reviewer connections before setup can be copied. When a reviewer reads a document, its AI app may send that content to its provider under that app’s privacy settings.</p>
+              <p>Connecting never publishes your document. You choose what to publish later.</p>
             </div>
             <pre id="ai-connection-command"></pre>
-            <button class="primary-button compact" id="copy-ai-command" type="button">Copy setup</button>
+            <button class="primary-button compact" id="copy-ai-command" type="button" disabled>Available in the next update</button>
           </div>
 
           <details class="technical-disclosure">
             <summary>What this proof can say</summary>
-            <p>Proof of Thought records edits made through this local tool connection. Today the app and model names are reported by the tool client, not authenticated by the provider. Proof of Thought cannot see the rest of your private chat.</p>
+            <p>When connections become available, Proof of Thought will record edits made through the local tool connection. App and model names will be reported by the tool client, not authenticated by the provider. Proof of Thought will not see the rest of your private chat.</p>
             <p>Connecting never publishes your document. You choose what to publish later.</p>
           </details>
         </section>
@@ -140,8 +140,8 @@
           <button class="onboarding-card recommended" type="button" data-ai-mode="connect">
             <span class="card-topline"><span>Connect an AI app</span><span class="recommendation">Recommended</span></span>
             <strong>Work with reviewers you already use</strong>
-            <span>Get setup steps for ChatGPT desktop, Codex, or Claude Code. Claude Desktop’s one-click extension is next in this upgrade.</span>
-            <small>Proof of Thought adds no API usage charge. Current setup grants persistent whole-workspace access and may send document content to the AI provider; review the details before copying it.</small>
+            <span>Preview support for ChatGPT desktop, Codex, Claude Desktop, and Claude Code. Connection setup is available in the next update.</span>
+            <small>Proof of Thought will add no API usage charge. A connected AI app may send document content to its provider under that app’s privacy settings.</small>
           </button>
 
           <button class="onboarding-card" type="button" data-ai-mode="basic">
@@ -161,7 +161,7 @@
 
         <details class="onboarding-disclosure">
           <summary>What “reported” and “verified” mean</summary>
-          <p><strong>Reported</strong> means Proof of Thought saw an AI tool edit arrive through a local tool connection. The app and model names are supplied by that client. <strong>Verified</strong> will mean a provider-authenticated exchange is bound to the exact accepted change. Neither label says the content is correct.</p>
+          <p><strong>Reported</strong> will mean Proof of Thought saw an AI tool edit arrive through a local tool connection. The app and model names will be supplied by that client. <strong>Verified</strong> will mean a provider-authenticated exchange is bound to the exact accepted change. Neither label says the content is correct.</p>
         </details>
       </section>
     </div>
