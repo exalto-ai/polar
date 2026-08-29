@@ -735,6 +735,12 @@ and resends unacknowledged work after reconnecting. The toolbar reports Connecti
 Autosaved, Saving, Offline, or Save failed. A no-op resend is acknowledged too, since Yjs
 updates are idempotent and an ACK can be lost when a socket closes.
 
+**Cost:** the window now owns a two-slot retry queue and retains unacknowledged Yjs bytes.
+The entry count is bounded, but retained bytes can grow during a long outage until the
+source-aware layer adds its byte ceiling. The daemon must preserve positional reply ordering,
+acknowledge idempotent no-op retries, and keep the legacy `UPDATE` frame compatible while older
+clients migrate.
+
 ## M2.2 — The schema, exported not authored twice
 
 Correcting M1.2's direction, which was unimplementable as written: TipTap builds its schema
