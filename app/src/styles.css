@@ -140,7 +140,7 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 }
 
 /* The whole strip drags, so children must not swallow the press. The status
-   button is the deliberate exception — it opens the connections panel. */
+   button is the deliberate exception; it opens the connections panel. */
 .chrome > *:not(.status):not(.presence):not(.ai-support-toggle) { pointer-events: none; }
 .status, .presence, .ai-support-toggle { pointer-events: auto; }
 

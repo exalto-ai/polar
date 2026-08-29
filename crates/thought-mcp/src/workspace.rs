@@ -917,7 +917,7 @@ impl Workspace {
     /// Find and replace within a single block.
     ///
     /// `find` matches the block's **markdown**, not its rendered text, because
-    /// markdown is what the agent read — matching against something it never
+    /// markdown is what the agent read; matching against something it never
     /// saw would make failures inexplicable. The consequence is that `find`
     /// must include any emphasis syntax the target carries.
     pub fn replace_text(
@@ -1006,7 +1006,7 @@ impl Workspace {
         self.with(|inner| Ok(inner.doc(doc_id)?.diff_since(state_vector)))
     }
 
-    /// Apply an update frame from a peer — the editor window, or later the
+    /// Apply an update frame from a peer: the editor window, or later the
     /// relay.
     ///
     /// Returns `None` when the update changed nothing, so callers can skip
@@ -1184,8 +1184,8 @@ impl Workspace {
     /// whose provenance has never been computed is attributed by replaying its
     /// log here, once, and read from the table forever after.
     ///
-    /// A document that arrives with content but no log — everything M3's relay
-    /// will deliver — reports nothing, which is the honest answer. Blank means
+    /// A document that arrives with content but no log reports nothing. That is
+    /// the honest answer for everything M3's relay will deliver. Blank means
     /// unknown, never "mine".
     pub fn block_provenance(&self, doc_id: &str) -> Result<Vec<BlockAttribution>, WorkspaceError> {
         self.with(|inner| {
@@ -1212,7 +1212,7 @@ impl Workspace {
         })
     }
 
-    /// Attribution for the whole log — the activity feed and per-run revert.
+    /// Attribution for the whole log: the activity feed and per-run revert.
     pub fn attribution(
         &self,
         doc_id: &str,
@@ -1313,13 +1313,13 @@ impl Inner {
     /// Each top-level block's content, hashed.
     ///
     /// Block ids are intrinsic and stable (AD-5), so a block that changed keeps
-    /// its id and only its fingerprint moves — which is exactly the signal
+    /// its id and only its fingerprint moves, which is exactly the signal
     /// attribution needs, and why this is a hash rather than an id comparison.
     fn fingerprints(doc: &Document) -> HashMap<String, u64> {
         let tree = normalize(&doc.read());
         let refs = doc.blocks();
         // `normalize` only merges and drops *text* nodes, and a document's
-        // top-level children are always elements, so these stay in step — the
+        // top-level children are always elements, so these stay in step; the
         // same pairing `read_document` makes to attach line spans.
         refs.iter()
             .zip(tree.content.iter())

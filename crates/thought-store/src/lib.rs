@@ -88,7 +88,7 @@ pub struct BlockAttribution {
     pub touched_by: String,
     pub touched_at: i64,
     pub session_id: Option<String>,
-    /// From the actor row for `touched_by` — the rail's colour and label.
+    /// From the actor row for `touched_by`: the rail's colour and label.
     pub kind: String,
     pub display_name: String,
     pub model: Option<String>,
@@ -220,7 +220,7 @@ impl Store {
     fn wrap(conn: Connection) -> Result<Store, SqlError> {
         // WAL so a reader never blocks the writer. NORMAL trades a fsync per
         // commit for the small risk of losing the last few updates on power
-        // loss — acceptable because the relay and the peer replicas hold them
+        // loss; acceptable because the relay and the peer replicas hold them
         // too, and unacceptable latency is worse for a writing app.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
