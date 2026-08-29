@@ -211,7 +211,7 @@ jobs:
           test -n "$dmg"
           hdiutil verify "$dmg"
 
-          mount_point="$RUNNER_TEMP/proof-of-thought-release-mount"
+          mount_point="$RUNNER_TEMP/thought-release-mount"
           mkdir -p "$mount_point"
           hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$dmg"
           cleanup_mount() { hdiutil detach "$mount_point" >/dev/null; }
