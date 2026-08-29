@@ -112,6 +112,7 @@ export function installProProvider(
   let busy: ProProvider | null = null;
   let loadError: string | null = null;
   let removeConfirmation: ProProvider | null = null;
+  let removeReturnFocus: HTMLButtonElement | null = null;
   let destroyed = false;
 
   function listen<K extends keyof HTMLElementEventMap>(
@@ -203,6 +204,14 @@ export function installProProvider(
     error.hidden = loadError === null;
     error.firstElementChild!.textContent = loadError ?? "";
     for (const provider of PROVIDERS) renderProvider(provider);
+  }
+
+  function closeRemoveConfirmation(): void {
+    removeConfirmation = null;
+    render();
+    const returnFocus = removeReturnFocus;
+    removeReturnFocus = null;
+    returnFocus?.focus();
   }
 
   function saveResult(result: ProviderActionResult): void {
@@ -306,6 +315,7 @@ export function installProProvider(
       if (destroyed) return;
       saveResult(result);
       removeConfirmation = null;
+      removeReturnFocus = null;
       live.textContent = `${PROVIDER_NAME[provider]} was removed from Proof of Thought. The provider-side key was not revoked.`;
     } catch (cause) {
       if (destroyed) return;
@@ -336,21 +346,18 @@ export function installProProvider(
       "click",
       () => void revalidate(provider),
     );
-    listen(required(container, '[data-pro-provider-action="remove"]'), "click", () => {
+    listen(required(container, '[data-pro-provider-action="remove"]'), "click", (event) => {
       removeConfirmation = provider;
+      removeReturnFocus = event.currentTarget as HTMLButtonElement;
       render();
       queueMicrotask(() =>
         card(provider)
-          .querySelector<HTMLButtonElement>('[data-pro-provider-action="confirm-remove"]')
+          .querySelector<HTMLButtonElement>('[data-pro-provider-action="cancel-remove"]')
           ?.focus()
       );
     });
     listen(required(container, '[data-pro-provider-action="cancel-remove"]'), "click", () => {
-      removeConfirmation = null;
-      render();
-      card(provider)
-        .querySelector<HTMLButtonElement>('[data-pro-provider-action="remove"]')
-        ?.focus();
+      closeRemoveConfirmation();
     });
     listen(
       required(container, '[data-pro-provider-action="confirm-remove"]'),
@@ -366,6 +373,14 @@ export function installProProvider(
       });
     });
   }
+
+  const onKeydown = (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || removeConfirmation === null || busy !== null) return;
+    event.preventDefault();
+    closeRemoveConfirmation();
+  };
+  root.addEventListener("keydown", onKeydown);
+  disposers.push(() => root.removeEventListener("keydown", onKeydown));
 
   render();
 
