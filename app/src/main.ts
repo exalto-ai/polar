@@ -869,17 +869,14 @@ els.scrim.addEventListener("mousedown", (e) => {
 
 // ---------------------------------------------------------------- boot
 
-/** Under Tauri the daemon details come from Rust; in a dev browser, from Vite. */
+/** Daemon capabilities cross only the verified native bootstrap boundary. */
 async function loadConnection(): Promise<Connection> {
-  if (isTauri()) {
-    return invoke<Connection>("connection");
+  if (!isTauri()) {
+    throw new Error(
+      "Open Proof of Thought through the native app; browser-only development is not supported.",
+    );
   }
-  const response = await fetch("/__thought/connection");
-  if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error || "no daemon is running");
-  }
-  return response.json();
+  return invoke<Connection>("connection");
 }
 
 async function boot() {
