@@ -26,15 +26,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
 
       - name: Property tests, deeper
         # The round-trip property is the one guard on the agent-facing contract
         # (AD-12), so CI runs far more cases than the local default.
         env:
           PROPTEST_CASES: "20000"
-        run: cargo test --workspace --test round_trip
+        run: cargo test --workspace --locked --test round_trip
 
   schema:
     # The editor defines the schema and Rust reads a generated copy (M2.2).
@@ -56,3 +56,44 @@ jobs:
         working-directory: app
       - run: npm test
         working-directory: app
+
+  tauri-smoke:
+    # The desktop crate is deliberately outside the Rust workspace and does
+    # not gate the build. This macOS job is an informational check for the
+    # platform shipped in the DMG.
+    continue-on-error: true
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+
+      - run: npm ci --prefix app
+      - run: npm run build --prefix app
+      - name: Stage host sidecars for Tauri
+        run: ./scripts/stage-sidecars.sh "$(rustc -vV | awk '/^host:/ { print $2 }')"
+      - run: cargo test --manifest-path app/src-tauri/Cargo.toml --locked
+      - name: Build unsigned host app bundle
+        working-directory: app
+        run: npm exec -- tauri build --bundles app --no-sign --ci -- --locked
+      - name: Verify host app sidecars
+        run: |
+          set -euo pipefail
+          app="app/src-tauri/target/release/bundle/macos/Proof of Thought.app"
+          test -f "$app/Contents/Info.plist"
+          test -x "$app/Contents/MacOS/thoughtd"
+          test -x "$app/Contents/MacOS/thought-mcp-stdio"
+          cmp THIRD_PARTY_NOTICES.md "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
