@@ -13,6 +13,7 @@ import {
 export type ProChatDocumentContext = {
   id: string;
   title: string;
+  snapshot: () => unknown;
 };
 
 type ProChatOptions = {
@@ -21,6 +22,8 @@ type ProChatOptions = {
   onInitialAvailabilityResolved?: (hasUsableProvider: boolean) => void;
   onBusyChange?: (provider: ProChatProvider | null) => void;
   onActivityChange?: (active: boolean) => void;
+  copyText?: (text: string) => Promise<void>;
+  onResponseCopied?: () => void;
   onNotice?: (message: string, kind?: "info" | "error") => void;
 };
 
@@ -48,6 +51,8 @@ type MessageNodes = {
   assistantMeta: HTMLElement;
   status: HTMLElement;
   retry: HTMLButtonElement;
+  actions: HTMLElement;
+  copy: HTMLButtonElement;
 };
 
 const THINKING_LEVELS: readonly ProChatThinking[] = [
@@ -170,8 +175,9 @@ export function installProChat(
   const documentLabel = required<HTMLElement>(panel, "#pro-chat-document");
   const unavailable = required<HTMLElement>(panel, "#pro-chat-unavailable");
   const openSettings = required<HTMLButtonElement>(panel, "#pro-chat-open-settings");
-  const controls = required<HTMLFormElement>(panel, "#pro-chat-controls");
-  const providerSelect = required<HTMLSelectElement>(panel, "#pro-chat-provider");
+  const controls = required<HTMLDetailsElement>(panel, "#pro-chat-controls");
+  const controlsSummary = required<HTMLElement>(controls, "summary");
+  const selectionSummary = required<HTMLElement>(controls, "#pro-chat-selection-summary");
   const modelSelect = required<HTMLSelectElement>(panel, "#pro-chat-model");
   const thinkingSelect = required<HTMLSelectElement>(panel, "#pro-chat-thinking");
   const loading = required<HTMLElement>(panel, "#pro-chat-loading");
@@ -189,11 +195,14 @@ export function installProChat(
   const messageIssue = required<HTMLElement>(panel, "#pro-chat-message-issue");
   const sharing = required<HTMLElement>(panel, "#pro-chat-sharing");
   const consent = required<HTMLInputElement>(panel, "#pro-chat-consent");
+  const consentLabel = required<HTMLElement>(panel, ".pro-chat-consent");
   const consentCopy = required<HTMLElement>(panel, "#pro-chat-consent-copy");
+  const billingReminder = required<HTMLElement>(panel, "#pro-chat-billing-reminder");
   const send = required<HTMLButtonElement>(panel, "#pro-chat-send");
   const stop = required<HTMLButtonElement>(panel, "#pro-chat-stop");
   const live = required<HTMLElement>(panel, "#pro-chat-live");
   const bridge = options.bridge ?? null;
+  const copyText = options.copyText ?? ((text: string) => navigator.clipboard.writeText(text));
   const disposers: Array<() => void> = [];
   const consentedProviders = new Set<ProChatProvider>();
   const messageNodes = new Map<string, MessageNodes>();
@@ -275,9 +284,13 @@ export function installProChat(
     const name = providerName();
     const earlier = visibleMessageCount();
     sharing.textContent = earlier === 0
-      ? `To ${name}: this message only. No document text or files are added. API charges apply.`
-      : `To ${name}: this message plus ${earlier} completed earlier chat messages. No document text or files are added. API charges apply.`;
-    consentCopy.textContent = `I agree to send this visible chat to ${name}. API charges may apply.`;
+      ? `To ${name}: this document’s title and contents, including formatting and links, plus this message. No files are attached. API charges apply.`
+      : `To ${name}: this document’s title and contents, including formatting and links, this message, and ${earlier} completed earlier chat messages. No files are attached. API charges apply.`;
+    consentCopy.textContent = `I agree to send this document’s title and contents, including formatting and links, and visible chat to ${name}. API charges may apply.`;
+  }
+
+  function responseText(turnId: string): string {
+    return history?.turns.find(({ id }) => id === turnId)?.assistant_text ?? "";
   }
 
   function makeMessageNodes(turn: ProChatTurn): MessageNodes {
@@ -313,10 +326,45 @@ export function installProChat(
     retry.className = "text-button pro-chat-turn-retry";
     retry.textContent = "Try again";
     retry.addEventListener("click", () => void retryTurn(turn.id));
-    footer.append(status, retry);
+    const actions = document.createElement("span");
+    actions.className = "pro-chat-reply-actions";
+    actions.setAttribute("role", "group");
+    actions.setAttribute("aria-label", "Use this response");
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.textContent = "Copy";
+    copy.addEventListener("click", () => {
+      const text = responseText(turn.id);
+      if (!text) return;
+      copy.disabled = true;
+      void Promise.resolve()
+        .then(() => copyText(text))
+        .then(() => {
+          if (!copy.isConnected) return;
+          copy.textContent = "Copied";
+          options.onNotice?.("Copied. Press Command-V to paste in the editor.");
+          try {
+            options.onResponseCopied?.();
+          } catch {
+            // Copy succeeded. A focus handoff failure must not relabel it.
+          }
+          window.setTimeout(() => {
+            if (!copy.isConnected) return;
+            copy.textContent = "Copy";
+            copy.disabled = false;
+          }, 1400);
+        })
+        .catch(() => {
+          if (!copy.isConnected) return;
+          copy.disabled = false;
+          options.onNotice?.("Could not copy this response.", "error");
+        });
+    });
+    actions.append(retry, copy);
+    footer.append(status, actions);
     assistantArticle.append(assistantHeader, assistant, footer);
     item.append(user, assistantArticle);
-    return { item, assistant, assistantMeta, status, retry };
+    return { item, assistant, assistantMeta, status, retry, actions, copy };
   }
 
   function renderTurns(): void {
@@ -363,6 +411,9 @@ export function installProChat(
       nodes.status.dataset.status = turn.status;
       nodes.retry.hidden = !turn.retryable || turn.status === "pending";
       nodes.retry.disabled = isBusy() || !consentedProviders.has(turn.provider);
+      const responseReady = turn.status !== "pending" && turn.assistant_text.length > 0;
+      nodes.actions.hidden = !responseReady && nodes.retry.hidden;
+      nodes.copy.disabled = !responseReady || nodes.copy.textContent === "Copied";
       messages.append(nodes.item);
     }
 
@@ -400,9 +451,10 @@ export function installProChat(
     openSettings.hidden = bridge === null;
     controls.hidden = !ready;
     composer.hidden = !ready;
-    providerSelect.disabled = busy || historyLoading || providers.length < 2;
     modelSelect.disabled = busy || historyLoading;
     thinkingSelect.disabled = busy || historyLoading;
+    controlsSummary.setAttribute("aria-disabled", String(busy || historyLoading));
+    if ((busy || historyLoading) && controls.open) controls.open = false;
     loading.hidden = !capabilitiesLoading && !historyLoading;
     loading.textContent = capabilitiesLoading
       ? "Checking available providers and models…"
@@ -419,7 +471,16 @@ export function installProChat(
     const messageIssueText = messageIssueCopy(message.value);
     consent.checked = providerConsent;
     consent.disabled = busy || !ready;
+    sharing.hidden = providerConsent;
+    consentLabel.hidden = providerConsent;
+    billingReminder.hidden = !providerConsent;
     message.disabled = busy || historyLoading || !ready;
+    message.setAttribute(
+      "aria-describedby",
+      providerConsent
+        ? "pro-chat-billing-reminder pro-chat-message-issue"
+        : "pro-chat-sharing pro-chat-consent-copy pro-chat-message-issue",
+    );
     messageIssue.hidden = messageIssueText === null;
     messageIssue.textContent = messageIssueText ?? "";
     message.setAttribute("aria-invalid", String(messageIssueText !== null));
@@ -430,6 +491,10 @@ export function installProChat(
     stop.disabled = stopping || running?.operationId === null;
     stop.textContent = stopping ? "Stopping…" : "Stop";
     renderSharing();
+    const selected = model();
+    selectionSummary.textContent = selected
+      ? `${selected.display_name || selected.id} · ${THINKING_LABEL[selectedThinking]}`
+      : "Choose a model";
     renderTurns();
   }
 
@@ -450,28 +515,49 @@ export function installProChat(
     thinkingSelect.value = selectedThinking;
   }
 
-  function selectModelForProvider(preferred = selectedModel): void {
-    const models = provider()?.models ?? [];
-    modelSelect.replaceChildren(
-      ...models.map(({ id, display_name }) => option(id, display_name || id)),
-    );
-    selectedModel = models.some(({ id }) => id === preferred)
-      ? preferred
-      : models[0]?.id ?? "";
-    modelSelect.value = selectedModel;
-    selectThinkingForModel();
+  function modelChoiceValue(provider: ProChatProvider, modelId: string): string {
+    return JSON.stringify([provider, modelId]);
   }
 
-  function populateProviders(preferred = selectedProvider): void {
+  function readModelChoice(value: string): [ProChatProvider, string] | null {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (
+        Array.isArray(parsed) &&
+        parsed.length === 2 &&
+        (parsed[0] === "openai" || parsed[0] === "anthropic") &&
+        typeof parsed[1] === "string"
+      ) return [parsed[0], parsed[1]];
+    } catch {
+      // A stale or injected option is ignored below.
+    }
+    return null;
+  }
+
+  function populateModels(
+    preferredProvider = selectedProvider,
+    preferredModel = selectedModel,
+  ): void {
     const usable = providers.filter(({ models }) => models.length > 0);
-    providerSelect.replaceChildren(
-      ...usable.map(({ provider, display_name }) => option(provider, display_name)),
+    modelSelect.replaceChildren(
+      ...usable.map(({ provider, display_name, models }) => {
+        const group = document.createElement("optgroup");
+        group.label = display_name;
+        group.append(...models.map(({ id, display_name: modelName }) =>
+          option(modelChoiceValue(provider, id), modelName || id)));
+        return group;
+      }),
     );
-    selectedProvider = preferred && usable.some(({ provider }) => provider === preferred)
-      ? preferred
-      : usable[0]?.provider ?? null;
-    providerSelect.value = selectedProvider ?? "";
-    selectModelForProvider();
+    const preferred = usable.find(({ provider }) => provider === preferredProvider);
+    const selectedCapability = preferred ?? usable[0] ?? null;
+    selectedProvider = selectedCapability?.provider ?? null;
+    selectedModel = selectedCapability?.models.some(({ id }) => id === preferredModel)
+      ? preferredModel
+      : selectedCapability?.models[0]?.id ?? "";
+    modelSelect.value = selectedProvider
+      ? modelChoiceValue(selectedProvider, selectedModel)
+      : "";
+    selectThinkingForModel();
   }
 
   function applyHistory(value: ProChatHistory): void {
@@ -559,6 +645,7 @@ export function installProChat(
     }
     const generation = ++capabilityGeneration;
     const previousProvider = selectedProvider;
+    const previousModel = selectedModel;
     capabilitiesLoading = true;
     loadError = null;
     retryLoad = null;
@@ -569,7 +656,7 @@ export function installProChat(
       providers = value.providers.filter(
         ({ provider }) => provider === "openai" || provider === "anthropic",
       );
-      populateProviders(previousProvider);
+      populateModels(previousProvider, previousModel);
       if (!initialAvailabilityResolved) {
         initialAvailabilityResolved = true;
         options.onInitialAvailabilityResolved?.(
@@ -678,6 +765,16 @@ export function installProChat(
         (!visibleMessage.trim() || messageIssueCopy(visibleMessage) !== null))
     ) return;
 
+    let documentSnapshot: unknown;
+    try {
+      documentSnapshot = context.snapshot();
+    } catch (cause) {
+      loadError = `Could not read the current document: ${shortError(cause)}`;
+      retryLoad = null;
+      render();
+      return;
+    }
+
     const requestContext: RunningRequest = {
       documentId: context.id,
       provider: targetProvider,
@@ -698,6 +795,8 @@ export function installProChat(
       const result = await bridge.start(
         {
           document_id: context.id,
+          document_title: context.title,
+          document: documentSnapshot,
           provider: targetProvider,
           expected_revision: history.revision,
           model: targetModel,
@@ -867,19 +966,38 @@ export function installProChat(
   }
 
   listen(openSettings, "click", () => options.onOpenSettings?.());
-  listen(controls, "submit", (event) => event.preventDefault());
-  listen(providerSelect, "change", () => {
-    selectedProvider = providerSelect.value as ProChatProvider;
-    selectedModel = "";
-    selectedThinking = "default";
-    selectModelForProvider();
-    consent.checked = consentedProviders.has(selectedProvider);
-    void loadHistory();
+  listen(controlsSummary, "click", (event) => {
+    if (controlsSummary.getAttribute("aria-disabled") !== "true") return;
+    event.preventDefault();
+  });
+  listen(controls, "keydown", (event) => {
+    if (event.key !== "Escape" || !controls.open) return;
+    event.preventDefault();
+    controls.open = false;
+    controlsSummary.focus();
   });
   listen(modelSelect, "change", () => {
-    selectedModel = modelSelect.value;
+    const choice = readModelChoice(modelSelect.value);
+    if (!choice) {
+      populateModels();
+      render();
+      return;
+    }
+    const [nextProvider, nextModel] = choice;
+    const nextCapability = providers.find(({ provider }) => provider === nextProvider);
+    if (!nextCapability?.models.some(({ id }) => id === nextModel)) {
+      populateModels();
+      render();
+      return;
+    }
+    const providerChanged = selectedProvider !== nextProvider;
+    selectedProvider = nextProvider;
+    selectedModel = nextModel;
+    selectedThinking = "default";
+    consent.checked = consentedProviders.has(selectedProvider);
     selectThinkingForModel("default");
-    render();
+    if (providerChanged) void loadHistory();
+    else render();
   });
   listen(thinkingSelect, "change", () => {
     selectedThinking = thinkingSelect.value as ProChatThinking;

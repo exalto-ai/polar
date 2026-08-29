@@ -78,6 +78,9 @@ export type ProChatHistory = {
 
 export type ProChatStartRequest = {
   document_id: string;
+  document_title: string;
+  /** Exact live ProseMirror tree. Native code validates and projects it to Markdown. */
+  document: unknown;
   provider: ProChatProvider;
   expected_revision: number;
   model: string;
@@ -131,11 +134,14 @@ export type ProChatBridge = {
   ): Promise<ProChatHistory>;
 };
 
-export const PRO_CHAT_DISCLOSURE_VERSION = 1;
+export const PRO_CHAT_DISCLOSURE_VERSION = 2;
 
 /**
- * Provider credentials stay native. The webview supplies only the conversation
- * people can see, their selected controls, and a versioned disclosure.
+ * Provider credentials stay native. The webview supplies the current live
+ * document tree, the conversation people can see, their selected controls,
+ * and a versioned disclosure. Native code validates the tree and sends a
+ * bounded Markdown projection, never the internal document identifier or an
+ * native save path, to the selected provider.
  */
 export function tauriProChatBridge(): ProChatBridge {
   return {

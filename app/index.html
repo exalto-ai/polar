@@ -177,20 +177,20 @@
             <button class="text-button" id="pro-chat-open-settings" type="button">Show provider settings</button>
           </div>
 
-          <form class="pro-chat-controls" id="pro-chat-controls">
-            <label for="pro-chat-provider">Provider
-              <select id="pro-chat-provider" autocomplete="off" disabled></select>
-            </label>
-            <label for="pro-chat-model">Model
-              <select id="pro-chat-model" autocomplete="off" disabled></select>
-            </label>
-            <label for="pro-chat-thinking">Thinking
-              <select id="pro-chat-thinking" autocomplete="off" disabled></select>
-            </label>
-          </form>
+          <details class="pro-chat-controls" id="pro-chat-controls">
+            <summary><span class="sr-only">Chat model settings: </span><span id="pro-chat-selection-summary">Choose a model</span></summary>
+            <div class="pro-chat-control-panel">
+              <label for="pro-chat-model">Model
+                <select id="pro-chat-model" autocomplete="off" disabled></select>
+              </label>
+              <label for="pro-chat-thinking">Thinking
+                <select id="pro-chat-thinking" autocomplete="off" disabled></select>
+              </label>
+            </div>
+          </details>
 
           <p class="pro-chat-loading" id="pro-chat-loading" role="status" hidden>Loading this conversation…</p>
-          <p class="pro-chat-empty" id="pro-chat-empty" hidden>Start a conversation for this document. Nothing from the editor is included automatically.</p>
+          <p class="pro-chat-empty" id="pro-chat-empty" hidden>Ask about this document or request a revision.</p>
           <ol class="pro-chat-messages" id="pro-chat-messages" role="log" aria-live="off" aria-label="Conversation" tabindex="0"></ol>
 
           <div class="pro-chat-clear-confirmation" id="pro-chat-clear-confirmation" hidden>
@@ -211,11 +211,12 @@
             <label class="sr-only" for="pro-chat-message">Message the selected AI provider</label>
             <textarea id="pro-chat-message" rows="3" maxlength="16384" placeholder="Write a message…" aria-describedby="pro-chat-sharing pro-chat-consent-copy pro-chat-message-issue" disabled></textarea>
             <p class="pro-chat-message-issue" id="pro-chat-message-issue" role="status" hidden></p>
-            <p class="pro-chat-sharing" id="pro-chat-sharing">Only the message shown here will be sent. No document text or files are added.</p>
+            <p class="pro-chat-sharing" id="pro-chat-sharing">Your current document, including its title, formatting, and links, and this visible chat will be sent with your message.</p>
             <label class="pro-chat-consent" for="pro-chat-consent">
               <input id="pro-chat-consent" type="checkbox" disabled />
-              <span id="pro-chat-consent-copy">I agree to send this visible chat to my provider. API charges may apply.</span>
+              <span id="pro-chat-consent-copy">I agree to send this document’s title and contents, including formatting and links, and visible chat to my provider. API charges may apply.</span>
             </label>
+            <p class="pro-chat-billing-reminder" id="pro-chat-billing-reminder" hidden>Sends this document’s title and contents with each request. Uses your API key. Provider charges may apply.</p>
             <div class="pro-chat-composer-actions">
               <span class="pro-chat-shortcut">Enter to send · Shift Enter for a new line</span>
               <button class="primary-button compact" id="pro-chat-send" type="submit" disabled>Send</button>
