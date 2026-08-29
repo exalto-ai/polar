@@ -39,28 +39,24 @@ pub struct Caller {
     /// Groups one agent turn so it can be reverted as a unit.
     #[serde(default)]
     pub session: Option<String>,
-    /// `"human"` or `"agent"`, defaulting to agent because almost every caller
-    /// is one.
-    ///
-    /// The window is the exception: it creates and trashes documents through
-    /// these same tools, and calling that an agent made a document the user
-    /// just made look like an agent's work in the provenance rails.
+    /// Legacy wire field accepted for older clients. Public MCP always records
+    /// and presents its caller as reported AI tool use, regardless of this
+    /// value. The local window uses a separate editor-capability route for
+    /// observed lifecycle actions.
     #[serde(default)]
     pub kind: Option<String>,
 }
 
 impl Caller {
     fn actor(&self) -> ActorRef {
-        if self.kind.as_deref() == Some("human") {
-            ActorRef::human(&self.agent)
-        } else {
-            ActorRef::agent(&self.agent, self.model.as_deref(), self.session.as_deref())
-        }
+        // Read and deliberately ignore the old field so its continued wire
+        // compatibility cannot affect how public MCP activity is classified.
+        let _ = self.kind.as_deref();
+        ActorRef::agent(&self.agent, self.model.as_deref(), self.session.as_deref())
     }
 
     /// MCP decides the provenance class at the transport boundary. The legacy
-    /// `kind` field may still shape compatibility rails, but it cannot promote
-    /// an external tool call to locally observed or verified provenance.
+    /// `kind` field cannot promote or hide an external tool call.
     fn mutation_context(&self) -> MutationContext {
         MutationContext::mcp_reported(self.agent.clone(), None, None, self.model.clone())
     }

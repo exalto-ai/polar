@@ -112,9 +112,9 @@ The implementation must preserve all of these:
    person who clicked Accept.
 8. Different ingress sources are never coalesced into one provenance event.
 9. Provider and model metadata live on the event or run, not on a mutable actor row.
-10. The public MCP caller cannot create a trusted human provenance claim or choose the assurance
-    level. Its legacy block-rail actor kind remains compatibility metadata until connection
-    identities replace caller-supplied actors.
+10. The public MCP caller cannot create a trusted human provenance claim, hide its AI activity by
+    choosing the legacy human or editor kind, or choose the assurance level. The legacy kind field
+    remains accepted on the wire until connection identities replace caller-supplied actors.
 11. Old documents are `legacy unknown` unless surviving provenance can be rebuilt without
     inventing facts.
 12. A failed mutation commits neither the document update nor partial provenance.
@@ -273,8 +273,8 @@ The daemon assigns assurance from the trusted ingress path:
 - relay peer: peer-reported until stronger authentication exists.
 
 Caller-controlled tool arguments never select `verified` or another trusted provenance class.
-The older block-rail actor kind is self-reported compatibility metadata and is not used to
-derive the new event ingress or assurance.
+The older block-rail actor kind remains accepted for wire compatibility, but public MCP ignores
+it for both activity actors and semantic provenance.
 
 ### Foundation exposure boundary
 
@@ -287,11 +287,11 @@ the signing and anchoring work described below.
 
 The current native File > Open and document-lifecycle controls inherited from PR #9 still call
 the public `create_document` tool. The foundation therefore records visible text from that
-existing import path conservatively as MCP and reported, even when the compatibility actor says
-human. The `Imported` sync classification is implemented and tested, but a following consumer UI
-pull request must move native import onto the editor-only capability before showing `Imported` to
-people. This pull request also does not ship onboarding, the reviewer sidebar, suggestions, API
-keys, or a new provenance visualization.
+existing import path conservatively as MCP and reported AI activity. The `Imported` sync
+classification is implemented and tested, but a following consumer UI pull request must move
+native import onto the editor-only capability before showing `Imported` to people. This pull
+request also does not ship onboarding, the reviewer sidebar, suggestions, API keys, or a new
+provenance visualization.
 
 ## 8. Suggestions and multiple reviewers
 

@@ -86,32 +86,35 @@ fn an_agent_drives_the_daemon_over_mcp() {
 }
 
 #[test]
-fn an_mcp_caller_cannot_promote_reported_provenance_with_kind_human() {
+fn an_mcp_caller_cannot_spoof_a_local_actor_kind() {
     let daemon = Daemon::start();
     daemon.connect();
 
-    let doc = daemon.call(
-        "create_document",
-        serde_json::json!({
-            "title": "Reported review",
-            "agent": "Claude",
-            "model": "claimed-model",
-            "session": "spoof-test",
-            "kind": "human"
-        }),
-    );
-    let doc_id = doc["doc_id"].as_str().expect("doc_id");
+    for legacy_kind in ["human", "editor"] {
+        let doc = daemon.call(
+            "create_document",
+            serde_json::json!({
+                "title": format!("Reported {legacy_kind} review"),
+                "agent": "Claude",
+                "model": "claimed-model",
+                "session": format!("spoof-{legacy_kind}"),
+                "kind": legacy_kind
+            }),
+        );
+        let doc_id = doc["doc_id"].as_str().expect("doc_id");
 
-    // The legacy actor rail still honors `kind` while it remains compatible.
-    let actors = daemon.call("document_actors", serde_json::json!({ "doc_id": doc_id }));
-    assert_eq!(actors["actors"][0]["kind"], "human");
+        // Public MCP is AI ingress even when an older caller sends a local
+        // actor label. It must remain visible in the app's agent activity list.
+        let actors = daemon.call("document_actors", serde_json::json!({ "doc_id": doc_id }));
+        assert_eq!(actors["actors"][0]["kind"], "agent");
 
-    // Provenance is owned by the MCP transport, not by caller arguments.
-    let lineage = daemon.call("document_lineage", serde_json::json!({ "doc_id": doc_id }));
-    let source = &lineage["summary"]["contributions"][0]["source"];
-    assert_eq!(source["label"], "Claude (reported)");
-    assert_eq!(source["ingress"], "mcp");
-    assert_eq!(source["assurance"], "reported");
+        // Provenance is owned by the MCP transport, not by caller arguments.
+        let lineage = daemon.call("document_lineage", serde_json::json!({ "doc_id": doc_id }));
+        let source = &lineage["summary"]["contributions"][0]["source"];
+        assert_eq!(source["label"], "Claude (reported)");
+        assert_eq!(source["ingress"], "mcp");
+        assert_eq!(source["assurance"], "reported");
+    }
 }
 
 #[test]
