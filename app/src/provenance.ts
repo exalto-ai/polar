@@ -116,6 +116,11 @@ function ago(timestamp: number): string {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
+/** Consumer wording for model metadata supplied by an external tool. */
+export function toolReportedModelLabel(model: string): string {
+  return `Model reported by tool: ${model}`;
+}
+
 /**
  * What the label says.
  *
@@ -125,16 +130,19 @@ function ago(timestamp: number): string {
  */
 export function labelFor(block: BlockAttribution, selfId: string): string {
   const who = block.touched_by === selfId ? "You" : block.display_name || block.touched_by;
-  const model = block.touched_by !== selfId && block.model ? ` · ${block.model}` : "";
+  const model = block.touched_by !== selfId && block.model
+    ? ` · ${toolReportedModelLabel(block.model)}`
+    : "";
   const drafted =
     block.created_by !== block.touched_by
-      ? `, drafted by ${block.created_by === selfId ? "you" : shortName(block.created_by)}`
+      ? `, drafted by ${block.created_by === selfId ? "you" : creatorLabel(block.created_by)}`
       : "";
   return `${who}${model} · ${ago(block.touched_at)}${drafted}`;
 }
 
-/** `agent:opus` reads as `opus`; the prefix is plumbing, not a name. */
-function shortName(actorId: string): string {
+/** Durable reviewer IDs are plumbing, so never expose them as a person's name. */
+function creatorLabel(actorId: string): string {
+  if (actorId.startsWith("reviewer:")) return "an AI reviewer";
   const at = actorId.indexOf(":");
   return at === -1 ? actorId : actorId.slice(at + 1);
 }

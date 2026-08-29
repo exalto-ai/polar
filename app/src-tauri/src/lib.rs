@@ -608,9 +608,11 @@ fn new_window(
 /// or unauthenticated record is surfaced for the developer to resolve; this
 /// process never signals or silently replaces another possible store owner.
 fn ensure_daemon() -> Result<Daemon, String> {
+    let thoughtd =
+        find_binary("thoughtd").ok_or_else(|| "could not find the thoughtd binary".to_string())?;
     if let Some(daemon) = discovery::read() {
         if discovery::authenticated_reachable(&daemon)
-            && discovery::editor_authenticated_reachable(&daemon)
+            && discovery::editor_authenticated_reachable(&daemon, &thoughtd)
         {
             return Ok(daemon);
         }
@@ -627,9 +629,6 @@ fn ensure_daemon() -> Result<Daemon, String> {
         ));
     }
 
-    let thoughtd =
-        find_binary("thoughtd").ok_or_else(|| "could not find the thoughtd binary".to_string())?;
-
     Command::new(&thoughtd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -641,7 +640,7 @@ fn ensure_daemon() -> Result<Daemon, String> {
     while Instant::now() < deadline {
         if let Some(daemon) = discovery::read()
             && discovery::authenticated_reachable(&daemon)
-            && discovery::editor_authenticated_reachable(&daemon)
+            && discovery::editor_authenticated_reachable(&daemon, &thoughtd)
         {
             return Ok(daemon);
         }
@@ -785,6 +784,7 @@ mod tests {
         let daemon = thoughtd::discovery::Daemon {
             url: "http://127.0.0.1:1234/mcp".into(),
             protocol_version: thoughtd::discovery::PROTOCOL_VERSION,
+            pid: 4321,
             token: "mcp-only".into(),
             editor_token: "editor-only".into(),
         };

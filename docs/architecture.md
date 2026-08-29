@@ -1,6 +1,8 @@
-# Proof of Thought — Architecture (v0)
+# Proof of Thought: Architecture (v0)
 
-**Status:** draft, nothing built yet · **Date:** 2026-08-22
+**Status:** living design and implementation record. The daemon, editor, anchored provenance,
+onboarding shell, and reviewer connection core are built. Relay sharing, suggestions, Pro, and Seal
+remain future work. **Updated:** 2026-08-26
 
 A local-first macOS writing app. Individual documents (no folders in MVP), real-time
 collaboration between humans *and* agents, fully functional offline, with a
@@ -59,23 +61,37 @@ choice, not a storage one.
 No attempt to model rich text as rows. SQLite holds binary Yjs update frames, periodic
 compacted snapshots, actor records, and an FTS index over the markdown projection.
 
-### AD-5 — Agent edits are anchored, surgical, and default to a suggestion layer
+### AD-5: Agent edits are anchored and surgical; durable reviewers are read-only until suggestions
 
 There is deliberately **no `update_document(id, full_markdown)` tool**. Whole-document
 replacement produces a diff touching every block, destroys concurrent human edits, and
 makes attribution meaningless. Agent tools address blocks by ID and edit ranges (§4).
 
-Agents write into a suggestion layer by default; direct write is a per-session grant.
-Suggestions live in the document CRDT so they replicate to other peers.
+The later suggestions pull request will make reviewer writes land in a replicated proposal layer.
+Until then, durable reviewer routes are read-only. Direct write remains reserved for an explicit,
+expiring per-session grant, and this release does not implement such a grant.
 
-### AD-6 — Actor identity now, authentication later
+### AD-6: Stable actors first, durable reviewer connections now
 
-Every device and every agent has a stable actor ID, kind, and display name. Self-asserted,
-unverified, no accounts. This is *not* auth — it's what makes attribution, per-actor undo,
-and accept/reject possible.
+Every device and every reviewer still needs a stable actor ID so attribution, per-actor undo,
+and later accept or reject decisions have something durable to reference. The original MVP used
+a caller-supplied agent name for that ID. Schema V4 replaces that rule for local MCP reviewers:
+the daemon creates one immutable connection ID for each configured reviewer, authenticates every
+request with that connection's unique credential, and derives the actor ID from the connection.
+Two reviewers may therefore use the same display name or the same app without becoming one actor.
 
-**Why now:** retrofitting identity into an op log that lacks it leaves all pre-migration
-history permanently anonymous.
+The connection authenticates a local Proof of Thought ingress, not the upstream provider. The
+selected app is a configured routing label, not runtime app identity. A model string is retained on
+an event only when that specific tool call supplies it, and never falls back to the last model seen
+on the connection. The private conversation outside the tool boundary is not observed. None of
+these facts are promoted to provider-verified evidence.
+Legacy actor rows and future relay peer descriptors remain self-asserted compatibility data unless
+a stronger transport authenticates them.
+
+**Why now:** retrofitting identity into an op log that lacks it leaves old history anonymous, while
+continuing to trust caller-selected names lets one reviewer take another reviewer's identity and
+permissions. Stable connection IDs solve the local MCP case without inventing facts about old
+events.
 
 ### AD-7 — Capability-URL sharing over a store-and-forward relay; no E2E in MVP
 
@@ -197,7 +213,7 @@ CREATE TABLE snapshots (
   PRIMARY KEY (doc_id, through_seq)
 );
 
--- Self-asserted in MVP. See AD-6.
+-- Legacy actor metadata. Configured local reviewers derive actor IDs from AD-21 connections.
 CREATE TABLE actors (
   id           TEXT PRIMARY KEY,
   kind         TEXT NOT NULL,            -- 'human' | 'agent'
@@ -234,6 +250,15 @@ CREATE VIRTUAL TABLE doc_fts USING fts5(
 );
 ```
 
+Schema V4 adds a mutable `reviewer_connections` authorization row, a document allowlist, and an
+append-only lifecycle-event table. The connection row keeps the immutable connection ID, configured
+client and provider, current display label, current or all-document scope, required read
+permission, optimistic revision, credential hashes, lease timestamps, failure code, and revocation
+time. Raw credentials are never database columns. Lifecycle snapshots contain no credential
+material and freeze the exact selected-document allowlist that applied to that transition.
+Provenance events continue to freeze the connection ID and labels that applied when each document
+change was recorded.
+
 ---
 
 ## 4. MCP tool surface
@@ -265,7 +290,7 @@ much as for the window: "who wrote this paragraph" is a question an agent asks b
 rewriting someone's work. A block with no entry is unattributed, which is not the same as
 belonging to the caller (M2.8).
 
-**Write** — every call takes the `version` from the last read.
+**Planned suggestion operations** will take the `version` from the last read.
 
 ```
 replace_block(doc_id, block_id, markdown, version)
@@ -275,12 +300,9 @@ replace_text(doc_id, block_id, find, replace, occurrence?, version)
 comment(doc_id, block_id, body)
 ```
 
-On a stale `version`, the daemon **warns and proceeds** rather than rejecting — the CRDT
-merges correctly regardless; the risk is semantic (the agent reasoned about text that has
-since changed), so the right response is to tell the agent what moved, not to fail the write.
-
-In suggestion mode (the default) every write lands in the `suggestions` map for
-accept/reject instead of mutating `content`. Direct write is granted per session.
+These operations are not exposed by the connection-core release. When suggestion mode ships, each
+operation will land in the `suggestions` map for Accept or Reject instead of immediately mutating
+`content`.
 
 ---
 
@@ -400,7 +422,7 @@ writes never touch the text layer at all.
 
 Consequence: an IME failure is a bridge bug, not a reason to abandon the webview.
 
-### AD-15 — Direct writes for local unshared docs, suggestion mode once shared
+### AD-15: Direct writes for local unshared docs, future suggestion mode once shared
 Per-session override either way. The reason to gate agent writes is other people, not the
 agent; gating solo local editing is friction with no beneficiary.
 
@@ -422,7 +444,8 @@ transaction ranges support V2 exact evidence and when the safe V1 fallback remai
 
 The append-only provenance event and delta ledger is evidence. Current lineage spans are a
 derived read model that can be rebuilt from that ledger. Actor, ingress, and assurance are
-separate dimensions, so `Pasted`, `Claude (reported)`, and `Claude (verified)` say exactly
+separate dimensions, so `Pasted`, `Configured for Claude Code (reported)`, and
+`Claude (verified)` say exactly
 what was observed without turning a transport signal into an authorship claim. The public
 MCP surface cannot create a trusted human provenance claim or choose a verified classification.
 Its older block-rail actor kind remains self-reported compatibility metadata.
@@ -489,9 +512,58 @@ signing, notarization, and packaged-executable checks to be repeated. The bundle
 and application-data paths stay stable so a package rename does not strand documents or
 daemon discovery state.
 
+### AD-21: Reviewer authorization is connection-bound and immediately revocable
+
+A configured reviewer route has one durable connection ID, one unique bearer credential, explicit
+document scope, and required read permission. Durable reviewer routes are read-only until the
+suggestion layer ships. On
+macOS the raw credential
+lives in the login Keychain. SQLite stores only SHA-256 credential hashes, and the webview, setup
+command, discovery file, logs, and provenance records never receive the raw value. Non-macOS and
+automated development may opt into a private file-backed credential store, but that is not the
+consumer credential path.
+
+The person sees a friendly "Configured for" app route and label, while Proof of Thought authorizes
+the opaque ID. ChatGPT desktop and Codex can share MCP configuration, so the route does not prove
+which process invoked it.
+Labels can change and collide, so using one as identity would let two reviewers become
+indistinguishable. A unique credential for each ID also lets the person reset or revoke one
+reviewer without disconnecting the others.
+
+The STDIO shim requires `--connection <id>`, retrieves that connection's credential inside native
+code, and has no no-argument shared-write fallback. HTTP middleware resolves the credential to one
+principal on every request. MCP session IDs are then bound to that same principal, so another
+connection cannot reuse the session to gain its identity. Tool handlers re-read current permissions
+and hold an authorization gate for the complete operation. Rename, permission change, reset, and
+revoke take the write side of that gate, which means a completed revocation cannot race a later
+authorized mutation.
+
+The lifecycle distinguishes `configured`, `connected`, `disconnected`, `failed`, and `revoked`.
+Authenticated traffic renews a short lease. Each shim process has a random instance ID, so one of
+two live processes can exit without marking the other disconnected. A clean final exit marks the
+connection disconnected, and daemon restart clears stale connected state. Reset rotates only the
+credential, returns the route to disconnected, and clears its sessions and process leases while
+preserving the connection ID, permissions, label, and history. A principal authenticated before the
+reset must revalidate its credential under the operation gate and cannot perform a later mutation.
+Revoke makes the connection immutable, rejects later requests, removes its native credential when
+possible, and preserves its earlier provenance.
+
+The process-lifetime MCP capability used by the local editor remains a separate, read-only internal
+principal. It supports the window's list, search, and provenance reads, but it cannot mutate a
+document and is never emitted in a reviewer setup command. The editor sync capability remains the
+only route that can submit locally observed editor evidence. A native reviewer shim may use that
+capability only to report a closed set of connection failures, never to mutate documents or submit
+reviewer evidence.
+
+These permissions constrain cooperative, connection-specific routing through the Proof of Thought
+MCP surface. Codex, Claude Code, or another process running as the same user may already have
+separate shell or filesystem authority outside Proof of Thought. The permissions do not sandbox
+those processes or revoke access granted elsewhere. Future Pro mode adds provider-authenticated
+request and response evidence, not a stronger local-process sandbox.
+
 ## 7. Explicit non-goals for MVP
 
-Folders and hierarchy · accounts and authentication · end-to-end encryption · mobile ·
+Folders and hierarchy · user accounts and remote provider authentication · end-to-end encryption · mobile ·
 plugins · version-history UI · `.md` file mirroring on disk.
 
 ---
@@ -703,16 +775,35 @@ streamable-HTTP server. Corrections found while building:
 * **Reindex on every mutation**, not on snapshot as M1.4 said — serializing a document and
   writing two rows is cheap, and agents reading a stale index is not.
 
-HTTP on localhost. The port and separate MCP/editor capabilities live in
+HTTP on localhost. The port and separate internal MCP/editor capabilities live in
 `~/Library/Application Support/ai.exalto.thought/daemon.json`, published atomically with mode
 `0600`. Any local process can reach a localhost port, and documents are the user's private writing.
-`thought-mcp-stdio` reads that file, proxies stdio to HTTP, and spawns `thoughtd` only when
-nothing is published (AD-10). **Built.** Discovery first checks an exact daemon identity and
-protocol response without disclosing a capability, then verifies each route with only its own
-bearer. An unexpected status, body, protocol, or authentication result is rejected. The error is
-reported for the developer to resolve rather than signalling or silently replacing a process
-that may still own the store. Racing fresh launches are made safe by the process-lifetime store
-lock.
+The internal MCP capability is read-only and exists for the local window. The editor capability
+authorizes sync and editor-only lifecycle operations. Neither is a reviewer identity.
+
+Each reviewer instead has a durable database row and a unique raw credential in native storage.
+`thought-mcp-stdio` requires the stable connection ID, retrieves that credential without exposing
+it to the webview or setup text, proxies stdio to HTTP, and spawns `thoughtd` only when nothing is
+published (AD-10). Discovery first checks an exact daemon identity and protocol response, then
+reviewer traffic authenticates with its own credential. An unexpected status, body, protocol, or
+authentication result is rejected. A native failure report carries only a process identity and the
+schema-controlled failure code. The daemon binds that process to the current non-secret credential
+generation, refreshes the short-lived binding only after reviewer authentication, and consumes it
+on report. Reset and disconnect clear the binding under the lifecycle gate, so a pre-reset, exited,
+or abandoned shim cannot overwrite the new disconnected state or exhaust reporter capacity. Before
+any editor bearer is sent, the caller verifies the exact unauthenticated daemon identity, the PID's
+ownership of the published listener, and the exact `thoughtd` executable path.
+
+Generated MCP server names use the machine namespace `thought-<connection suffix>`. This changes
+the unreleased stacked setup command from the earlier `proof-of-thought-<connection suffix>` form.
+Anyone testing an earlier stacked build must remove the old client entry and copy the replacement
+command. There is no released setup-command compatibility cost, but preview configurations do not
+migrate automatically.
+
+MCP responses must use JSON-RPC 2.0, exactly match the request
+ID, and contain exactly one of `result` or `error`. Empty, malformed, or uncorrelated 2xx responses
+become sticky protocol failures and JSON-RPC errors instead of leaving the stdio client waiting.
+Reviewer health does not clear that state. Only a later correlated MCP response does.
 
 ```
 list_documents(query?, limit?)   -> [{doc_id, title, updated_at, word_count}]
@@ -731,8 +822,10 @@ the CRDT merges correctly regardless, so the risk is semantic rather than struct
 failing the call punishes the agent for something that is not a conflict. The response
 carries what moved.
 
-Every call is attributed to an `actor_id` derived from the MCP session, and operations
-within one turn share a `session_id` so per-run revert has something to key on (AD-11).
+Every reviewer call is attributed to an `actor_id` derived from its durable connection ID. A client
+may still report a model and turn-level `session_id`, but it cannot choose the connection identity,
+permissions, provider, or assurance. MCP transport sessions are separately bound to the authenticated
+principal so a session created by one connection cannot be reused by another.
 
 ## M1 — complete, 2026-08-23
 
@@ -750,10 +843,11 @@ direct writes.
 
 1. ~~Does `yrs` expose branch IDs publicly?~~ **Resolved** — see M1.3. IDs are stable across
    edits and identical across replicas.
-2. ~~Does the actor identity survive an MCP session cleanly?~~ **Resolved** — identity derives
-   from the client-supplied `agent` name, never the connection, so a reconnecting agent stays
-   one actor. Every write names its caller; there is no anonymous edit path, because an
-   unattributed change cannot appear in the activity feed or be reverted with its run.
+2. ~~Does the actor identity survive an MCP session cleanly?~~ **Resolved.** Local reviewer
+   identity derives from an immutable connection ID and survives reconnects, credential reset, and
+   display-name changes. Legacy `agent` and `kind` fields remain accepted for wire compatibility but
+   cannot select attribution or assurance. Every write still names its authenticated connection, so
+   it can appear in activity and later suggestion decisions without trusting a caller-selected name.
 3. ~~Table round-tripping.~~ **Resolved** — tables stay in v0. They round-trip over 20,000
    generated documents under two constraints, both pinned in `table_constraints_are_pinned`:
    tables must be rectangular (GFM pads every row to the header width), and the first row is
@@ -1036,12 +1130,11 @@ work perfectly on one machine and go blank the moment a document is shared.
 So `UPDATE` grows an actor descriptor: id, kind, display name, model. The
 receiving daemon records it in its own log rather than inventing `remote`.
 
-The uncomfortable part, stated plainly: **this is self-asserted and spoofable.**
-A peer can claim any name. That is consistent with AD-6 — identity, not
-authentication — but it stops being an internal detail the moment someone else's
-name appears in your window. The UI has to distinguish "this machine saw this
-person write it" from "a peer told me this person wrote it", or it is quietly
-lying. Authentication is the answer eventually; saying so is the answer now.
+The uncomfortable part, stated plainly: **relay identity is self-asserted and spoofable.**
+A peer can claim any name. AD-21 authenticates configured local reviewer connections, but that local
+credential does not authenticate a future relay peer. The UI therefore has to distinguish "this
+machine saw a configured local connection perform this tool action" from "a peer reported this
+person or process," or it is quietly lying. Relay authentication remains future work.
 
 ## M3.4 — The daemon's relay client
 
@@ -1061,7 +1154,7 @@ from sharing with a person meaning sharing with how they work.
 
 ## M3.6 — Not in M3
 
-No accounts, no read-only links, no revocation, no E2E.
+No relay accounts, no read-only share links, no share-link revocation, and no E2E.
 
 ## The cost of deferring encryption, recorded
 

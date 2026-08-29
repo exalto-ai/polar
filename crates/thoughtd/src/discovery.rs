@@ -4,14 +4,17 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Discovery and local sync protocol understood by this daemon build.
 ///
-/// Version 3 adds ordered anchored editor batches. Legacy sourced updates
-/// remain accepted as the unanchored fallback.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// Version 4 adds durable reviewer identities and removes shared external MCP
+/// write authority. Legacy sourced updates remain accepted as the unanchored
+/// provenance fallback.
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const IDENTITY_PATH: &str = "/health/identity";
 pub const MCP_HEALTH_PATH: &str = "/health/mcp";
 pub const EDITOR_HEALTH_PATH: &str = "/health/editor";
@@ -118,21 +121,35 @@ pub fn random_token() -> io::Result<String> {
 pub struct Daemon {
     pub url: String,
     pub protocol_version: u32,
+    /// Process that published this endpoint. Editor-capability callers bind
+    /// this PID to the listening socket and expected sidecar executable before
+    /// sending the bearer.
+    pub pid: u32,
     /// Public MCP capability, kept as `token` for existing MCP integrations.
     pub token: String,
     /// Private editor-sync capability. Never hand this to an MCP integration.
     pub editor_token: String,
 }
 
-fn health_url(daemon: &Daemon, path: &str) -> Option<String> {
-    daemon
-        .url
-        .strip_suffix("/mcp")
-        .map(|base| format!("{base}{path}"))
+fn loopback_base(url: &str) -> Option<&str> {
+    let base = url.strip_suffix("/mcp")?;
+    let port = base.strip_prefix("http://127.0.0.1:")?;
+    if port.is_empty() || port.contains('/') || port.parse::<u16>().ok()? == 0 {
+        return None;
+    }
+    Some(base)
 }
 
-fn probe_identity(daemon: &Daemon) -> bool {
-    let Some(url) = health_url(daemon, IDENTITY_PATH) else {
+fn health_url_for(url: &str, path: &str) -> Option<String> {
+    loopback_base(url).map(|base| format!("{base}{path}"))
+}
+
+fn health_url(daemon: &Daemon, path: &str) -> Option<String> {
+    health_url_for(&daemon.url, path)
+}
+
+fn probe_identity_version(url: &str, protocol_version: u32) -> bool {
+    let Some(url) = health_url_for(url, IDENTITY_PATH) else {
         return false;
     };
     let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -149,14 +166,28 @@ fn probe_identity(daemon: &Daemon) -> bool {
     let Ok(body) = response.body_mut().read_to_string() else {
         return false;
     };
-    serde_json::from_str::<IdentityResponse>(&body)
-        .is_ok_and(|actual| actual == IdentityResponse::current())
+    serde_json::from_str::<IdentityResponse>(&body).is_ok_and(|actual| {
+        actual.service == HEALTH_SERVICE && actual.protocol_version == protocol_version
+    })
+}
+
+fn probe_identity(daemon: &Daemon) -> bool {
+    probe_identity_version(&daemon.url, PROTOCOL_VERSION)
 }
 
 fn probe_health(daemon: &Daemon, path: &str, token: &str, expected: &HealthResponse) -> bool {
     if !probe_identity(daemon) {
         return false;
     }
+    probe_capability_health(daemon, path, token, expected)
+}
+
+fn probe_capability_health(
+    daemon: &Daemon,
+    path: &str,
+    token: &str,
+    expected: &HealthResponse,
+) -> bool {
     let Some(url) = health_url(daemon, path) else {
         return false;
     };
@@ -192,14 +223,140 @@ pub fn authenticated_reachable(daemon: &Daemon) -> bool {
     )
 }
 
-/// Confirm the editor capability on its distinct authenticated health route.
-pub fn editor_authenticated_reachable(daemon: &Daemon) -> bool {
-    probe_health(
+/// Confirm the editor capability only after the PID in discovery is proven to
+/// own the loopback listener and execute the exact expected sidecar. Public
+/// identity is checked first, but the editor bearer is not sent until both OS
+/// checks pass.
+pub fn editor_authenticated_reachable(daemon: &Daemon, expected_executable: &Path) -> bool {
+    if !probe_identity(daemon)
+        || !process_owns_published_listener(daemon.pid, &daemon.url)
+        || !process_is_expected_daemon(daemon.pid, expected_executable)
+    {
+        return false;
+    }
+    probe_capability_health(
         daemon,
         EDITOR_HEALTH_PATH,
         &daemon.editor_token,
         &HealthResponse::editor(),
     )
+}
+
+#[cfg(target_os = "macos")]
+fn process_executable(pid: u32) -> Option<PathBuf> {
+    use std::ffi::{CStr, c_int, c_void};
+
+    unsafe extern "C" {
+        fn proc_pidpath(pid: c_int, buffer: *mut c_void, buffer_size: u32) -> c_int;
+    }
+
+    let mut buffer = vec![0_i8; 4096];
+    let length = unsafe {
+        proc_pidpath(
+            c_int::try_from(pid).ok()?,
+            buffer.as_mut_ptr().cast(),
+            u32::try_from(buffer.len()).ok()?,
+        )
+    };
+    if length <= 0 {
+        return None;
+    }
+    let path = unsafe { CStr::from_ptr(buffer.as_ptr()) };
+    Some(PathBuf::from(path.to_string_lossy().into_owned()))
+}
+
+#[cfg(target_os = "linux")]
+fn process_executable(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_executable(_: u32) -> Option<PathBuf> {
+    None
+}
+
+fn process_is_expected_daemon(pid: u32, expected: &Path) -> bool {
+    process_executable(pid)
+        .and_then(|path| path.canonicalize().ok())
+        .zip(expected.canonicalize().ok())
+        .is_some_and(|(actual, expected)| actual == expected)
+}
+
+fn published_loopback_port(url: &str) -> Option<u16> {
+    loopback_base(url)?
+        .strip_prefix("http://127.0.0.1:")?
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn process_owns_published_listener(pid: u32, url: &str) -> bool {
+    let Some(port) = published_loopback_port(url) else {
+        return false;
+    };
+    let output = Command::new("/usr/sbin/lsof")
+        .args([
+            "-nP".to_string(),
+            "-a".to_string(),
+            "-p".to_string(),
+            pid.to_string(),
+            format!("-iTCP@127.0.0.1:{port}"),
+            "-sTCP:LISTEN".to_string(),
+            "-Fp".to_string(),
+        ])
+        .output();
+    output.is_ok_and(|output| {
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == format!("p{pid}"))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn process_owns_published_listener(pid: u32, url: &str) -> bool {
+    let Some(port) = published_loopback_port(url) else {
+        return false;
+    };
+    let expected_address = format!("0100007F:{port:04X}");
+    let Ok(tcp) = std::fs::read_to_string("/proc/net/tcp") else {
+        return false;
+    };
+    let listening_inodes = tcp
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+            if fields.get(1).copied() == Some(expected_address.as_str())
+                && fields.get(3).copied() == Some("0A")
+            {
+                fields.get(9).copied()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if listening_inodes.is_empty() {
+        return false;
+    }
+    let Ok(descriptors) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    descriptors.filter_map(Result::ok).any(|descriptor| {
+        std::fs::read_link(descriptor.path())
+            .ok()
+            .and_then(|target| target.to_str().map(str::to_string))
+            .is_some_and(|target| {
+                listening_inodes
+                    .iter()
+                    .any(|inode| target == format!("socket:[{inode}]"))
+            })
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_owns_published_listener(_: u32, _: &str) -> bool {
+    false
 }
 
 /// A process-lifetime advisory lock for the SQLite store.
@@ -250,6 +407,12 @@ fn parse(body: &str) -> Option<Daemon> {
     if protocol_version != PROTOCOL_VERSION {
         return None;
     }
+    let url = json.get("url")?.as_str()?.to_string();
+    loopback_base(&url)?;
+    let pid = u32::try_from(json.get("pid")?.as_u64()?).ok()?;
+    if pid == 0 {
+        return None;
+    }
     let token = json.get("token")?.as_str()?.to_string();
     // Do not silently reinterpret a legacy single token as an editor
     // capability. Trusted editor startup must fail clearly until the old
@@ -259,8 +422,9 @@ fn parse(body: &str) -> Option<Daemon> {
         return None;
     }
     Some(Daemon {
-        url: json.get("url")?.as_str()?.to_string(),
+        url,
         protocol_version,
+        pid,
         token,
         editor_token,
     })
@@ -410,6 +574,7 @@ mod tests {
         let current = serde_json::json!({
             "url": "http://127.0.0.1:1234/mcp",
             "protocol_version": super::PROTOCOL_VERSION,
+            "pid": 4321,
             "token": "mcp-only",
             "editor_token": "editor-only"
         });
@@ -418,6 +583,7 @@ mod tests {
             Some(super::Daemon {
                 url: "http://127.0.0.1:1234/mcp".into(),
                 protocol_version: super::PROTOCOL_VERSION,
+                pid: 4321,
                 token: "mcp-only".into(),
                 editor_token: "editor-only".into(),
             })
@@ -429,6 +595,7 @@ mod tests {
         let future = serde_json::json!({
             "url": "http://127.0.0.1:1234/mcp",
             "protocol_version": super::PROTOCOL_VERSION + 1,
+            "pid": 4321,
             "token": "mcp-only",
             "editor_token": "editor-only"
         });
@@ -436,10 +603,23 @@ mod tests {
     }
 
     #[test]
+    fn current_discovery_never_sends_capabilities_to_a_non_loopback_url() {
+        let remote = serde_json::json!({
+            "url": "http://example.com/mcp",
+            "protocol_version": super::PROTOCOL_VERSION,
+            "pid": 4321,
+            "token": "mcp-only",
+            "editor_token": "editor-only"
+        });
+        assert!(super::parse(&remote.to_string()).is_none());
+    }
+
+    #[test]
     fn identical_capabilities_are_rejected() {
         let shared = serde_json::json!({
             "url": "http://127.0.0.1:1234/mcp",
             "protocol_version": super::PROTOCOL_VERSION,
+            "pid": 4321,
             "token": "shared",
             "editor_token": "shared"
         });
@@ -513,12 +693,16 @@ mod tests {
         let daemon = super::Daemon {
             url: format!("http://{address}/mcp"),
             protocol_version: super::PROTOCOL_VERSION,
+            pid: std::process::id(),
             token: "mcp-only".into(),
             editor_token: "editor-only".into(),
         };
 
         assert!(!super::authenticated_reachable(&daemon));
-        assert!(!super::editor_authenticated_reachable(&daemon));
+        assert!(!super::editor_authenticated_reachable(
+            &daemon,
+            &std::env::current_exe().unwrap()
+        ));
 
         let requests = server.join().unwrap();
         for request in requests {
@@ -527,6 +711,53 @@ mod tests {
             assert!(!request.contains("mcp-only"));
             assert!(!request.contains("editor-only"));
         }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn editor_bearer_is_withheld_when_the_listener_executable_does_not_match() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = serde_json::to_string(&super::IdentityResponse::current()).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let daemon = super::Daemon {
+            url: format!("http://{address}/mcp"),
+            protocol_version: super::PROTOCOL_VERSION,
+            pid: std::process::id(),
+            token: "mcp-only".into(),
+            editor_token: "editor-secret-sentinel".into(),
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let wrong_executable = directory.path().join("thoughtd");
+        std::fs::write(&wrong_executable, b"not this process").unwrap();
+
+        assert!(!super::editor_authenticated_reachable(
+            &daemon,
+            &wrong_executable
+        ));
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /health/identity HTTP/1.1"));
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+        assert!(!request.contains("editor-secret-sentinel"));
     }
 
     #[test]

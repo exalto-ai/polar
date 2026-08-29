@@ -12,11 +12,11 @@ This file is the source of truth for agent instructions. `CLAUDE.md` is a symlin
 
 ## Non-negotiable trust boundaries
 
-- The daemon binds loopback only and publishes its port and a 256-bit bearer token to `daemon.json`, readable by the user alone. That token guards the user's private writing: never widen the bind address, never log the token, never relax the file mode.
+- The daemon binds loopback only and publishes its port plus distinct 256-bit MCP and editor bearer capabilities to `daemon.json`, readable by the user alone. Never collapse the capabilities, widen the bind address, log either bearer, or relax the file mode.
 - There is deliberately no `update_document(id, full_markdown)` tool. Agent writes address blocks by ID and edit ranges, because whole-document replacement destroys concurrent human edits and makes attribution meaningless (AD-5).
 - Agent writes land in the suggestion layer by default. Direct write is a per-session grant, not a default and not a global setting.
 - A share link is `thought://join/<doc_id>#<secret>`. The fragment must never reach the relay — clients subscribe with `share_id = SHA256(secret)`, so possession of the link is the grant and the server never learns the secret.
-- Actor identity is self-asserted and unverified. It buys attribution, per-actor undo, and accept/reject — it is not authentication, and nothing should present it as though it were (AD-6).
+- Generic actor, display, and model claims are self-asserted and unverified. A durable reviewer credential authenticates only the configured local Proof of Thought connection ingress. It never authenticates the caller app, provider, model, person, conversation, or those claims. Attribution and per-actor behavior must not be presented as upstream identity verification (AD-6, AD-21).
 - There is no end-to-end encryption in the MVP: you host the relay, you trust it (AD-7). Do not describe the relay as private, and do not add a flag that implies encryption the protocol does not implement. The exit path is recorded at the end of `docs/architecture.md`.
 - Awareness payloads are ephemeral and must never be persisted.
 

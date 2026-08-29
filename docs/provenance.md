@@ -1,10 +1,11 @@
 # Delta provenance and AI evidence
 
 **Status:** accepted product and architecture direction; delta foundation, anchored-evidence
-prerequisites, and the onboarding shell implemented, 2026-08-26
+prerequisites, onboarding shell, and reviewer connection core implemented, 2026-08-26
 
-**Provenance stack:** `codex/provenance-delta-foundation` (PR #10), followed by
-`codex/provenance-anchors` (PR #11), then `codex/ai-support-onboarding`
+**Implementation stack:** `codex/provenance-delta-foundation` (PR #10), followed by
+`codex/provenance-anchors` (PR #11), `codex/ai-support-onboarding`, then
+`codex/reviewer-connections`
 **Stack base:** `codex/tauri-ci-smoke`, after the separate
 `codex/editor-toolbar-branding`, `codex/brand-assets`, `codex/daemon-single-owner`,
 `codex/document-lifecycle`, `codex/sync-store-durability`, and
@@ -22,22 +23,20 @@ A change that weakens a claim must change this document in the same pull request
 ## 1. Target product shape
 
 The consumer experience offers three progressively richer ways to work. This table is the
-delivery target for the full stack. The current onboarding pull request ships the Basic and
-Connect choice plus a transparent preview sidebar, while later pull requests deliver bounded
-connections, suggestions, Pro, and publishing:
+delivery target for the full stack. The onboarding parent shipped the Basic and Connect choice.
+The current connection-core pull request adds durable reviewer identities, permissions, status,
+reset, and revocation. Later pull requests deliver suggestions, the consumer contribution view,
+Pro, and publishing:
 
 | Experience | What the person gets | Evidence available | Cost language |
 | --- | --- | --- | --- |
 | Basic | Local writing with written-versus-pasted provenance | Locally recorded edit deltas | Proof of Thought initiates no AI request |
-| Connect, recommended | One or more ChatGPT, Claude, Codex, or Claude Code reviewers; suggestions can arrive in the editor, avoiding the reviewer copy-and-paste loop; Accept and Reject | Semantic MCP tool deltas and anchored suggestion deltas; app and model are reported by the connection | Uses the AI access the person already has; no separate Proof of Thought API billing |
+| Connect, recommended | One or more read-only routes configured for ChatGPT, Claude, Codex, or Claude Code; the next stacked update adds reviewable suggestions | Read access is connection-scoped; future anchored suggestion deltas record accepted AI changes | Uses the AI access the person already has; no separate Proof of Thought API billing |
 | Pro | AI chat, files, model choice, and reasoning controls inside Proof of Thought | Provider-authenticated traces bound to exact suggestions and accepted document deltas | Uses the person's OpenAI or Anthropic API key; provider usage charges apply |
 
-In the current onboarding pull request, Connect is the recommended path. It cannot activate
-without consent, so
-"recommended" means the primary card, not an automatic connection. The setup action remains
-disabled until the next connection layer supplies bounded read-only routes. Basic is the state
-after choosing **Write locally**. Pro adds built-in AI and does not need to disconnect existing
-reviewers.
+Connect is the recommended path. It cannot activate without consent, so
+"recommended" means the primary card, not an automatic connection. Basic is the state after
+choosing **Write locally**. Pro adds built-in AI and does not need to disconnect existing reviewers.
 
 The planned consumer UI does not lead with MCP, TLS, proxy, CRDT, or API transport terminology.
 Those details remain available under a technical disclosure.
@@ -56,7 +55,7 @@ The interface may say:
 
 - `Claude changed 12 words`
 - `7 suggestions accepted`
-- `Written here 82% · Pasted 14% · Claude (reported) 4%`
+- `Written here 82% · Pasted 14% · Configured for Claude Code (reported) 4%`
 
 This consumer breakdown groups currently surviving event contributions by stable source identity.
 For example, separate direct-entry events appear as one `Written here` total, while connected
@@ -96,8 +95,9 @@ Every claim has three independent dimensions:
 
 These dimensions must not be collapsed into one `writer_class` field. A paste is an ingress
 method, not evidence of human or AI authorship. A connected reviewer is AI for the consumer
-interface, while its exact app and model identity remain reported rather than provider
-authenticated.
+interface. Its saved app name describes how the route was configured, not which process made a
+call. A model name, when present, is tool-reported metadata for that call rather than
+provider-authenticated identity.
 
 ### Consumer labels
 
@@ -108,7 +108,7 @@ authenticated.
 | File input | `Imported` | Proof of Thought observed content entering through its file import path. |
 | Editor command | `Edited here` | Proof of Thought observed a toolbar, undo, cut, or other editor command. This is not asserted to be directly typed text. |
 | Unclassified current input | `Unclassified change` | A current update arrived without a reliable input-source signal. Proof of Thought does not guess. |
-| Configured MCP connection | `ChatGPT (reported)`, `Claude (reported)`, `Codex (reported)`, or `Claude Code (reported)` | Proof of Thought observed a tool operation through that configured connection. It does not authenticate the upstream provider conversation or exact model. |
+| Configured MCP connection | `Configured for ChatGPT desktop (reported)`, `Configured for Codex (reported)`, or the corresponding Claude route | Proof of Thought observed a tool operation through that credentialed route. The app name is configuration, not runtime app identity. A model is shown only when the current call reports one, and neither value authenticates the upstream provider conversation. |
 | Future built-in provider request with proof | `Claude (verified)` or `OpenAI (verified)` | Provider evidence authenticates the disclosed response and model-emitted tool call, and Proof of Thought binds that call to the exact local delta. |
 
 `Verified` does not mean a response was correct, safe, or useful. It means the available
@@ -129,10 +129,12 @@ The implementation must preserve all of these:
 7. Accepting a suggestion attributes its inserted text to the proposing reviewer, not the
    person who clicked Accept.
 8. Different ingress sources are never coalesced into one provenance event.
-9. Provider and model metadata live on the event or run, not on a mutable actor row.
-10. The public MCP caller cannot create a trusted human provenance claim, hide its AI activity by
-    choosing the legacy human or editor kind, or choose the assurance level. The legacy kind field
-    remains accepted on the wire until connection identities replace caller-supplied actors.
+9. Provider and model metadata live on the event or run, not on a mutable actor row. An MCP event
+   uses only the current call's optional model and never inherits the last model seen on its
+   connection.
+10. An MCP caller cannot choose its durable connection identity, permissions, provider, or
+    assurance, create a trusted human provenance claim, or hide its AI activity by choosing the
+    legacy human kind. Legacy identity fields remain accepted only for wire compatibility.
 11. Old documents are `legacy unknown` unless surviving provenance can be rebuilt without
     inventing facts.
 12. A failed mutation commits neither the document update nor partial provenance.
@@ -238,7 +240,8 @@ temporarily for the M2 rails and is compatibility data, not the new source of tr
 crate retains low-level compatibility helpers that do not create provenance events; production
 document mutations must go through `Workspace` to receive the atomic evidence guarantees below.
 
-Schema V2 separates five responsibilities, and schema V3 adds the immutable anchor evidence:
+Schema V2 separates five evidence responsibilities, schema V3 adds immutable anchor evidence, and
+schema V4 adds durable reviewer authorization without rewriting the evidence ledger:
 
 | Table | Role | Mutation rule |
 | --- | --- | --- |
@@ -248,6 +251,9 @@ Schema V2 separates five responsibilities, and schema V3 adds the immutable anch
 | `provenance_receipts` | Later MCP, provider, device, or Seal evidence that strengthens an event without rewriting it | Append only |
 | `lineage_spans` | Current surviving UTF-16 ranges and their source events | Replaceable derived cache |
 | `lineage_state` | Algorithm version, rebuild watermarks, readiness, and digest for one complete span generation | Replaceable derived cache |
+| `reviewer_connections` | Stable connection identity, current label, configured client route and provider route, credential hashes, permissions, lifecycle status, optimistic revision, last tool-reported model for connection diagnostics, and revocation | Authorized mutable state; never deleted or reused; diagnostic model state is not event evidence |
+| `reviewer_connection_documents` | Current-document allowlist for a connection that does not have all-document scope | Authorized mutable state |
+| `reviewer_connection_events` | Credential-free snapshot of every meaningful connection lifecycle transition, including the canonical selected-document allowlist | Append only |
 
 The database enforces append-only evidence with update and delete rejection triggers. Exact Yjs
 payloads and their immutable document, sequence, actor, origin, session, and timestamp metadata
@@ -256,6 +262,12 @@ mutable operational state and is not evidence. Each span references an event in 
 document. Every source reference in a semantic change must also belong to the same document and
 must not point to a later event. Provider and model fields are copied onto the event so changing a
 reusable actor row cannot rewrite history.
+
+Raw reviewer credentials are not evidence and never enter SQLite. On macOS native Rust code stores
+them in the login Keychain. SQLite keeps fixed-size hashes so the daemon can authenticate a request
+without returning credential material to the webview, setup command, logs, or provenance. A
+credential reset preserves the connection ID and history; revocation preserves the row and its
+lifecycle events while making later authentication fail.
 
 The before and after document digests cover the normalized visible tree plus the replicated
 document tombstone. Each event also binds a cumulative, document-local update-log root through
@@ -274,8 +286,10 @@ the product may claim resistance to that attacker.
 SQLite migrations are ordered, transactional, and versioned with `PRAGMA user_version`.
 Schema V1 adopts the released schema without rewriting user data. Schema V2 creates the event
 ledger and derived lineage tables. Schema V3 adds anchors and rebuilds the affected evidence
-tables with their foreign-key relationships while preserving V2 rows and SQLite sequences. A
-newer database is refused explicitly. The exact DDL is the review authority in
+tables with their foreign-key relationships while preserving V2 rows and SQLite sequences. Schema
+V4 adds reviewer connection state, document grants, and append-only lifecycle snapshots without
+backfilling legacy caller names into authenticated identities. A newer database is refused
+explicitly. The exact DDL is the review authority in
 [`crates/thought-store/src/schema.rs`](../crates/thought-store/src/schema.rs).
 
 Database schema versions and event-chain versions are intentionally separate. Chain V1 freezes
@@ -334,7 +348,7 @@ The daemon assigns assurance from the trusted ingress path:
 
 - classified editor sync (`entered`, `pasted`, `command`, or `imported`): observed;
 - unclassified editor sync: unknown;
-- configured external MCP connection: reported;
+- configured external MCP route: reported;
 - future built-in provider path with verifier-accepted evidence: verified;
 - relay peer: peer-reported until stronger authentication exists.
 
@@ -344,12 +358,14 @@ it for both activity actors and semantic provenance.
 
 ### Foundation exposure boundary
 
-The editor sync endpoint and public MCP endpoint use different bearer capabilities. Possession
-of the MCP capability must not authorize a sourced editor update, and possession of the editor
-capability must not authorize an MCP tool call. This is a protocol trust boundary, not a defense
-against a hostile process running as the same operating-system user that can read Proof of
-Thought's private application state or inject code into its webview. Stronger device claims need
-the signing and anchoring work described below.
+The editor sync endpoint and reviewer MCP endpoint use different bearer capabilities. Possession
+of a reviewer credential must not authorize a sourced editor update, and possession of the editor
+capability must not authorize an MCP tool call. The process-lifetime MCP capability used by the
+local window is a separate read-only principal. It can list, search, read, and inspect provenance,
+but it cannot mutate a document or become a reviewer identity. This is a protocol trust boundary,
+not a defense against a process running as the same operating-system user with independent shell,
+filesystem, or webview access. Stronger device claims need the signing and anchoring work described
+below.
 
 Native creation, File > Open, trash, and restore now use a narrow editor-only HTTP surface:
 `POST /editor/documents` and `POST /editor/documents/{doc_id}/deleted`. The app authenticates
@@ -359,19 +375,23 @@ receives observed `Imported` metadata and one whole-snapshot `server_operation` 
 public MCP capability is rejected on these routes, while the editor capability remains unable to
 call public MCP tools.
 
-The anchor prerequisite pull request did not ship consumer setup. This stacked onboarding pull
-request adds the first-launch choice and transparent sidebar preview only. It does not expose or
-copy a connection command, and does not yet ship durable reviewer connections, per-reviewer
-permissions, suggestions, API keys, or a new
-provenance visualization. MCP block mutations that do not yet carry exact semantic operation
-ranges remain V1 reported evidence. They can still support a weaker activity proof, but their
-surviving wording is not eligible for exact percentages.
+The connection-core pull request replaces caller-selected local MCP identity with a durable
+registry. Every configured reviewer route receives an immutable connection ID, unique native
+credential, current or all-document scope, required read permission, and a lifecycle state.
+The daemon binds MCP sessions to the authenticated principal, rechecks current authorization for
+each tool operation, and serializes management changes against in-flight authorization. Rename and
+credential reset preserve identity; revoke immediately blocks later requests while retaining prior
+history. The sidebar exposes add, rename, permission change, reconnect, reset, and revoke actions.
 
-## 8. Suggestions and multiple reviewers
+This pull request does not ship suggestions, direct reviewer writes, API keys, provider
+verification, Seal publication, or the consumer contribution visualization.
 
-Connected reviewers default to suggestions rather than direct mutation. A suggestion stores:
+## 8. Future suggestions and multiple reviewers
 
-- reviewer connection and reported model;
+The suggestions pull request will let connected reviewers propose changes for explicit acceptance.
+Until that work lands, reviewer routes remain read-only. A future suggestion stores:
+
+- reviewer connection and the model reported by that specific call, if any;
 - base document revision;
 - exact proposed delta;
 - anchors and target hashes;
@@ -385,8 +405,8 @@ reviewers may propose changes simultaneously. Overlapping suggestions are altern
 accepting one makes an overlapping stale suggestion require review instead of silently
 applying or deleting it.
 
-The first delta-foundation PR reserves suggestion metadata but does not ship the suggestion
-interface.
+The delta-foundation PR reserves suggestion metadata, but neither it nor the current connection-core
+pull request ships the suggestion interface.
 
 ## 9. Seal publication and verification
 
@@ -431,12 +451,20 @@ from publication onward, not contemporaneous recording.
 - Capture checkpoints remain encrypted private state. Only reviewed notarized disclosures are
   publishable provider proof.
 - Proof publication is always explicit. Connecting a reviewer never publishes a document.
-- The legacy local MCP capability is not offered or copied by the consumer onboarding shell. A
-  manually configured legacy client may still retain workspace-wide document operations,
-  including direct edits while no editor window is open, and may send returned content to its
-  provider under that app's privacy terms. The connection layer must replace that path with
-  explicit per-connection permissions and unique credentials before presenting reviewers as
-  configured or independently revocable.
+- Each configured reviewer route has a unique credential, explicit document scope, and required
+  read permission. The raw credential remains in native
+  storage; the webview and setup command receive only the stable connection ID. The shared
+  process-lifetime MCP principal is internal and read-only, so it cannot serve as an external write
+  fallback.
+- A tool using a configured route may send document content returned by allowed tools to an AI
+  provider under that tool's privacy terms. The route remains read-only until suggestions ship.
+- Local reviewer credentials authenticate the configured Proof of Thought connection, not the
+  upstream provider, private conversation, calling application, or exact model. ChatGPT desktop
+  and Codex can share MCP configuration, and Codex, Claude Code, or another process
+  running as the same operating-system user may also have shell or filesystem authority granted
+  outside Proof of Thought. Reviewer permissions constrain cooperative, connection-specific
+  routing through this MCP surface; they do not sandbox those processes or revoke independent
+  powers.
 - The development preview returns daemon capabilities only to a loopback socket, even if Vite is
   explicitly bound to a LAN interface for other assets.
 
@@ -450,21 +478,25 @@ boundary.
 2. **Anchored evidence prerequisites, PR #11:** schema V3 anchors, chain V2 hashing and
    replay, validated editor ranges, immutable batched transport, editor-only native lifecycle,
    mixed-history compatibility, concurrency coverage, and a reference benchmark.
-3. **Reviewer connection and onboarding:** the current stacked pull request ships simple Basic
-   and recommended Connect choices plus a transparent sidebar preview with setup disabled. The
-   next connection pull request starts with bounded read-only routes, then adds durable connection
-   identities, permissions, multiple reported reviewers, and the consumer provenance view before
-   calling Connect complete.
-4. **Replicated suggestions:** proposal state, inline visualization, Accept and Reject,
+3. **Reviewer onboarding shell:** the parent pull request ships the Basic and recommended Connect
+   choice plus transparent setup language without claiming a live connection.
+4. **Reviewer connection core, current pull request:** durable connection IDs, unique native
+   credentials, per-document permissions, multiple reported reviewers, session binding, status,
+   reconnect, reset, and revocation. ChatGPT desktop, Codex, and Claude Code receive connection-ID
+   setup commands; the Claude Desktop extension remains a separate packaging gate.
+5. **Consumer provenance view:** concrete surviving contributions by stable connection identity.
+   Exact percentages remain blocked by the real-WKWebView IME gate and by any surviving V1 source.
+6. **Replicated suggestions:** proposal state, inline visualization, Accept and Reject,
    conflict handling, and exact proposal-to-delta attribution.
-5. **Pro provider path:** secure keys, built-in chat, model and reasoning controls, files, and
+7. **Pro provider path:** secure keys, built-in chat, model and reasoning controls, files, and
    provider trace binding.
-6. **Seal bundle:** deterministic bundle, signing and optional live anchoring, publish flow,
+8. **Seal bundle:** deterministic bundle, signing and optional live anchoring, publish flow,
    and the Seal page/verifier changes in the appropriate repository.
 
-Consumer UI beyond the current onboarding and sidebar shell is not rendered or shipped until its
-corresponding pull request is ready. Each pull request targets its predecessor while the stack is
-open, then is retargeted or rebased onto `main` as predecessors merge.
+The connection-core UI manages only connection state and access. It does not render suggestions,
+provider-verified traces, API-key controls, Seal publishing, or consumer contribution percentages.
+Each pull request targets its predecessor while the stack is open, then is retargeted or rebased
+onto `main` as predecessors merge.
 
 ## 12. Acceptance contract and current coverage
 
@@ -503,6 +535,22 @@ The foundation and anchored-evidence pull requests automate the claims they expo
 15. Native create, import, trash, and restore use the editor-only capability. A public MCP token
     cannot invoke that path, and native import produces observed, anchored `Imported` lineage.
 16. The opt-in 10,000-word, 100-event benchmark passes the documented reference-machine budgets.
+17. Schema V4 preserves every legacy row, rejects invalid connection transitions, keeps revoked
+    identities immutable, and records credential-free lifecycle snapshots.
+18. Two same-name or same-client reviewers keep distinct stable IDs across reconnects and restart.
+    Legacy caller identity fields cannot select either connection, its permissions, or assurance.
+19. Reviewer credentials authenticate only their own connection. MCP sessions cannot cross
+    principals, the internal MCP principal is read-only, and editor and reviewer credentials remain
+    unable to cross the editor-evidence boundary.
+20. Current and all-document scopes filter list, search, read, and provenance operations at the
+    server. Durable reviewer routes cannot mutate documents.
+21. Credential reset preserves identity and history while invalidating the prior secret. Revocation
+    rejects later requests, removes active session bindings, and does not affect another reviewer.
+22. Configured, connected, disconnected, failed, and revoked states survive or clear restart
+    according to their documented lease semantics. Anonymous authentication failure cannot spoof a
+    visible connection status.
+23. Serialized reviewer responses and setup commands contain stable IDs and reported metadata but
+    no raw credential. Native-storage failure and interrupted rotation have explicit recovery paths.
 
 The following gates remain before their corresponding consumer features ship:
 
@@ -511,8 +559,12 @@ The following gates remain before their corresponding consumer features ship:
 2. Consumer contribution percentages remain hidden until that real IME pass is recorded.
 3. Suggestion acceptance keeps the proposing source; rejection changes no live span. This lands
    with the replicated-suggestions pull request rather than being simulated in the anchor layer.
-4. Reviewer connection identities and their permissions are exercised through onboarding before
-   Connect is presented as configured.
+4. ChatGPT desktop, Codex, and Claude Code setup need their packaged-client manual acceptance pass.
+   Claude Desktop remains unavailable until its local extension is packaged and tested.
+5. Provider verification, API-key storage, built-in chat, files, and model controls remain blocked
+   on the Pro pull request. A reported connection never upgrades itself to verified.
+6. Seal bundle creation, signing, optional anchoring, publication review, and verification remain
+   blocked on the Seal pull request.
 
 Manual review must additionally confirm that public language says what the evidence establishes,
 and no more.

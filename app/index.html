@@ -51,46 +51,123 @@
           <button class="text-button" id="change-ai-mode" type="button">Change how I work</button>
         </section>
 
-        <section class="ai-connect-panel" id="ai-connect-panel">
+        <section class="reviewer-manager" id="reviewer-manager" aria-labelledby="reviewer-manager-title">
           <div class="section-heading">
             <div>
-              <span class="eyebrow">Set up a reviewer</span>
-              <h3>Choose your AI app</h3>
+              <span class="eyebrow">Local connections</span>
+              <h3 id="reviewer-manager-title">Your reviewers</h3>
             </div>
-            <span class="recommendation">Recommended</span>
+            <button class="primary-button compact" id="reviewer-add" type="button">Add reviewer</button>
           </div>
-
-          <div class="ai-client-picker" role="group" aria-label="AI application">
-            <button type="button" data-ai-client="chatgpt" aria-pressed="true">
-              <span>ChatGPT</span><small>Desktop</small>
-            </button>
-            <button type="button" data-ai-client="codex" aria-pressed="false">
-              <span>Codex</span><small>Local</small>
-            </button>
-            <button type="button" data-ai-client="claude-desktop" aria-pressed="false">
-              <span>Claude</span><small>Desktop</small>
-            </button>
-            <button type="button" data-ai-client="claude-code" aria-pressed="false">
-              <span>Claude Code</span><small>Local</small>
-            </button>
+          <p class="reviewer-manager-intro">Each saved route has its own Proof of Thought access that you can change or remove here.</p>
+          <p class="reviewer-loading" id="reviewer-loading">Finishing secure connection setup…</p>
+          <div class="reviewer-error" id="reviewer-error" role="alert" hidden>
+            <span id="reviewer-error-message"></span>
+            <button class="text-button" id="reviewer-retry" type="button">Try again</button>
           </div>
+          <p class="sr-only" id="reviewer-live" aria-live="polite"></p>
+          <p class="reviewer-empty" id="reviewer-empty" hidden>No reviewers have access yet.</p>
+          <ul class="reviewer-list" id="reviewer-list" aria-label="Active reviewers" hidden></ul>
 
-          <div class="ai-setup">
-            <p id="ai-client-setup"></p>
-            <p class="ai-caveat" id="ai-client-caveat" hidden></p>
-            <div class="ai-access-warning">
-              <strong>Connection preview</strong>
-              <p>This version explains the supported reviewer choices, but does not provide connection setup yet.</p>
-              <p>The next update will add bounded read-only reviewer connections before setup can be copied. When a reviewer reads a document, its AI app may send that content to its provider under that app’s privacy settings.</p>
-              <p>Connecting never publishes your document. You choose what to publish later.</p>
+          <details class="reviewer-revoked" id="reviewer-revoked-section" hidden>
+            <summary tabindex="0">Removed reviewers (<span id="reviewer-revoked-count">0</span>)</summary>
+            <ul class="reviewer-list revoked" id="reviewer-revoked-list" aria-label="Removed reviewers"></ul>
+          </details>
+
+          <section class="reviewer-add-flow" id="reviewer-add-flow" hidden aria-labelledby="reviewer-add-title">
+            <h4 id="reviewer-add-title" tabindex="-1">Add a reviewer</h4>
+            <form id="reviewer-add-form">
+              <fieldset>
+                <legend>AI app</legend>
+                <label class="reviewer-choice">
+                  <input type="radio" name="reviewer-client" value="chatgpt" checked />
+                  <span><strong>ChatGPT</strong><small>Desktop app</small></span>
+                </label>
+                <label class="reviewer-choice">
+                  <input type="radio" name="reviewer-client" value="codex" />
+                  <span><strong>Codex</strong><small>Local app</small></span>
+                </label>
+                <label class="reviewer-choice" aria-describedby="claude-desktop-unavailable">
+                  <input type="radio" name="reviewer-client" value="claude-desktop" disabled />
+                  <span><strong>Claude Desktop</strong><small id="claude-desktop-unavailable">Unavailable until the local extension ships</small></span>
+                </label>
+                <label class="reviewer-choice">
+                  <input type="radio" name="reviewer-client" value="claude-code" />
+                  <span><strong>Claude Code</strong><small>Local app</small></span>
+                </label>
+              </fieldset>
+
+              <p class="reviewer-client-description" id="reviewer-client-description"></p>
+              <p class="ai-caveat" id="reviewer-client-caveat" hidden></p>
+
+              <label class="reviewer-field" for="reviewer-display-label">
+                Reviewer name
+                <input id="reviewer-display-label" name="display_label" type="text" maxlength="80" required autocomplete="off" />
+                <small>Use a name that distinguishes this reviewer from others in the same app.</small>
+              </label>
+
+              <fieldset>
+                <legend>Documents</legend>
+                <label class="reviewer-choice">
+                  <input type="radio" name="reviewer-document-scope" value="current" checked />
+                  <span><strong id="reviewer-current-document-label">This document is still opening</strong><small>Access stays with this document</small></span>
+                </label>
+                <label class="reviewer-choice">
+                  <input type="radio" name="reviewer-document-scope" value="all" />
+                  <span><strong>All documents</strong><small>Includes documents created later</small></span>
+                </label>
+              </fieldset>
+
+              <fieldset>
+                <legend>Allowed actions</legend>
+                <label class="reviewer-choice">
+                  <input type="checkbox" name="can_read" checked disabled />
+                  <span><strong>Read</strong><small>Required so the reviewer can work with allowed documents</small></span>
+                </label>
+                <p class="reviewer-permission-note">Reviewer connections are read-only. Reviewable suggestions arrive in a later update.</p>
+              </fieldset>
+
+              <div class="reviewer-privacy-note">
+                <strong>Before you connect</strong>
+                <p>A tool using this saved route can use its allowed access even when no Proof of Thought window is open. When it reads content, the tool may send that content to an AI provider under its own privacy settings. These controls apply to this Proof of Thought route, not other Mac access the tool already has.</p>
+              </div>
+              <div class="reviewer-form-actions">
+                <button id="reviewer-add-cancel" type="button">Cancel</button>
+                <button class="primary-button compact" id="reviewer-add-submit" type="submit">Create reviewer</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="reviewer-setup-panel" id="reviewer-setup" hidden aria-labelledby="reviewer-setup-title">
+            <div class="reviewer-card-header">
+              <h4 id="reviewer-setup-title" tabindex="-1">Reviewer setup</h4>
+              <span class="reviewer-status" id="reviewer-setup-status"></span>
             </div>
-            <pre id="ai-connection-command"></pre>
-            <button class="primary-button compact" id="copy-ai-command" type="button" disabled>Available in the next update</button>
-          </div>
+            <p id="reviewer-setup-instructions"></p>
+            <p class="ai-caveat" id="reviewer-setup-caveat" hidden></p>
+            <pre id="reviewer-setup-command"></pre>
+            <div class="reviewer-form-actions">
+              <button class="primary-button compact" id="reviewer-setup-copy" type="button">Copy setup</button>
+              <button id="reviewer-setup-reset" type="button">Reset connection</button>
+              <button id="reviewer-setup-done" type="button">Done</button>
+            </div>
+            <div class="reviewer-reset-warning" id="reviewer-reset-warning" hidden>
+              <p><strong>Reset this connection?</strong> Existing sessions will immediately lose access. The reviewer keeps the same name, permissions, and history.</p>
+              <div class="reviewer-form-actions">
+                <button id="reviewer-reset-cancel" type="button">Cancel</button>
+                <button class="danger-button" id="reviewer-reset-confirm" type="button">Reset now</button>
+              </div>
+            </div>
+          </section>
+        </section>
 
+        <section class="ai-connect-panel" id="ai-connect-panel">
+          <span class="eyebrow">What Connect adds</span>
+          <h3>Review without copy and paste</h3>
+          <p>A compatible AI tool can read through a route you configure for ChatGPT, Codex, or Claude Code. Reviewable suggestions arrive in the next stacked update.</p>
           <details class="technical-disclosure">
             <summary>What this proof can say</summary>
-            <p>When connections become available, Proof of Thought will record edits made through the local tool connection. App and model names will be reported by the tool client, not authenticated by the provider. Proof of Thought will not see the rest of your private chat.</p>
+            <p>The app name shows how you configured the read-only route. It does not prove which app used the route, and Proof of Thought cannot see the rest of your private chat.</p>
             <p>Connecting never publishes your document. You choose what to publish later.</p>
           </details>
         </section>
@@ -105,7 +182,7 @@
             <li><strong>Edited here</strong><span>Formatting and editor commands</span></li>
             <li><strong>Unclassified change</strong><span>A change whose input path could not be established reliably</span></li>
           </ul>
-          <p class="ai-caveat">Basic records observed local deltas. Exact attribution is shown only when anchored evidence supports it. Basic makes no AI request and does not set up a reviewer. An external AI app you configured earlier can remain connected until you remove it there.</p>
+          <p class="ai-caveat">Basic records observed local deltas. Exact attribution is shown only when anchored evidence supports it. Basic makes no AI request and does not set up a reviewer. Reviewers you previously configured remain active and listed above until you change or remove their access.</p>
         </section>
 
         <section class="pro-preview" aria-labelledby="pro-preview-title">
@@ -118,6 +195,19 @@
           <p class="ai-cost">Provider API usage charges apply. Pro will work alongside connected reviewers.</p>
         </section>
       </aside>
+    </div>
+
+    <div class="reviewer-modal-backdrop" id="reviewer-revoke-backdrop" hidden>
+      <section class="reviewer-revoke-dialog" id="reviewer-revoke-dialog" role="alertdialog" aria-modal="true" aria-labelledby="reviewer-revoke-title" aria-describedby="reviewer-revoke-description">
+        <span class="eyebrow">Remove reviewer access</span>
+        <h2 id="reviewer-revoke-title">Remove <span id="reviewer-revoke-name"></span>?</h2>
+        <p id="reviewer-revoke-description">This immediately blocks new reads, including sessions that are already open. Prior proof history stays intact.</p>
+        <p class="reviewer-modal-error" id="reviewer-revoke-error" role="alert" tabindex="-1" hidden></p>
+        <div class="reviewer-form-actions">
+          <button id="reviewer-revoke-cancel" type="button">Cancel</button>
+          <button class="danger-button" id="reviewer-revoke-confirm" type="button">Remove access</button>
+        </div>
+      </section>
     </div>
 
     <!-- Errors used to have nowhere to go: a failed call left the status dot
@@ -140,15 +230,15 @@
           <button class="onboarding-card recommended" type="button" data-ai-mode="connect">
             <span class="card-topline"><span>Connect an AI app</span><span class="recommendation">Recommended</span></span>
             <strong>Work with reviewers you already use</strong>
-            <span>Preview support for ChatGPT desktop, Codex, Claude Desktop, and Claude Code. Connection setup is available in the next update.</span>
-            <small>Proof of Thought will add no API usage charge. A connected AI app may send document content to its provider under that app’s privacy settings.</small>
+            <span>Get setup steps for ChatGPT desktop, Codex, or Claude Code. Claude Desktop’s one-click extension is next in this upgrade.</span>
+            <small>Proof of Thought adds no API usage charge. Each saved route gets document access that you choose. A tool using that route can keep using its access when the editor is closed and may send document content to an AI provider.</small>
           </button>
 
           <button class="onboarding-card" type="button" data-ai-mode="basic">
             <span class="card-topline"><span>Write locally</span><span class="mode-label">Basic</span></span>
             <strong>Do not set up AI support</strong>
             <span>Proof of Thought records observed local deltas and separates writing, pasting, importing, editor commands, and unclassified changes.</span>
-            <small>Proof of Thought makes no AI request. Existing external connections are managed in that AI app.</small>
+            <small>Proof of Thought makes no AI request. Reviewers you previously configured keep their access until you change or remove it in AI support.</small>
           </button>
 
           <button class="onboarding-card pro-card" type="button" disabled aria-describedby="pro-card-status">
@@ -161,7 +251,7 @@
 
         <details class="onboarding-disclosure">
           <summary>What “reported” and “verified” mean</summary>
-          <p><strong>Reported</strong> will mean Proof of Thought saw an AI tool edit arrive through a local tool connection. The app and model names will be supplied by that client. <strong>Verified</strong> will mean a provider-authenticated exchange is bound to the exact accepted change. Neither label says the content is correct.</p>
+          <p><strong>Reported</strong> will mean Proof of Thought saw a reviewable AI suggestion arrive through a saved local route. The app name is how you configured that route, while any model name is reported by the tool for that call. <strong>Verified</strong> will mean a provider-authenticated exchange is bound to the exact accepted change. Neither label says the content is correct.</p>
         </details>
       </section>
     </div>

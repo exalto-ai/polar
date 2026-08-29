@@ -10,6 +10,7 @@ import type { Editor } from "@tiptap/core";
 import { installAiSupport } from "./ai-support";
 import { createEditor } from "./editor";
 import { EditorApi } from "./editor-api";
+import { reviewerBridge } from "./reviewer-bridge";
 import {
   canExportEditor,
   lockEditorInteraction,
@@ -23,7 +24,11 @@ import {
 import { ACCEL_LABEL, accel, relabelShortcutHints } from "./keys";
 import { Mcp, type DocumentSummary } from "./mcp";
 import { colorFor, playfulName, seedFrom } from "./names";
-import { installProvenanceRails, type Rails } from "./provenance";
+import {
+  installProvenanceRails,
+  toolReportedModelLabel,
+  type Rails,
+} from "./provenance";
 import { SyncProvider, type AgentPresence, type ProviderStatus } from "./provider";
 
 type Connection = {
@@ -32,6 +37,7 @@ type Connection = {
   mcp_url: string;
   editor_token: string;
   mcp_token: string;
+  stdio_command: string;
   /** Who this window writes as, from `thought_mcp::EDITOR_ACTOR_ID`. */
   actor_id: string;
 };
@@ -73,7 +79,7 @@ type CloseChoice = "export" | "close" | "cancel";
 let closePromptResolver: ((choice: CloseChoice) => void) | null = null;
 const closeBlockedElements = new Set<HTMLElement>();
 
-const DAEMON_PROTOCOL_VERSION = 3;
+const DAEMON_PROTOCOL_VERSION = 4;
 function settleClosePrompt(choice: CloseChoice) {
   const resolve = closePromptResolver;
   if (!resolve) return;
@@ -222,6 +228,9 @@ function refreshTitle(editor: Editor) {
   const title = deriveTitle(editor);
   document.title = title;
   void getCurrentWindow?.()?.setTitle(title);
+  if (open?.editor === editor && openDocId) {
+    aiSupport.setCurrentDocument({ id: openDocId, title });
+  }
 }
 
 /** Show or hide one peer's caret label from outside the editor. */
@@ -299,7 +308,7 @@ function renderPresence(awareness: Awareness, self: number) {
     chip.className = "who is-agent";
     chip.style.setProperty("--who", colorFor(seedFrom(presence.actor_id)));
     chip.textContent = initials(presence.name || presence.actor_id);
-    const model = presence.model ? ` · ${presence.model}` : "";
+    const model = presence.model ? ` · ${toolReportedModelLabel(presence.model)}` : "";
     chip.title = `${presence.name}${model} — wrote ${ago(at)}, hover to see where`;
 
     // Pointing at an agent's chip lights the blocks it wrote, the same bargain
@@ -328,6 +337,7 @@ function destroyOpenDocument() {
   const current = open;
   open = null;
   openDocId = "";
+  aiSupport.setCurrentDocument(null);
   current?.rails.destroy();
   current?.provider.destroy();
   current?.editor.destroy();
@@ -389,6 +399,7 @@ async function openDocument(docId: string): Promise<boolean> {
   provider.connect();
   open = { doc, awareness, provider, editor, rails };
   openDocId = docId;
+  aiSupport.setCurrentDocument({ id: docId, title: deriveTitle(editor) });
 
   // Exposed in development so the editor can be driven directly. Synthetic
   // key events do not reach ProseMirror's input handling reliably, which makes
@@ -464,7 +475,7 @@ function row(color: string, name: string, meta: string): HTMLLIElement {
 
 function agentLabel(a: { display_name: string; model: string | null; actor_id: string }) {
   const name = a.display_name.trim() || playfulName(seedFrom(a.actor_id));
-  return a.model ? `${name} · ${a.model}` : name;
+  return a.model ? `${name} · ${toolReportedModelLabel(a.model)}` : name;
 }
 
 function empty(text: string): HTMLLIElement {
@@ -889,6 +900,8 @@ async function boot() {
   }
   mcp = new Mcp(connection.mcp_url, connection.mcp_token);
   editorApi = new EditorApi(connection.mcp_url, connection.editor_token);
+  aiSupport.setReviewerBridge(reviewerBridge(editorApi));
+  aiSupport.setConnectionCommand(connection.stdio_command);
   await mcp.connect();
   // A first launch is genuinely onboarding, not a document created invisibly
   // behind a modal. Existing preferences resolve immediately.

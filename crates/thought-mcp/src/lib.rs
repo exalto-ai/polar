@@ -4,6 +4,7 @@
 //! tested with no window, no server, and no client — which is the whole claim
 //! of AD-2.
 
+mod connections;
 pub mod lineage;
 mod mutation;
 pub mod provenance_hash;
@@ -14,6 +15,11 @@ mod workspace;
 /// be told who it is rather than hardcoding a string that `sync.rs` owns.
 pub const EDITOR_ACTOR_ID: &str = "human:editor";
 
+pub use connections::{
+    CreateReviewerConnection, ReviewerClient, ReviewerConnection, ReviewerConnectionModelError,
+    ReviewerConnectionStatus, ReviewerDocumentScope, ReviewerPermissions, ReviewerProvider,
+    UpdateReviewerConnection,
+};
 pub use mutation::MutationContext;
 pub use thought_provenance::{
     Assurance, CurrentSourceSummary, GroupedSourceContribution, Ingress, LiveLineageSpan,

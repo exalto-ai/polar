@@ -4,8 +4,10 @@ import {
   installAiSupport,
   readAiSupportMode,
   safeLocalStorage,
+  setupCommand,
   writeAiSupportMode,
 } from "./ai-support";
+import markup from "../index.html?raw";
 
 function storage(): Storage {
   const values = new Map<string, string>();
@@ -22,46 +24,11 @@ function storage(): Storage {
 }
 
 function fixture() {
-  document.body.innerHTML = `
-    <header class="chrome"></header>
-    <button id="ai-support-toggle"></button>
-    <div class="workspace"></div>
-    <div id="other-surface"></div>
-    <div id="preblocked-surface" inert></div>
-    <div id="close-prompt" hidden></div>
-    <aside id="ai-support-sidebar" hidden>
-      <button id="ai-sidebar-close"></button>
-      <button id="change-ai-mode"></button>
-      <h2 id="ai-mode-title"></h2>
-      <p id="ai-mode-description"></p>
-      <span id="ai-mode-evidence"></span>
-      <p id="ai-mode-cost"></p>
-      <section id="ai-connect-panel">
-        <button data-ai-client="chatgpt"></button>
-        <button data-ai-client="codex"></button>
-        <button data-ai-client="claude-desktop"></button>
-        <button data-ai-client="claude-code"></button>
-        <p id="ai-client-setup"></p>
-        <p id="ai-client-caveat"></p>
-        <code id="ai-connection-command"></code>
-        <button id="copy-ai-command"></button>
-      </section>
-      <section id="ai-basic-panel"></section>
-    </aside>
-    <div id="ai-onboarding" hidden>
-      <section role="dialog">
-        <button id="ai-onboarding-close"></button>
-        <h1 id="ai-onboarding-title" tabindex="-1">How would you like to work?</h1>
-        <div id="ai-startup-error" hidden>
-          <span id="ai-startup-error-message"></span>
-        </div>
-        <button data-ai-mode="connect">Connect</button>
-        <button data-ai-mode="basic">Basic</button>
-        <button disabled>Pro</button>
-        <details><summary>Evidence details</summary></details>
-      </section>
-    </div>
-  `;
+  document.body.innerHTML = markup.match(/<body>([\s\S]*?)<\/body>/)?.[1] ?? "";
+  document.body.insertAdjacentHTML(
+    "beforeend",
+    '<div id="other-surface"></div><div id="preblocked-surface" inert></div>',
+  );
 }
 
 beforeEach(fixture);
@@ -108,6 +75,38 @@ describe("AI support preference", () => {
   });
 });
 
+describe("client setup commands", () => {
+  const stdio = "/Applications/Proof of Thought.app/Contents/MacOS/thought-mcp-stdio";
+  const connectionId = "reviewer-123";
+
+  it("includes only the stable reviewer identity for ChatGPT desktop", () => {
+    expect(setupCommand("chatgpt", stdio, connectionId)).toBe(
+      `'${stdio}' --connection ${connectionId}`,
+    );
+  });
+
+  it("builds valid Codex and Claude Code commands", () => {
+    expect(setupCommand("codex", stdio, connectionId)).toBe(
+      `codex mcp add thought-reviewer-123 -- '${stdio}' --connection ${connectionId}`,
+    );
+    expect(setupCommand("claude-code", stdio, connectionId)).toBe(
+      `claude mcp add --scope user thought-reviewer-123 -- '${stdio}' --connection ${connectionId}`,
+    );
+  });
+
+  it("shell-quotes an executable path containing an apostrophe", () => {
+    const quoted = "/Applications/Proof's Thought.app/Contents/MacOS/thought-mcp-stdio";
+    expect(setupCommand("codex", quoted, connectionId)).toBe(
+      `codex mcp add thought-reviewer-123 -- '/Applications/Proof'"'"'s Thought.app/Contents/MacOS/thought-mcp-stdio' --connection ${connectionId}`,
+    );
+  });
+
+  it("does not pretend the Claude Desktop installer exists", () => {
+    expect(setupCommand("claude-desktop", stdio, connectionId)).toBeNull();
+    expect(setupCommand("codex", "  ", connectionId)).toBeNull();
+  });
+});
+
 describe("AI support surfaces", () => {
   it("requires a choice on first launch and recommends Connect", async () => {
     const values = storage();
@@ -149,11 +148,11 @@ describe("AI support surfaces", () => {
     const controller = installAiSupport(document, { storage: storage() });
     await Promise.resolve();
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
-    expect(document.activeElement?.textContent).toBe("Connect");
+    expect(document.activeElement?.textContent).toContain("Connect an AI app");
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
-    expect(document.activeElement?.textContent).toBe("Basic");
+    expect(document.activeElement?.textContent).toContain("Write locally");
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
-    expect(document.activeElement?.textContent).toBe("Evidence details");
+    expect(document.activeElement?.textContent).toContain("reported");
     controller.destroy();
   });
 
@@ -218,29 +217,29 @@ describe("AI support surfaces", () => {
     expect(document.querySelector("#ai-startup-error-message")?.textContent).toBe(
       "incompatible daemon protocol",
     );
-    expect(document.querySelector("#ai-connection-command")?.textContent).toContain(
-      "available in the next update",
-    );
-    expect(document.querySelector<HTMLButtonElement>("#copy-ai-command")!.disabled).toBe(true);
-    expect(document.querySelector("#copy-ai-command")?.textContent).toBe(
-      "Available in the next update",
-    );
     controller.destroy();
   });
 
-  it("keeps setup unavailable after startup fails", () => {
+  it("stops reviewer polling when startup fails", () => {
     const values = storage();
     writeAiSupportMode(values, "connect");
-    const controller = installAiSupport(document, { storage: values });
-    const copy = document.querySelector<HTMLButtonElement>("#copy-ai-command")!;
-    expect(copy.disabled).toBe(true);
-
+    const list = vi.fn().mockResolvedValue([]);
+    const controller = installAiSupport(document, {
+      storage: values,
+      reviewerBridge: {
+        list,
+        create: vi.fn(),
+        update: vi.fn(),
+        reset: vi.fn(),
+        revoke: vi.fn(),
+      },
+    });
+    controller.setConnectionCommand("thought-mcp-stdio");
     controller.setStartupError("connection failed");
-    copy.click();
 
-    expect(copy.disabled).toBe(true);
-    expect(document.querySelector("#ai-connection-command")?.textContent).toContain(
-      "available in the next update",
+    expect(controller.isSidebarOpen()).toBe(false);
+    expect(document.querySelector<HTMLElement>("#reviewer-manager")?.dataset.mode).toBe(
+      "connect",
     );
     controller.destroy();
   });
@@ -301,20 +300,15 @@ describe("AI support surfaces", () => {
     controller.destroy();
   });
 
-  it("keeps setup disabled for every previewed client", () => {
+  it("keeps the planned Claude Desktop path visibly unavailable", () => {
     const values = storage();
     writeAiSupportMode(values, "connect");
     const controller = installAiSupport(document, { storage: values });
-    const copy = document.querySelector<HTMLButtonElement>("#copy-ai-command")!;
-
-    for (const button of document.querySelectorAll<HTMLButtonElement>("[data-ai-client]")) {
-      button.click();
-      expect(copy.disabled).toBe(true);
-      expect(copy.textContent).toBe("Available in the next update");
-      expect(document.querySelector("#ai-connection-command")?.textContent).toContain(
-        "available in the next update",
-      );
-    }
+    const desktop = document.querySelector<HTMLInputElement>(
+      'input[name="reviewer-client"][value="claude-desktop"]',
+    )!;
+    expect(desktop.disabled).toBe(true);
+    expect(desktop.closest("label")?.textContent).toContain("Unavailable");
     controller.destroy();
   });
 
@@ -324,7 +318,7 @@ describe("AI support surfaces", () => {
     const controller = installAiSupport(document, { storage: values });
 
     expect(document.querySelector("#ai-mode-evidence")?.textContent).toBe(
-      "Planned setup, not connection proof",
+      "Configured route · tool details reported",
     );
     controller.destroy();
   });

@@ -285,6 +285,9 @@ fn a_fresh_database_reaches_the_current_version() {
         "provenance_receipts",
         "lineage_spans",
         "lineage_state",
+        "reviewer_connections",
+        "reviewer_connection_documents",
+        "reviewer_connection_events",
     ] {
         assert!(
             object_exists(&connection, "table", table),

@@ -784,6 +784,47 @@ fn restart_preserves_frozen_mcp_label_and_connection_group() {
 }
 
 #[test]
+fn mcp_event_model_does_not_fall_back_to_actor_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("thought.db");
+    let workspace = Workspace::open(&path).unwrap();
+    let created = workspace.create_document("", &editor()).unwrap();
+    let actor = ActorRef::reviewer(
+        "reviewer-1",
+        "Configured reviewer",
+        Some("model-from-an-earlier-call"),
+        Some("turn-2"),
+    );
+    let context = MutationContext::mcp_reported(
+        "Configured for Codex",
+        Some("reviewer-1".into()),
+        Some("openai".into()),
+        None,
+    );
+    workspace
+        .replace_block_with_context(
+            &created.doc_id,
+            &created.blocks[0].block_id,
+            "Current call omitted its model.",
+            None,
+            &actor,
+            &context,
+        )
+        .unwrap();
+    drop(workspace);
+
+    let connection = Connection::open(path).unwrap();
+    let reported_model: Option<String> = connection
+        .query_row(
+            "SELECT reported_model FROM provenance_events WHERE doc_id = ?1 ORDER BY event_id DESC LIMIT 1",
+            [&created.doc_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reported_model, None);
+}
+
+#[test]
 fn deleting_only_lineage_cache_triggers_an_identical_rebuild() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("thought.db");

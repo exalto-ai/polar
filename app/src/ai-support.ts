@@ -1,60 +1,22 @@
+import type { ReviewerBridge } from "./reviewer-bridge";
+import {
+  installReviewerConnections,
+  type ReviewerDocumentContext,
+} from "./reviewer-connections";
+export {
+  REVIEWER_CLIENTS as AI_CLIENTS,
+  reviewerSetupCommand as setupCommand,
+} from "./reviewer-setup";
+export type { ReviewerClient as AiClient } from "./reviewer-setup";
+
 export const AI_SUPPORT_STORAGE_KEY = "thought.ai-support.v1";
 
 export type AiSupportMode = "basic" | "connect";
-export type AiClient = "chatgpt" | "codex" | "claude-desktop" | "claude-code";
 
 type StoredPreference = {
   version: 1;
   mode: AiSupportMode;
 };
-
-export type AiClientDefinition = {
-  id: AiClient;
-  name: string;
-  shortName: string;
-  availability: "planned";
-  setup: string;
-  caveat: string | null;
-};
-
-export const AI_CLIENTS: readonly AiClientDefinition[] = [
-  {
-    id: "chatgpt",
-    name: "ChatGPT desktop",
-    shortName: "ChatGPT",
-    availability: "planned",
-    setup:
-      "A guided local reviewer connection for ChatGPT desktop is coming in the next update.",
-    caveat: "ChatGPT on the web cannot reach this local editor.",
-  },
-  {
-    id: "codex",
-    name: "Codex",
-    shortName: "Codex",
-    availability: "planned",
-    setup:
-      "A guided local reviewer connection for Codex is coming in the next update.",
-    caveat: "Proof of Thought will not install or validate the Codex executable.",
-  },
-  {
-    id: "claude-desktop",
-    name: "Claude Desktop",
-    shortName: "Claude",
-    availability: "planned",
-    setup:
-      "A guided local reviewer connection for Claude Desktop is coming in the next update.",
-    caveat: "Claude Desktop will require a packaged and tested local extension.",
-  },
-  {
-    id: "claude-code",
-    name: "Claude Code",
-    shortName: "Claude Code",
-    availability: "planned",
-    setup:
-      "A guided local reviewer connection for Claude Code is coming in the next update.",
-    caveat: "Proof of Thought will not install or validate the Claude executable.",
-  },
-] as const;
 
 export function safeLocalStorage(target: { readonly localStorage: Storage }): Storage | null {
   try {
@@ -90,6 +52,8 @@ export function writeAiSupportMode(storage: Storage | null, mode: AiSupportMode)
 
 type AiSupportControllerOptions = {
   storage?: Storage | null;
+  copyText?: (text: string) => Promise<void>;
+  reviewerBridge?: ReviewerBridge | null;
   onModeChange?: (mode: AiSupportMode) => void;
   onNotice?: (message: string, kind?: "info" | "error") => void;
 };
@@ -99,6 +63,9 @@ export type AiSupportController = {
   isChoosingMode(): boolean;
   isSidebarOpen(): boolean;
   whenInitialChoiceMade(): Promise<AiSupportMode>;
+  setConnectionCommand(command: string): void;
+  setReviewerBridge(bridge: ReviewerBridge | null): void;
+  setCurrentDocument(context: ReviewerDocumentContext | null): void;
   setStartupError(message: string): void;
   openSidebar(): void;
   closeSidebar(): void;
@@ -118,6 +85,7 @@ export function installAiSupport(
   options: AiSupportControllerOptions = {},
 ): AiSupportController {
   const storage = options.storage === undefined ? safeLocalStorage(window) : options.storage;
+  const copyText = options.copyText ?? ((text: string) => navigator.clipboard.writeText(text));
   const toggle = required<HTMLButtonElement>(root, "#ai-support-toggle");
   const sidebar = required<HTMLElement>(root, "#ai-support-sidebar");
   const sidebarClose = required<HTMLButtonElement>(root, "#ai-sidebar-close");
@@ -128,25 +96,17 @@ export function installAiSupport(
   const summaryCost = required<HTMLElement>(root, "#ai-mode-cost");
   const connectPanel = required<HTMLElement>(root, "#ai-connect-panel");
   const basicPanel = required<HTMLElement>(root, "#ai-basic-panel");
-  const clientSetup = required<HTMLElement>(root, "#ai-client-setup");
-  const clientCaveat = required<HTMLElement>(root, "#ai-client-caveat");
-  const commandBox = required<HTMLElement>(root, "#ai-connection-command");
-  const copyButton = required<HTMLButtonElement>(root, "#copy-ai-command");
   const modal = required<HTMLElement>(root, "#ai-onboarding");
   const modalDialog = required<HTMLElement>(modal, '[role="dialog"]');
   const modalHeading = required<HTMLElement>(modal, "#ai-onboarding-title");
   const modalClose = required<HTMLButtonElement>(root, "#ai-onboarding-close");
   const startupError = required<HTMLElement>(root, "#ai-startup-error");
   const startupErrorMessage = required<HTMLElement>(root, "#ai-startup-error-message");
-  const clientButtons = [
-    ...root.querySelectorAll<HTMLButtonElement>("[data-ai-client]"),
-  ];
   const modeButtons = [
     ...root.querySelectorAll<HTMLButtonElement>("[data-ai-mode]"),
   ];
 
   let currentMode = readAiSupportMode(storage);
-  let currentClient: AiClient = "chatgpt";
   let startupFailure: string | null = null;
   let sidebarOpen = false;
   let modalOpen = currentMode === null;
@@ -159,6 +119,11 @@ export function installAiSupport(
     : Promise.resolve(currentMode);
   const disposers: Array<() => void> = [];
   const backgroundBlockedElements = new Set<HTMLElement>();
+  const reviewers = installReviewerConnections(root, {
+    bridge: options.reviewerBridge,
+    copyText,
+    onNotice: options.onNotice,
+  });
 
   function listen<K extends keyof DocumentEventMap>(
     target: Document,
@@ -184,49 +149,27 @@ export function installAiSupport(
     disposers.push(() => target.removeEventListener(event, listener));
   }
 
-  function client(): AiClientDefinition {
-    return AI_CLIENTS.find(({ id }) => id === currentClient)!;
-  }
-
-  function renderClient() {
-    const selected = client();
-    for (const button of clientButtons) {
-      const active = button.dataset.aiClient === currentClient;
-      button.setAttribute("aria-pressed", String(active));
-      button.dataset.availability = AI_CLIENTS.find(
-        ({ id }) => id === button.dataset.aiClient,
-      )?.availability;
-    }
-    clientSetup.textContent = selected.setup;
-    clientCaveat.textContent = selected.caveat ?? "";
-    clientCaveat.hidden = !selected.caveat;
-
-    commandBox.textContent = "Connection setup will be available in the next update.";
-    commandBox.dataset.placeholder = "true";
-    copyButton.disabled = true;
-    copyButton.textContent = "Available in the next update";
-  }
-
   function renderMode() {
     const connected = currentMode === "connect";
     for (const button of modeButtons) {
       button.setAttribute("aria-pressed", String(button.dataset.aiMode === currentMode));
     }
     toggle.dataset.mode = currentMode ?? "unconfigured";
-    toggle.textContent = currentMode === null ? "AI support" : connected ? "AI preview" : "Basic";
-    summaryTitle.textContent = connected ? "Reviewer setup" : "Basic recording";
+    toggle.textContent = currentMode === null ? "AI support" : connected ? "Reviewers" : "Basic";
+    summaryTitle.textContent = connected ? "Reviewer connections" : "Basic recording";
     summaryDescription.textContent = connected
-      ? "Choose an AI app to preview how reviewer setup will work. Connection setup is available in the next update."
-      : "Proof of Thought records how the visible document changed without setting up or calling an AI service.";
+      ? "Give each saved AI route its own local identity and only the document access it needs."
+      : "Proof of Thought itself makes no AI request. Reviewers already configured keep their access until you change or remove it below.";
     summaryEvidence.textContent = connected
-      ? "Planned setup, not connection proof"
+      ? "Configured route · tool details reported"
       : "Local edit evidence";
-    summaryEvidence.dataset.assurance = connected ? "setup" : "observed";
+    summaryEvidence.dataset.assurance = connected ? "reported" : "observed";
     summaryCost.textContent = connected
       ? "Proof of Thought adds no API usage charge. Availability and limits depend on your AI app and plan."
-      : "Proof of Thought makes no AI request. Existing external tool connections are managed in that AI app.";
+      : "Proof of Thought makes no AI request. Existing reviewer access remains manageable below.";
     connectPanel.hidden = !connected;
     basicPanel.hidden = connected;
+    reviewers.setMode(currentMode);
     if (currentMode !== null) options.onModeChange?.(currentMode);
   }
 
@@ -254,6 +197,7 @@ export function installAiSupport(
     startupErrorMessage.textContent = startupFailure ?? "";
     setBackgroundBlocked(modalOpen);
     root.documentElement.dataset.aiSupportMode = currentMode ?? "unconfigured";
+    reviewers.setSidebarOpen(sidebarOpen);
     if (modalOpen) {
       queueMicrotask(() => {
         modalDialog.scrollTop = 0;
@@ -309,6 +253,7 @@ export function installAiSupport(
   }
 
   function dismissModePicker(): boolean {
+    if (reviewers.dismissModal()) return true;
     if (!modalOpen || currentMode === null || startupFailure !== null) return false;
     closeModal();
     return true;
@@ -329,14 +274,6 @@ export function installAiSupport(
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       chooseMode(value);
-    });
-  }
-  for (const button of clientButtons) {
-    listen(button, "click", () => {
-      const value = button.dataset.aiClient as AiClient;
-      if (!AI_CLIENTS.some(({ id }) => id === value)) return;
-      currentClient = value;
-      renderClient();
     });
   }
   listen(window, "storage", (event) => {
@@ -381,19 +318,24 @@ export function installAiSupport(
   });
 
   renderMode();
-  renderClient();
   renderSurfaces();
 
   return {
     mode: () => currentMode,
-    isChoosingMode: () => modalOpen,
+    isChoosingMode: () => modalOpen || reviewers.isModalOpen(),
     isSidebarOpen: () => sidebarOpen,
     whenInitialChoiceMade: () => initialChoice,
+    setConnectionCommand(command: string) {
+      reviewers.setStdioExecutable(command);
+      startupFailure = null;
+      renderSurfaces();
+    },
+    setReviewerBridge: (bridge) => reviewers.setBridge(bridge),
+    setCurrentDocument: (context) => reviewers.setDocumentContext(context),
     setStartupError(message: string) {
       startupFailure = message.trim() || "Unknown startup problem.";
       modalOpen = true;
       sidebarOpen = false;
-      renderClient();
       renderSurfaces();
     },
     openSidebar,
@@ -402,6 +344,7 @@ export function installAiSupport(
     dismissModePicker,
     destroy() {
       for (const dispose of disposers.splice(0)) dispose();
+      reviewers.destroy();
       setBackgroundBlocked(false);
       delete root.documentElement.dataset.aiSupportMode;
     },

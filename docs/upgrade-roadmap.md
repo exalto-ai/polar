@@ -28,8 +28,9 @@ the owning pull request.
 | `codex/tauri-ci-smoke` | Non-blocking Tauri smoke check | Separate base branch |
 | PR #10, `codex/provenance-delta-foundation` | Semantic delta provenance foundation | Stacked predecessor |
 | PR #11, `codex/provenance-anchors` | Exact anchored evidence and editor-only provenance ingress | Stacked predecessor |
-| Current branch, `codex/ai-support-onboarding` | First-launch choice and AI support sidebar shell | Implemented here |
-| Next connection PR | Durable reviewer identities, permissions, status, and every supported client | Planned |
+| `codex/ai-support-onboarding` | First-launch choice and AI support sidebar shell | Stacked predecessor |
+| Current branch, `codex/reviewer-connections` | Durable reviewer identities, permissions, status, reset, and revocation | Ready for review |
+| Consumer provenance PR | Surviving contributions by stable source, with evidence-strength gates | Planned |
 | Suggestions PR | Replicated proposals, inline review, Accept, Reject, and conflicts | Planned |
 | Pro PR | Secure provider keys, built-in chat, files, model and thinking controls, verified traces | Planned |
 | Seal PR | Signed provenance bundle, explicit publishing, live anchoring, and Seal verification page | Planned |
@@ -39,7 +40,7 @@ are retargeted or rebased without collapsing their review boundaries.
 
 ## 1. First launch and AI support shell
 
-Owner: current branch
+Owner: onboarding shell parent
 
 - [x] Connect is the visually recommended first-launch choice, but requires an explicit click.
 - [x] Basic is an explicit local recording choice. Proof of Thought initiates no AI request or
@@ -58,17 +59,20 @@ Owner: current branch
 - [x] The interface explains that connecting never publishes a document.
 - [x] Reported and verified are explained without implying correctness, safety, usefulness, or
   human authorship.
-- [x] ChatGPT desktop, Codex, Claude Desktop, and Claude Code appear as clear connection previews.
-  No setup command is displayed or copied in this pull request.
-- [x] Selecting Connect is not treated as proof of a live connection. The shell makes no inferred
-  connection-status claim from daemon health or caller-controlled actor data.
+- [x] ChatGPT desktop, Codex, and Claude Code receive setup guidance derived from the daemon's
+  current local STDIO command. These are setup guides, not validated installed-client status.
+- [x] Selecting Connect or copying setup is not treated as proof of a live connection. The shell
+  makes no inferred connection-status claim from daemon health or caller-controlled actor data.
 - [x] ChatGPT web is not presented as able to reach the local editor.
 - [x] Claude Desktop is visibly tracked but cannot be marked ready until its local desktop
   extension is packaged and tested.
-- [x] Every client card keeps setup disabled with the consumer label `Available in the next
-  update` until the connection layer exposes bounded read-only routes.
-- [x] The preview explains that a future connected AI app may send document content to its
-  provider under that app's privacy settings.
+- [x] The parent shell prominently disclosed that its broad shared setup could read, search,
+  create, edit, and trash documents across the local workspace, work with no editor window open,
+  edit directly, send returned content to the AI provider, and require removal in the configured
+  AI app.
+- [x] The parent command was explicitly labeled as a temporary broad legacy setup, not a durable
+  reviewer connection. Per-connection credentials, permissions, status, and in-app revocation are
+  release gates for the connection-core pull request that now follows it.
 - [x] The old raw connection-command popover is removed so it cannot bypass the choice,
   disclosure, or client availability guidance.
 - [x] Pro is a disabled preview. It is described as an add-on that can coexist with Connect.
@@ -80,40 +84,63 @@ Owner: current branch
 - [x] Browser visual review covers keyboard selection, startup failure, the narrow sidebar, and
   the expanded onboarding disclosure at 560×400 and 1040×400.
 - [ ] Manual visual review in the macOS WKWebView at normal and narrow window sizes.
-- [ ] Build and verify a fresh Apple Silicon DMG from the final reviewed stack before release.
 
 ## 2. Reviewer connections
 
-Owner: next connection PR
+Owner: current branch
 
-- [ ] Package and test a consumer-friendly local connection for ChatGPT desktop.
-- [ ] Package and test a consumer-friendly local connection for Codex.
+- [x] Generate consumer-friendly, connection-specific local setup for ChatGPT desktop, Codex, and
+  Claude Code without exposing the raw credential to the webview or command text.
+- [ ] Complete the packaged-client manual acceptance pass for ChatGPT desktop.
+- [ ] Complete the packaged-client manual acceptance pass for Codex.
 - [ ] Package and test a Claude Desktop extension.
-- [ ] Package and test Claude Code setup.
-- [ ] Replace the shared caller-selected MCP actor identity with a durable connection registry.
-- [ ] Give every connection a stable ID, app/provider, display label, reported model, status,
-  granted permissions, created time, and revocation state.
-- [ ] Issue a unique credential for every connection, store it in native secure storage, and
-  support rotation, expiration, and immediate revocation without affecting other reviewers.
-- [ ] Support multiple simultaneous reviewers, including two reviewers from the same app.
-- [ ] Keep same-name reviewers separate and preserve identity across reconnects.
-- [ ] Make configured, connected, disconnected, failed, and revoked states distinct.
-- [ ] Add, rename, reconnect, permission-change, and remove/revoke actions to the sidebar.
-- [ ] Ensure one connection cannot use another connection's identity or permissions.
-- [ ] Remove the temporary shared-capability exception before presenting any reviewer as a
-  configured, independently permissioned connection.
-- [ ] Freeze historical labels on events so renaming a connection does not rewrite history.
-- [ ] Bind direct MCP edits to exact semantic ranges, or show them only as weaker V1 activity
-  evidence until exact ranges are available.
-- [ ] Show `ChatGPT (reported)`, `Claude (reported)`, `Codex (reported)`, and
-  `Claude Code (reported)` only when authenticated connection evidence supports the app label.
-- [ ] Never render a caller-supplied model name as verified.
-- [ ] Basic causes Proof of Thought to initiate no reviewer or publication network action and
+- [ ] Complete the packaged-client manual acceptance pass for Claude Code.
+- [x] Replace shared caller-selected local MCP actor identity with a durable reviewer connection
+  registry.
+- [x] Give every connection an immutable ID, configured client and provider, mutable display
+  label, explicit permissions, lifecycle status, creation time, and revocation state. A model name
+  remains reported request metadata rather than a verified registry fact.
+- [x] Issue one unique credential per connection, keep raw credentials in native secure storage,
+  and support reset and immediate revocation without changing or disabling other reviewers.
+- [x] Store only credential hashes in SQLite. Keep raw credentials out of the webview, setup
+  commands, discovery data, logs, lifecycle events, and provenance.
+- [x] Support multiple simultaneous reviewers, including two reviewers from the same app.
+- [x] Keep same-name reviewers separate and preserve identity across reconnects and credential
+  reset.
+- [x] Make configured, connected, disconnected, failed, and revoked states distinct, including
+  lease expiry, clean disconnect, daemon restart, and anonymous-authentication failure behavior.
+- [x] Add, rename, reconnect, permission-change, credential-reset, and revoke actions to the
+  sidebar.
+- [x] Give each reviewer current-document or all-document scope plus required read permission.
+  Keep durable connections read-only until reviewable suggestions ship.
+- [x] Bind each MCP session to its authenticated connection and recheck current authorization for
+  every operation so one connection cannot use another connection's identity or permissions.
+- [x] Serialize permission changes, reset, and revocation against in-flight authorization so a
+  completed management action cannot race a later mutation.
+- [x] Restrict the shared process-lifetime MCP capability to internal read-only use. External
+  reviewers have no shared write fallback and the editor evidence route remains separately
+  authenticated.
+- [x] Preserve immutable connection identity and historical event labels when a display label or
+  credential changes.
+- [x] Freeze the canonical selected-document allowlist into each append-only lifecycle snapshot so
+  later access changes cannot make earlier authorization history ambiguous.
+- [x] Do not expose durable direct MCP edits before the suggestion layer. A future direct-write
+  override must be explicit, per-session, and expiring.
+- [x] Show `Configured for ChatGPT desktop`, `Configured for Codex`, and corresponding Claude
+  route labels as saved routing configuration, never as proof that the named app made the call.
+- [x] Generate MCP server names in the `thought-<connection suffix>` machine namespace. Earlier
+  unreleased stacked setup commands used `proof-of-thought-<connection suffix>` and must be removed
+  from the client before copying the replacement command.
+- [x] Store a caller-supplied model only on the event for that call, label it as tool-reported,
+  never fall back to a previous connection model, and never render it as verified.
+- [x] Basic causes Proof of Thought to initiate no reviewer or publication network action and
   provides a supported way to inspect and revoke connections previously configured in AI apps.
+- [x] State the local trust boundary plainly: connection credentials protect the Proof of Thought
+  MCP surface, but they do not sandbox another process running as the same operating-system user.
 
 ## 3. Consumer provenance view
 
-Owner: next connection PR unless split into its own named blocking PR
+Owner: consumer provenance PR
 
 - [ ] Show surviving current-wording contributions by concrete source.
 - [ ] Support `Written here`, `Pasted`, `Imported`, `Edited here`, and
@@ -205,16 +232,19 @@ Owner: Seal PR plus the required Seal repository change
 
 - [ ] Record a real Japanese or Pinyin IME transaction through WKWebView, persisted anchored
   transport, and restart before enabling exact percentages.
-- [ ] Keep actor, ingress, and assurance as independent dimensions in storage and UI.
+- [x] Keep actor, ingress, and assurance as independent dimensions in storage and connection UI.
 - [ ] Record deltas, not raw keystrokes, clipboard history, or copy-out activity.
 - [ ] Keep cost and privacy copy in the same PR that activates each capability.
-- [ ] Give immutable evidence append-only and tamper coverage. Give mutable preferences,
-  connection state, and proposal state authorized transition coverage. Give both categories
-  migration, restart/rebuild, atomic rollback, retry, and mixed-history coverage where relevant.
+- [x] Give reviewer connection state authorized transitions, migration, restart, rollback, and
+  credential-recovery coverage while keeping lifecycle events append-only and credential-free.
+- [ ] Give future proposal state authorized transition, migration, restart/rebuild, atomic
+  rollback, retry, and conflict coverage in the suggestions pull request.
 - [ ] Make connection consent, API key use, file disclosure, and publication separate actions.
 - [ ] Run keyboard, focus, screen-reader, reduced-motion, narrow-window, offline, restart, and
   recovery acceptance checks for every new interactive surface.
 - [ ] Build and verify a fresh DMG for every consumer-facing PR.
+- [x] Verify stable Developer ID helper identities and shared Keychain access in signed releases;
+  treat ad hoc DMGs as same-build tests rather than proof of cross-update credential continuity.
 
 ## Current official client support references
 
@@ -230,4 +260,7 @@ Owner: Seal PR plus the required Seal repository change
   <https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop>
 
 These links support setup wording only. They do not authenticate which app or model produced a
-specific edit. That requires the durable Proof of Thought connection identity planned above.
+specific edit. In particular, ChatGPT desktop and Codex share host configuration, so choosing one
+in Proof of Thought records the intended route rather than runtime app identity. The durable
+connection identity authenticates the local ingress; provider-authenticated identity and model
+claims remain future Pro work.

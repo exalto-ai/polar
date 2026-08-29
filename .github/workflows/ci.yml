@@ -85,6 +85,8 @@ jobs:
       - run: npm run build --prefix app
       - name: Stage host sidecars for Tauri
         run: ./scripts/stage-sidecars.sh "$(rustc -vV | awk '/^host:/ { print $2 }')"
+      - name: Test native credential storage
+        run: cargo test -p thought-credentials --locked
       - run: cargo test --manifest-path app/src-tauri/Cargo.toml --locked
       - name: Build unsigned host app bundle
         working-directory: app

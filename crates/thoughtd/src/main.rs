@@ -15,15 +15,27 @@ mod tools;
 
 use thoughtd::sync;
 
+use thoughtd::connections::{
+    AuthenticatedPrincipal, ConnectionRegistry, REVIEWER_INSTANCE_HEADER, now_ms,
+};
+use thoughtd::sessions::LifecycleSessionManager;
 use thoughtd::{discovery, logging};
 
+use axum::Extension;
+use axum::extract::State;
 use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::session::{
+    SessionId, SessionManager, local::LocalSessionManager,
+};
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use std::sync::Arc;
+use std::time::Duration;
 use thought_mcp::Workspace;
+
+const SESSION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn bearer(req: &Request<axum::body::Body>) -> Option<String> {
     req.headers()
@@ -58,6 +70,27 @@ async fn editor_health() -> axum::Json<discovery::HealthResponse> {
     axum::Json(discovery::HealthResponse::editor())
 }
 
+async fn reviewer_disconnected(
+    State(reviewers): State<Arc<ConnectionRegistry>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    headers: axum::http::HeaderMap,
+) -> StatusCode {
+    let instance_id = reviewer_instance(&headers);
+    match reviewers.note_disconnected(&principal, instance_id.as_deref(), now_ms()) {
+        Ok(()) => StatusCode::NO_CONTENT,
+        Err(_) => StatusCode::FORBIDDEN,
+    }
+}
+
+fn reviewer_instance(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(REVIEWER_INSTANCE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .map(str::to_string)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = std::env::args()
@@ -84,6 +117,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     let workspace = Arc::new(Workspace::open(&db_path)?);
+    let local_session_manager = Arc::new(LocalSessionManager::default());
+    let close_session_manager = local_session_manager.clone();
+    let reviewers = Arc::new(
+        ConnectionRegistry::platform(workspace.clone()).with_session_closer(move |session_id| {
+            let manager = close_session_manager.clone();
+            let session_id = SessionId::from(session_id);
+            tokio::spawn(async move {
+                if let Err(error) = manager.close_session(&session_id).await {
+                    tracing::warn!(%session_id, %error, "could not close reviewer MCP session");
+                }
+            });
+        }),
+    );
+    let weak_reviewers = Arc::downgrade(&reviewers);
+    let session_manager = Arc::new(LifecycleSessionManager::new(
+        local_session_manager,
+        move |session_id| {
+            let Some(reviewers) = weak_reviewers.upgrade() else {
+                return;
+            };
+            if let Err(error) = reviewers.forget_session_binding(session_id.as_ref()) {
+                tracing::warn!(%session_id, %error, "could not forget closed MCP session");
+            }
+        },
+    ));
     let token = discovery::random_token()?;
     let editor_token = loop {
         let candidate = discovery::random_token()?;
@@ -93,9 +151,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let service_workspace = workspace.clone();
+    let service_reviewers = reviewers.clone();
     let service = StreamableHttpService::new(
-        move || Ok(tools::Thought::new(service_workspace.clone())),
-        Arc::new(LocalSessionManager::default()),
+        move || {
+            Ok(tools::Thought::new(
+                service_workspace.clone(),
+                service_reviewers.clone(),
+            ))
+        },
+        session_manager.clone(),
         StreamableHttpServerConfig::default()
             .with_max_request_body_bytes(thoughtd::MAX_MCP_REQUEST_BODY_BYTES),
     );
@@ -105,22 +169,94 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // labels. It is not a sandbox against a hostile same-user process that can
     // read the private discovery file or the app's own state.
     let mcp_expected = token.clone();
+    let mcp_reviewers = reviewers.clone();
+    let mcp_session_manager = session_manager.clone();
     let mcp_routes = axum::Router::new()
         .route(discovery::MCP_HEALTH_PATH, axum::routing::get(mcp_health))
+        .route(
+            "/reviewer/status",
+            axum::routing::delete(reviewer_disconnected),
+        )
         .nest_service("/mcp", service)
         .layer(middleware::from_fn(
-            move |req: Request<axum::body::Body>, next: Next| {
+            move |mut req: Request<axum::body::Body>, next: Next| {
                 let expected = mcp_expected.clone();
+                let reviewers = mcp_reviewers.clone();
+                let session_manager = mcp_session_manager.clone();
                 async move {
-                    match bearer(&req) {
-                        Some(presented) if presented == expected => {
-                            Ok::<Response, StatusCode>(next.run(req).await)
+                    let instance_id = reviewer_instance(req.headers());
+                    let Some(presented) = bearer(&req) else {
+                        return Err(StatusCode::UNAUTHORIZED);
+                    };
+                    let principal = if presented == expected {
+                        reviewers.internal_principal()
+                    } else {
+                        match reviewers.authenticate_reviewer(&presented, now_ms()) {
+                            Ok(Some(principal)) => principal,
+                            Ok(None) => return Err(StatusCode::UNAUTHORIZED),
+                            Err(error) => {
+                                tracing::warn!(error = %error, "reviewer authentication failed");
+                                return Err(StatusCode::SERVICE_UNAVAILABLE);
+                            }
                         }
-                        _ => Err(StatusCode::UNAUTHORIZED),
+                    };
+
+                    if let Some(session_id) = req
+                        .headers()
+                        .get("mcp-session-id")
+                        .and_then(|value| value.to_str().ok())
+                        && !reviewers
+                            .session_matches(
+                                session_id,
+                                &principal,
+                                instance_id.as_deref(),
+                                now_ms(),
+                            )
+                            .unwrap_or(false)
+                    {
+                        return Err(StatusCode::UNAUTHORIZED);
                     }
+
+                    if let Err(error) =
+                        reviewers.note_authenticated(&principal, instance_id.as_deref(), now_ms())
+                    {
+                        tracing::warn!(error = %error, "reviewer heartbeat failed");
+                        return Err(StatusCode::UNAUTHORIZED);
+                    }
+                    req.extensions_mut().insert(principal.clone());
+                    let response = next.run(req).await;
+                    if let Some(session_id) = response
+                        .headers()
+                        .get("mcp-session-id")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string)
+                    {
+                        if !reviewers
+                            .bind_session(&session_id, &principal, instance_id.as_deref(), now_ms())
+                            .unwrap_or(false)
+                        {
+                            return Err(StatusCode::UNAUTHORIZED);
+                        }
+                        // If a worker closed just before its initialize
+                        // response reached this layer, its callback ran before
+                        // the binding existed. Bind first, then verify the
+                        // transport is still live. A later close invokes the
+                        // callback after the binding exists.
+                        let transport_id = SessionId::from(session_id.as_str());
+                        if !session_manager
+                            .has_session(&transport_id)
+                            .await
+                            .unwrap_or(false)
+                        {
+                            let _ = reviewers.forget_session_binding(&session_id);
+                            return Err(StatusCode::UNAUTHORIZED);
+                        }
+                    }
+                    Ok::<Response, StatusCode>(response)
                 }
             },
-        ));
+        ))
+        .with_state(reviewers.clone());
 
     let sync_expected = editor_token.clone();
     let sync_state = sync::SyncState::new(workspace.clone());
@@ -134,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // it must not inherit this editor-only Observed trust.
         .route("/sync", axum::routing::any(sync::handler))
         .with_state(sync_state)
-        .merge(editor_api::routes(workspace.clone()))
+        .merge(editor_api::routes(workspace.clone(), reviewers.clone()))
         .layer(middleware::from_fn(
             move |req: Request<axum::body::Body>, next: Next| {
                 let expected = sync_expected.clone();
@@ -197,7 +333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     headers.insert(
                         "access-control-allow-methods",
-                        HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+                        HeaderValue::from_static("GET, POST, PATCH, DELETE, OPTIONS"),
                     );
                     headers.insert(
                         "access-control-expose-headers",
@@ -226,11 +362,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Remove the discovery file on the way out: a stale one points clients at a
     // port that is either dead or, worse, someone else's.
     let cleanup = discovery_path.clone();
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await;
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        while !*shutdown_rx.borrow() {
+            if shutdown_rx.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+    let server = async move { server.await };
+    tokio::pin!(server);
+    let result = tokio::select! {
+        result = &mut server => result,
+        signal = tokio::signal::ctrl_c() => {
+            if let Err(error) = signal {
+                tracing::warn!(%error, "could not listen for interrupt signal");
+            }
+            // Persist the stop state before draining. The server future is not
+            // polled during the drain, so it accepts no new sockets, and the
+            // watch value cannot lose the notification when polling resumes.
+            let _ = shutdown_tx.send(true);
+            match tokio::time::timeout(SESSION_DRAIN_TIMEOUT, session_manager.shutdown()).await {
+                Ok(closed) => tracing::info!(closed, "drained MCP sessions"),
+                Err(_) => tracing::warn!("timed out while draining MCP sessions"),
+            }
+            match tokio::time::timeout(SERVER_SHUTDOWN_TIMEOUT, &mut server).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!("timed out waiting for HTTP connections to close");
+                    Ok(())
+                }
+            }
+        }
+    };
     tracing::info!("shutting down");
     let _ = std::fs::remove_file(&cleanup);
     result?;

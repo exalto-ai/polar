@@ -72,12 +72,12 @@ the developer to resolve instead of causing one process to replace another.
 
 ## Shape
 
-A Rust daemon owns the CRDT and the SQLite store. The Tauri UI is a client, MCP agents are
-clients, and the relay sync client is a client — all speaking one update protocol, so an
-agent editing a document with no window open is the normal path rather than a special case.
+A Rust daemon owns the CRDT and the SQLite store. The Tauri UI and MCP reviewers are clients.
+A future relay sync client will speak the same update protocol. Reviewers can inspect documents
+with no window open.
 
 Documents are a ProseMirror tree in a Yjs `XmlFragment`. Markdown is a projection used for
-agent I/O, export, and search — never the storage format.
+agent I/O, export, and search. It is never the storage format.
 
 Attribution lives in the SQLite op log rather than the CRDT, because Yjs cannot carry it.
 That log is what makes *who wrote this block* answerable at all, and it is never compacted

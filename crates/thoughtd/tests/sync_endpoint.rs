@@ -358,12 +358,13 @@ async fn retrying_an_anchored_batch_after_a_lost_ack_is_exactly_once() {
             update: local.diff_since(&before),
         }],
     };
+    let edits_before_batch = editor_edit_count(&daemon, &doc_id);
     send(&mut socket, batch.clone()).await;
     // The transport delivered this ACK, but the application intentionally
     // forgets it and reconnects. That models a disconnect after the durable
     // commit but before the client records the acknowledgement.
     recv_ack(&mut socket, &doc_id).await;
-    assert_eq!(editor_edit_count(&daemon, &doc_id), 1);
+    assert_eq!(editor_edit_count(&daemon, &doc_id), edits_before_batch + 1);
     let lineage_before_retry =
         daemon.call("document_lineage", serde_json::json!({ "doc_id": doc_id }));
     drop(socket);
@@ -390,7 +391,7 @@ async fn retrying_an_anchored_batch_after_a_lost_ack_is_exactly_once() {
 
     assert_eq!(
         editor_edit_count(&daemon, &doc_id),
-        1,
+        edits_before_batch + 1,
         "retry must not append another durable edit/provenance event"
     );
     assert_eq!(
@@ -404,6 +405,7 @@ async fn retrying_an_anchored_batch_after_a_lost_ack_is_exactly_once() {
 async fn a_partial_anchored_batch_retries_without_duplicating_its_prefix() {
     let daemon = Daemon::start();
     let doc_id = daemon.create_document("");
+    let edits_before_batch = editor_edit_count(&daemon, &doc_id);
     let mut observer = connect(&daemon).await;
     send(
         &mut observer,
@@ -500,7 +502,7 @@ async fn a_partial_anchored_batch_retries_without_duplicating_its_prefix() {
         "a failed tail must not duplicate the durable prefix",
     )
     .await;
-    assert_eq!(editor_edit_count(&daemon, &doc_id), 1);
+    assert_eq!(editor_edit_count(&daemon, &doc_id), edits_before_batch + 1);
     assert_eq!(
         daemon.read_document(&doc_id)["markdown"].as_str(),
         Some("durable prefix")
@@ -527,7 +529,7 @@ async fn a_partial_anchored_batch_retries_without_duplicating_its_prefix() {
         "retry must not broadcast the durable prefix twice",
     )
     .await;
-    assert_eq!(editor_edit_count(&daemon, &doc_id), 2);
+    assert_eq!(editor_edit_count(&daemon, &doc_id), edits_before_batch + 2);
     assert_eq!(
         daemon.read_document(&doc_id)["markdown"].as_str(),
         Some("completed retry")
@@ -540,7 +542,7 @@ async fn a_partial_anchored_batch_retries_without_duplicating_its_prefix() {
         "a fully replayed batch must not broadcast any mutation",
     )
     .await;
-    assert_eq!(editor_edit_count(&daemon, &doc_id), 2);
+    assert_eq!(editor_edit_count(&daemon, &doc_id), edits_before_batch + 2);
 
     let before_conflict = local.state_vector();
     local
@@ -577,7 +579,7 @@ async fn a_partial_anchored_batch_retries_without_duplicating_its_prefix() {
         "conflicting client event bytes must not broadcast",
     )
     .await;
-    assert_eq!(editor_edit_count(&daemon, &doc_id), 2);
+    assert_eq!(editor_edit_count(&daemon, &doc_id), edits_before_batch + 2);
     assert_eq!(
         daemon.read_document(&doc_id)["markdown"].as_str(),
         Some("completed retry")
@@ -688,15 +690,7 @@ async fn every_editor_source_reaches_document_lineage() {
     ];
 
     for (index, (source, expected_ingress, expected_assurance)) in cases.into_iter().enumerate() {
-        let created = daemon.call(
-            "create_document",
-            serde_json::json!({
-                "title": "",
-                "agent": "test",
-                "session": format!("source-map-{index}")
-            }),
-        );
-        let doc_id = created["doc_id"].as_str().expect("doc_id").to_string();
+        let doc_id = daemon.create_document("");
 
         let mut socket = connect(&daemon).await;
         send(

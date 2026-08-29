@@ -1,3 +1,4 @@
+use crate::connections::ReviewerConnectionModelError;
 use crate::lineage::{
     ProseMirrorRangeHint, SnapshotError, block_snapshots, semantic_range_anchors,
 };
@@ -28,8 +29,9 @@ use thought_store::{
     ProvenanceRecordInput, ProvenanceUpdateInput, ReadyLineageInput, Store,
 };
 
-/// The caller, as asserted by the MCP session. Not authenticated (AD-6) — this
-/// is identity so that attribution and per-run revert have something to key on.
+/// The caller selected by the trusted transport boundary. This value records
+/// identity for attribution and per-run revert, while authentication remains
+/// the transport's responsibility.
 #[derive(Debug, Clone)]
 pub struct ActorRef {
     pub id: String,
@@ -49,6 +51,23 @@ impl ActorRef {
             id: format!("agent:{name}"),
             kind: "agent".into(),
             display_name: name.into(),
+            model: model.map(str::to_string),
+            session_id: session.map(str::to_string),
+        }
+    }
+
+    /// A configured external reviewer. Its durable connection id, rather than
+    /// a user-editable label, is the stable attribution identity.
+    pub fn reviewer(
+        connection_id: &str,
+        display_name: &str,
+        model: Option<&str>,
+        session: Option<&str>,
+    ) -> ActorRef {
+        ActorRef {
+            id: format!("reviewer:{connection_id}"),
+            kind: "agent".into(),
+            display_name: display_name.into(),
             model: model.map(str::to_string),
             session_id: session.map(str::to_string),
         }
@@ -189,6 +208,7 @@ pub enum WorkspaceError {
     Snapshot(SnapshotError),
     Reconcile(ReconcileError),
     ProvenanceStore(ProvenanceStoreError),
+    ReviewerConnection(ReviewerConnectionModelError),
 }
 
 impl std::fmt::Display for WorkspaceError {
@@ -208,6 +228,7 @@ impl std::fmt::Display for WorkspaceError {
             WorkspaceError::Snapshot(e) => write!(f, "provenance snapshot: {e}"),
             WorkspaceError::Reconcile(e) => write!(f, "provenance reconciliation: {e}"),
             WorkspaceError::ProvenanceStore(e) => write!(f, "persisted provenance: {e}"),
+            WorkspaceError::ReviewerConnection(e) => write!(f, "reviewer connection: {e}"),
         }
     }
 }
@@ -241,6 +262,12 @@ impl From<ReconcileError> for WorkspaceError {
 impl From<ProvenanceStoreError> for WorkspaceError {
     fn from(e: ProvenanceStoreError) -> Self {
         WorkspaceError::ProvenanceStore(e)
+    }
+}
+
+impl From<ReviewerConnectionModelError> for WorkspaceError {
+    fn from(e: ReviewerConnectionModelError) -> Self {
+        WorkspaceError::ReviewerConnection(e)
     }
 }
 
@@ -344,6 +371,12 @@ impl Workspace {
             }
         }
         result
+    }
+
+    /// Give transport-independent companion modules access to durable state
+    /// without exposing the Store or the workspace lock publicly.
+    pub(crate) fn with_store<T>(&self, f: impl FnOnce(&Store) -> T) -> T {
+        self.with(|inner| f(&inner.store))
     }
 
     pub fn create_document(
@@ -549,12 +582,20 @@ impl Workspace {
         limit: usize,
         trashed: bool,
     ) -> Result<Vec<DocumentSummary>, WorkspaceError> {
+        self.list_documents_scoped(limit, trashed, None)
+    }
+
+    pub fn list_documents_scoped(
+        &self,
+        limit: usize,
+        trashed: bool,
+        document_id: Option<&str>,
+    ) -> Result<Vec<DocumentSummary>, WorkspaceError> {
         self.with(|inner| {
             Ok(inner
                 .store
-                .list_documents(trashed)?
+                .list_documents_scoped(trashed, limit, document_id)?
                 .into_iter()
-                .take(limit)
                 .map(|row| DocumentSummary {
                     doc_id: row.id,
                     title: row.title,
@@ -566,19 +607,22 @@ impl Workspace {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, WorkspaceError> {
+        self.search_scoped(query, limit, None)
+    }
+
+    pub fn search_scoped(
+        &self,
+        query: &str,
+        limit: usize,
+        document_id: Option<&str>,
+    ) -> Result<Vec<SearchHit>, WorkspaceError> {
         self.with(|inner| {
-            let titles: HashMap<String, String> = inner
-                .store
-                .list_documents(false)?
-                .into_iter()
-                .map(|d| (d.id, d.title))
-                .collect();
             Ok(inner
                 .store
-                .search(query, limit)?
+                .search_scoped(query, limit, document_id)?
                 .into_iter()
-                .map(|(doc_id, snippet)| SearchHit {
-                    title: titles.get(&doc_id).cloned().unwrap_or_default(),
+                .map(|(doc_id, title, snippet)| SearchHit {
+                    title,
                     doc_id,
                     snippet,
                 })
@@ -1640,10 +1684,10 @@ fn event_input(build: EventBuild<'_>) -> Result<ProvenanceEventInput, WorkspaceE
         .map(|actor| actor.display_name.as_str())
         .unwrap_or("Unknown");
     let session_id = build.actor.and_then(|actor| actor.session_id.as_deref());
-    let reported_model = build
-        .context
-        .reported_model()
-        .or_else(|| build.actor.and_then(|actor| actor.model.as_deref()));
+    // Event metadata comes from the trusted mutation context for this call.
+    // Actor rows and connection diagnostics may retain an older model, but an
+    // event must never inherit that mutable state.
+    let reported_model = build.context.reported_model();
     validate_event_suite(build.event_id, build.chain_version, build.anchors.len())?;
     let hash_anchors = event_anchor_hash_inputs(build.event_id, build.anchors)?;
     let hash = event_chain_digest(&EventHashInput {
@@ -2205,7 +2249,17 @@ fn update_log_root_for_rows(
 
 fn default_context(actor: &ActorRef, local: MutationContext) -> MutationContext {
     if actor.kind == "agent" {
-        MutationContext::mcp_reported(actor.display_name.clone(), None, None, actor.model.clone())
+        let connection_id = actor
+            .id
+            .strip_prefix("reviewer:")
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        MutationContext::mcp_reported(
+            actor.display_name.clone(),
+            connection_id,
+            None,
+            actor.model.clone(),
+        )
     } else {
         local
     }
