@@ -24,6 +24,69 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Verify release tag and checkout
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag '$TAG' is not a supported version tag such as v0.1.0."
+            exit 1
+          fi
+          git show-ref --verify --quiet "refs/tags/$TAG" || {
+            echo "::error::Release tag '$TAG' does not exist."
+            exit 1
+          }
+          tag_commit="$(git rev-parse "${TAG}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [ "$head_commit" != "$tag_commit" ]; then
+            echo "::error::Checked-out commit $head_commit does not match $TAG at $tag_commit."
+            exit 1
+          fi
+
+      - name: Validate Apple release credentials
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARIZATION_KEY_BASE64: ${{ secrets.APPLE_NOTARIZATION_KEY_BASE64 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          credential_names=(
+            APPLE_CERTIFICATE
+            APPLE_CERTIFICATE_PASSWORD
+            APPLE_SIGNING_IDENTITY
+            APPLE_TEAM_ID
+            APPLE_NOTARIZATION_KEY_BASE64
+            APPLE_NOTARIZATION_KEY_ID
+            APPLE_NOTARIZATION_ISSUER_ID
+          )
+          configured=0
+          missing=()
+          for name in "${credential_names[@]}"; do
+            if [ -n "${!name}" ]; then
+              configured=$((configured + 1))
+            else
+              missing+=("$name")
+            fi
+          done
+
+          total="${#credential_names[@]}"
+          if (( configured == 0 )); then
+            echo "No Apple credentials are configured. This run will produce an unsigned build."
+          elif (( configured != total )); then
+            echo "::error::Apple signing and notarization credentials must be configured together."
+            echo "::error::Missing secrets: ${missing[*]}"
+            exit 1
+          elif [ "$SIGN" != "true" ]; then
+            echo "::error::Credential state disagrees with the signing mode."
+            exit 1
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -63,10 +126,6 @@ jobs:
           KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
         run: |
           set -euo pipefail
-          if [ -z "$KEY_BASE64" ]; then
-            echo "::warning::APPLE_NOTARIZATION_KEY_BASE64 is not set — the build will be signed but not notarized, and macOS will still refuse to open it on download."
-            exit 0
-          fi
           key_path="$RUNNER_TEMP/AuthKey_${KEY_ID}.p8"
           printf '%s' "$KEY_BASE64" | base64 --decode > "$key_path"
           chmod 600 "$key_path"
@@ -93,12 +152,12 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npm exec -- tauri build --target "$TARGET" --bundles app,dmg --ci
+        run: npm exec -- tauri build --target "$TARGET" --bundles app,dmg --ci -- --locked
 
       - name: Build unsigned bundle
         if: env.SIGN != 'true'
         working-directory: app
-        run: npm exec -- tauri build --target "$TARGET" --bundles app,dmg --no-sign --ci
+        run: npm exec -- tauri build --target "$TARGET" --bundles app,dmg --no-sign --ci -- --locked
 
       # Tauri names the disk image after `productName`, which now contains
       # spaces, and a download URL would carry them as %20. The convention every
@@ -120,7 +179,7 @@ jobs:
       # own ticket, or Gatekeeper rejects the download even though the app
       # inside it is fine.
       - name: Notarize and staple the DMG
-        if: env.SIGN == 'true' && env.APPLE_API_KEY_PATH != ''
+        if: env.SIGN == 'true'
         env:
           APPLE_API_ISSUER: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
           APPLE_API_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
@@ -151,10 +210,16 @@ jobs:
               exit 1
             }
           done
-          lipo -archs "$app/Contents/MacOS/thought"
-          lipo -archs "$app/Contents/MacOS/thoughtd"
+          for binary in thought thoughtd thought-mcp-stdio; do
+            lipo "$app/Contents/MacOS/$binary" -verify_arch arm64 x86_64 || {
+              echo "::error::$binary is not a universal arm64 and x86_64 binary"
+              exit 1
+            }
+          done
 
           if [ "$SIGN" = "true" ]; then
+            codesign --verify --deep --strict --verbose=2 "$app"
+
             # What a downloading user's machine will conclude.
             spctl -a -t open --context context:primary-signature -v "$dmg"
           fi
