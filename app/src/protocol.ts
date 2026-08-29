@@ -14,9 +14,16 @@ export const Tag = {
   /**
    * An agent wrote. Agents connect over MCP, which has no awareness protocol,
    * so presence is inferred from edits rather than pretended into the awareness
-   * channel — a different kind of signal, and conflating them would mislead.
+   * channel, a different kind of signal that must not be conflated with it.
    */
   Presence: 0x07,
+  /**
+   * The daemon durably committed one Update frame. Acknowledgements are
+   * ordered with updates on the WebSocket, so the provider can keep a FIFO of
+   * edits that still need to reach disk without putting sequence numbers in
+   * every keystroke.
+   */
+  Ack: 0x08,
 } as const;
 
 export type Frame = { tag: number; docId: string; body: Uint8Array };

@@ -729,6 +729,12 @@ would have to be built twice and could drift.
 Messages are §5's: `SUBSCRIBE`, `SYNC`, `UPDATE`, `ACK`, `BROADCAST`, `AWARENESS`. Awareness
 is never persisted — it is presence, not content.
 
+The daemon sends `ACK` only after an `UPDATE` has reached SQLite. The window keeps every
+local update queued until that acknowledgement, merges work that has not yet been sent,
+and resends unacknowledged work after reconnecting. The toolbar reports Connecting,
+Autosaved, Saving, Offline, or Save failed. A no-op resend is acknowledged too, since Yjs
+updates are idempotent and an ACK can be lost when a socket closes.
+
 ## M2.2 — The schema, exported not authored twice
 
 Correcting M1.2's direction, which was unimplementable as written: TipTap builds its schema
