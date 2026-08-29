@@ -400,6 +400,19 @@ Consequence: an IME failure is a bridge bug, not a reason to abandon the webview
 Per-session override either way. The reason to gate agent writes is other people, not the
 agent; gating solo local editing is friction with no beneficiary.
 
+### AD-20 — One product name and one machine namespace
+
+The interface and application bundle are **Proof of Thought**. Names resolved by package
+managers, process launchers, protocols, and local paths use **thought**: the frontend and
+desktop packages, the `thought` window executable, Rust libraries, `thoughtd`,
+`thought-mcp-stdio`, `ai.exalto.thought`, `THOUGHT_HOME`, and `thought://`.
+
+**Cost:** changing a machine name invalidates build caches and artifact paths, can break
+scripts or integrations that resolve the old name, and requires the release bundle,
+signing, notarization, and packaged-executable checks to be repeated. The bundle identifier
+and application-data paths stay stable so a package rename does not strand documents or
+daemon discovery state.
+
 ## 7. Explicit non-goals for MVP
 
 Folders and hierarchy · accounts and authentication · end-to-end encryption · mobile ·

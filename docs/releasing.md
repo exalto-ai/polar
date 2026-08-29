@@ -98,4 +98,5 @@ Then confirm the daemon actually shipped:
 ls app/src-tauri/target/*/release/bundle/macos/'Proof of Thought.app'/Contents/MacOS/
 ```
 
-`thoughtd` and `thought-mcp-stdio` should both be there beside `app`.
+`thought`, `thoughtd`, and `thought-mcp-stdio` should all be present. `thought` is the
+window executable; the other two are its sidecars.
