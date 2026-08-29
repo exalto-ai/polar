@@ -67,3 +67,11 @@ and recovery states, and imply verification that a local bearer token cannot pro
 
 Later evidence or trace features may refer to a source event. They do not need a second lineage
 ledger.
+
+## Reviewer connections
+
+Each configured reviewer has a durable connection id, a unique credential, and an explicit
+document scope. This layer is read-only: writes wait for the suggestion layer or a future
+expiring session grant. The configured app and any model it reports are attribution labels, not
+provider authentication. Revoking one connection invalidates its credential without affecting
+other reviewers.

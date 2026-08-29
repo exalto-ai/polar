@@ -14,6 +14,7 @@ use thought_store::{
     ProvenanceEventRow, Store,
 };
 
+use crate::connections::ReviewerConnectionModelError;
 use crate::lineage::{ProseMirrorRange, SnapshotError, block_snapshots, semantic_ranges};
 use crate::mutation::MutationContext;
 
@@ -39,6 +40,21 @@ impl ActorRef {
             kind: "agent".into(),
             display_name: name.into(),
             model: model.map(str::to_string),
+            session_id: session.map(str::to_string),
+        }
+    }
+
+    pub fn reviewer(
+        connection_id: &str,
+        display_name: &str,
+        _model: Option<&str>,
+        session: Option<&str>,
+    ) -> ActorRef {
+        ActorRef {
+            id: format!("reviewer:{connection_id}"),
+            kind: "agent".into(),
+            display_name: display_name.into(),
+            model: None,
             session_id: session.map(str::to_string),
         }
     }
@@ -170,6 +186,7 @@ pub enum WorkspaceError {
     Storage(thought_store::SqlError),
     Snapshot(SnapshotError),
     Lineage(LineageError),
+    ReviewerConnection(ReviewerConnectionModelError),
 }
 
 impl std::fmt::Display for WorkspaceError {
@@ -188,6 +205,7 @@ impl std::fmt::Display for WorkspaceError {
             WorkspaceError::Storage(e) => write!(f, "storage: {e}"),
             WorkspaceError::Snapshot(e) => write!(f, "snapshot: {e}"),
             WorkspaceError::Lineage(e) => write!(f, "lineage: {e}"),
+            WorkspaceError::ReviewerConnection(e) => write!(f, "reviewer connection: {e}"),
         }
     }
 }
@@ -215,6 +233,12 @@ impl From<SnapshotError> for WorkspaceError {
 impl From<LineageError> for WorkspaceError {
     fn from(error: LineageError) -> Self {
         Self::Lineage(error)
+    }
+}
+
+impl From<ReviewerConnectionModelError> for WorkspaceError {
+    fn from(error: ReviewerConnectionModelError) -> Self {
+        Self::ReviewerConnection(error)
     }
 }
 
@@ -313,6 +337,10 @@ impl Workspace {
             }
         }
         result
+    }
+
+    pub(crate) fn with_store<T>(&self, f: impl FnOnce(&Store) -> T) -> T {
+        self.with(|inner| f(&inner.store))
     }
 
     pub fn create_document(
@@ -476,12 +504,20 @@ impl Workspace {
         limit: usize,
         trashed: bool,
     ) -> Result<Vec<DocumentSummary>, WorkspaceError> {
+        self.list_documents_scoped(limit, trashed, None)
+    }
+
+    pub fn list_documents_scoped(
+        &self,
+        limit: usize,
+        trashed: bool,
+        document_id: Option<&str>,
+    ) -> Result<Vec<DocumentSummary>, WorkspaceError> {
         self.with(|inner| {
             Ok(inner
                 .store
-                .list_documents(trashed)?
+                .list_documents_scoped(trashed, limit, document_id)?
                 .into_iter()
-                .take(limit)
                 .map(|row| DocumentSummary {
                     doc_id: row.id,
                     title: row.title,
@@ -493,19 +529,22 @@ impl Workspace {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, WorkspaceError> {
+        self.search_scoped(query, limit, None)
+    }
+
+    pub fn search_scoped(
+        &self,
+        query: &str,
+        limit: usize,
+        document_id: Option<&str>,
+    ) -> Result<Vec<SearchHit>, WorkspaceError> {
         self.with(|inner| {
-            let titles: HashMap<String, String> = inner
-                .store
-                .list_documents(false)?
-                .into_iter()
-                .map(|d| (d.id, d.title))
-                .collect();
             Ok(inner
                 .store
-                .search(query, limit)?
+                .search_scoped(query, limit, document_id)?
                 .into_iter()
-                .map(|(doc_id, snippet)| SearchHit {
-                    title: titles.get(&doc_id).cloned().unwrap_or_default(),
+                .map(|(doc_id, title, snippet)| SearchHit {
+                    title,
                     doc_id,
                     snippet,
                 })

@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use thought_core::Position;
-use thought_mcp::{ActorRef, Workspace};
+use thought_mcp::{ActorRef, MutationContext, Workspace};
 
 fn agent(name: &str) -> ActorRef {
     ActorRef::agent(name, Some("claude-opus-5"), Some(&format!("run-{name}")))
@@ -19,6 +19,20 @@ fn agent(name: &str) -> ActorRef {
 
 fn human() -> ActorRef {
     ActorRef::human("editor")
+}
+
+fn reviewer(model: &str, session: &str) -> ActorRef {
+    ActorRef::reviewer(
+        "reviewer-route-1",
+        "Configured reviewer",
+        Some(model),
+        Some(session),
+    )
+}
+
+fn reviewer_context(model: &str) -> MutationContext {
+    let _ = model;
+    MutationContext::mcp_connection("Configured for Codex (reported)", "reviewer-route-1")
 }
 
 /// block_id -> who last touched it.
@@ -164,6 +178,93 @@ fn a_reworded_block_remembers_who_drafted_it() {
 
     assert_eq!(block.created_by, "agent:opus", "the agent drafted it");
     assert_eq!(block.touched_by, "human:editor", "the human reworded it");
+}
+
+#[test]
+fn a_later_model_on_another_document_cannot_rewrite_block_history() {
+    let ws = Workspace::open_in_memory().unwrap();
+    let model_a = reviewer("model-a", "turn-a");
+    let first = ws
+        .create_document_from_markdown_with_context(
+            "",
+            "Earlier wording.",
+            &model_a,
+            &reviewer_context("model-a"),
+        )
+        .unwrap();
+    let first_block = first.blocks[0].block_id.clone();
+
+    let model_b = reviewer("model-b", "turn-b");
+    let second = ws
+        .create_document_from_markdown_with_context(
+            "",
+            "Later wording in another document.",
+            &model_b,
+            &reviewer_context("model-b"),
+        )
+        .unwrap();
+
+    let first_attribution = ws
+        .block_provenance(&first.doc_id)
+        .unwrap()
+        .into_iter()
+        .find(|block| block.block_id == first_block)
+        .unwrap();
+    let second_attribution = ws.block_provenance(&second.doc_id).unwrap();
+    assert_eq!(first_attribution.model, None);
+    assert_eq!(second_attribution[0].model, None);
+
+    let first_actor = ws
+        .document_actors(&first.doc_id)
+        .unwrap()
+        .into_iter()
+        .find(|actor| actor.actor_id == "reviewer:reviewer-route-1")
+        .unwrap();
+    assert_eq!(first_actor.model, None);
+}
+
+#[test]
+fn a_later_model_on_the_same_document_cannot_rewrite_an_untouched_block() {
+    let ws = Workspace::open_in_memory().unwrap();
+    let model_a = reviewer("model-a", "turn-a");
+    let doc = ws
+        .create_document_from_markdown_with_context(
+            "",
+            "Earlier block.\n\nSecond block.",
+            &model_a,
+            &reviewer_context("model-a"),
+        )
+        .unwrap();
+    let earlier_block = doc.blocks[0].block_id.clone();
+    let changed_block = doc.blocks[1].block_id.clone();
+
+    let model_b = reviewer("model-b", "turn-b");
+    ws.replace_block_with_context(
+        &doc.doc_id,
+        &changed_block,
+        "Second block, revised.",
+        None,
+        &model_b,
+        &reviewer_context("model-b"),
+    )
+    .unwrap();
+
+    let by_id = ws
+        .block_provenance(&doc.doc_id)
+        .unwrap()
+        .into_iter()
+        .map(|block| (block.block_id.clone(), block))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(by_id[&earlier_block].model, None);
+    assert_eq!(by_id[&changed_block].model, None);
+
+    let actor = ws
+        .document_actors(&doc.doc_id)
+        .unwrap()
+        .into_iter()
+        .find(|actor| actor.actor_id == "reviewer:reviewer-route-1")
+        .unwrap();
+    assert_eq!(actor.model, None, "a multi-model summary is ambiguous");
 }
 
 #[test]

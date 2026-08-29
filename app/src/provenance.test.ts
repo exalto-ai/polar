@@ -7,6 +7,7 @@ import {
   labelFor,
   railSpan,
   runsOf,
+  toolReportedModelLabel,
 } from "./provenance";
 import type { BlockAttribution } from "./mcp";
 
@@ -158,7 +159,13 @@ describe("labels", () => {
   it("names the actor and its model", () => {
     const label = labelFor(attribution(), "human:editor");
     expect(label).toContain("opus");
-    expect(label).toContain("claude-opus-5");
+    expect(label).toContain("Model reported by tool: claude-opus-5");
+  });
+
+  it("uses one explicit label for tool-reported models", () => {
+    expect(toolReportedModelLabel("model-example")).toBe(
+      "Model reported by tool: model-example",
+    );
   });
 
   it("says 'You' rather than the user's own actor id", () => {
@@ -179,6 +186,19 @@ describe("labels", () => {
     expect(labelFor(reworded, "human:editor")).toBe(
       `You · just now, drafted by opus`,
     );
+  });
+
+  it("does not expose an opaque reviewer connection id as a name", () => {
+    const reworded = attribution({
+      created_by: "reviewer:7ca54211a4d4498ab78fbb71a1d408a3",
+      touched_by: "human:editor",
+      display_name: "editor",
+      kind: "human",
+      model: null,
+    });
+    const label = labelFor(reworded, "human:editor");
+    expect(label).toBe("You · just now, drafted by an AI reviewer");
+    expect(label).not.toContain("7ca54211a4d4498ab78fbb71a1d408a3");
   });
 
   it("does not claim a draft credit when one actor did both", () => {

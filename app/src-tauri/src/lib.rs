@@ -16,6 +16,7 @@ use thoughtd::discovery::{self, Daemon};
 
 #[derive(serde::Serialize)]
 struct Connection {
+    protocol_version: u32,
     sync_url: String,
     mcp_url: String,
     token: String,
@@ -30,7 +31,12 @@ struct Connection {
 
 #[tauri::command]
 fn connection(state: tauri::State<'_, Daemon>) -> Connection {
+    connection_payload(state.inner())
+}
+
+fn connection_payload(state: &Daemon) -> Connection {
     Connection {
+        protocol_version: state.protocol_version,
         // Same origin, different path: the editor is a sync peer, agents come
         // in over MCP.
         sync_url: state
@@ -493,9 +499,28 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        atomic_write, cascade_axis, document_window_path, safe_suggested_name, serialize_document,
+        atomic_write, cascade_axis, connection_payload, document_window_path, safe_suggested_name,
+        serialize_document,
     };
     use thought_schema::{Mark, Node};
+
+    #[test]
+    fn connection_payload_uses_one_private_platform_capability() {
+        let daemon = thoughtd::discovery::Daemon {
+            url: "http://127.0.0.1:1234/mcp".into(),
+            protocol_version: thoughtd::discovery::PROTOCOL_VERSION,
+            instance_id: "c".repeat(64),
+            token: "platform-only".into(),
+        };
+
+        let payload = connection_payload(&daemon);
+        assert_eq!(
+            payload.protocol_version,
+            thoughtd::discovery::PROTOCOL_VERSION
+        );
+        assert_eq!(payload.token, "platform-only");
+        assert_eq!(payload.sync_url, "ws://127.0.0.1:1234/sync");
+    }
 
     #[test]
     fn export_projection_preserves_title_and_font_size_metadata() {

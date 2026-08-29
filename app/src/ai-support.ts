@@ -1,11 +1,25 @@
+import type { ReviewerBridge } from "./reviewer-bridge";
+import {
+  installReviewerConnections,
+  type ReviewerDocumentContext,
+} from "./reviewer-connections";
+export {
+  REVIEWER_CLIENTS as AI_CLIENTS,
+  reviewerSetupCommand as setupCommand,
+} from "./reviewer-setup";
+export type { ReviewerClient as AiClient } from "./reviewer-setup";
+
 type AiSupportOptions = {
   copyText?: (text: string) => Promise<void>;
+  reviewerBridge?: ReviewerBridge | null;
   onNotice?: (message: string, kind?: "info" | "error") => void;
 };
 
 export type AiSupportController = {
   isOpen(): boolean;
   setConnectionCommand(command: string): void;
+  setReviewerBridge(bridge: ReviewerBridge | null): void;
+  setCurrentDocument(context: ReviewerDocumentContext | null): void;
   open(): void;
   close(): void;
   destroy(): void;
@@ -17,10 +31,7 @@ function required<T extends Element>(root: ParentNode, selector: string): T {
   return value;
 }
 
-/**
- * Own the shared sidebar only. Features rendered inside it keep their own
- * state and controllers.
- */
+/** Own the shared sidebar. Reviewer behavior remains in its feature module. */
 export function installAiSupport(
   root: Document,
   options: AiSupportOptions = {},
@@ -28,11 +39,12 @@ export function installAiSupport(
   const toggle = required<HTMLButtonElement>(root, "#ai-support-toggle");
   const sidebar = required<HTMLElement>(root, "#ai-support-sidebar");
   const closeButton = required<HTMLButtonElement>(root, "#ai-sidebar-close");
-  const command = required<HTMLElement>(root, "#stdio-command");
-  const copyButton = required<HTMLButtonElement>(root, "#copy-command");
-  const copyText = options.copyText ?? ((text: string) => navigator.clipboard.writeText(text));
   const disposers: Array<() => void> = [];
-  let connectionCommand = "";
+  const reviewers = installReviewerConnections(root, {
+    bridge: options.reviewerBridge,
+    copyText: options.copyText,
+    onNotice: options.onNotice,
+  });
 
   function listen<K extends keyof DocumentEventMap>(
     target: Document,
@@ -56,6 +68,7 @@ export function installAiSupport(
   function render() {
     const open = !sidebar.hidden;
     toggle.setAttribute("aria-expanded", String(open));
+    reviewers.setSidebarOpen(open);
   }
 
   function open() {
@@ -79,29 +92,19 @@ export function installAiSupport(
     event.stopImmediatePropagation();
     close();
   });
-  listen(copyButton, "click", () => {
-    if (!connectionCommand) return;
-    void copyText(connectionCommand)
-      .then(() => {
-        copyButton.textContent = "Copied";
-        window.setTimeout(() => (copyButton.textContent = "Copy"), 1200);
-      })
-      .catch(() => options.onNotice?.("Could not copy the agent command.", "error"));
-  });
 
   render();
 
   return {
     isOpen: () => !sidebar.hidden,
-    setConnectionCommand(value) {
-      connectionCommand = value;
-      command.textContent = value;
-      copyButton.disabled = !value;
-    },
+    setConnectionCommand: (command) => reviewers.setStdioExecutable(command),
+    setReviewerBridge: (bridge) => reviewers.setBridge(bridge),
+    setCurrentDocument: (context) => reviewers.setDocumentContext(context),
     open,
     close,
     destroy() {
       for (const dispose of disposers.splice(0)) dispose();
+      reviewers.destroy();
     },
   };
 }

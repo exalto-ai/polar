@@ -4,16 +4,22 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-/// Discovery and local transport format understood by this daemon build.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Discovery and local sync protocol understood by this daemon build.
+///
+/// Version 4 adds durable reviewer identities and removes shared external MCP
+/// write authority. Legacy sourced updates remain accepted as the unanchored
+/// provenance fallback.
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const IDENTITY_PATH: &str = "/health/identity";
 pub const MCP_HEALTH_PATH: &str = "/health/mcp";
 const HEALTH_SERVICE: &str = "ai.exalto.thoughtd";
+static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Exact public response used to confirm that a discovery record still points
-/// at the daemon instance that published it. This carries no authority.
+/// Exact public response used to confirm that discovery still points at the
+/// daemon instance that published it. This carries no authority.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityResponse {
@@ -33,7 +39,7 @@ impl IdentityResponse {
 }
 
 /// Exact authenticated response used to confirm that the published bearer is
-/// accepted for MCP access after the public instance check succeeds.
+/// accepted after the public instance check succeeds.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthResponse {
@@ -98,12 +104,16 @@ pub fn random_token() -> io::Result<String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// What a trusted local client needs to reach a running daemon.
+/// What trusted local clients need to reach a running daemon.
+///
+/// The private daemon bearer. Reviewer connections receive their own scoped
+/// credentials; the bundled window does not need a second copy of this secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Daemon {
     pub url: String,
     pub protocol_version: u32,
     pub instance_id: String,
+    /// Private platform bearer used by the bundled window and stdio shim.
     pub token: String,
 }
 
@@ -128,10 +138,6 @@ fn loopback_base(url: &str) -> Option<&str> {
     Some(base)
 }
 
-fn health_url(daemon: &Daemon, path: &str) -> Option<String> {
-    loopback_base(&daemon.url).map(|base| format!("{base}{path}"))
-}
-
 fn is_random_id(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -146,6 +152,14 @@ fn local_agent() -> ureq::Agent {
         .max_idle_connections(0)
         .build()
         .into()
+}
+
+fn health_url_for(url: &str, path: &str) -> Option<String> {
+    loopback_base(url).map(|base| format!("{base}{path}"))
+}
+
+fn health_url(daemon: &Daemon, path: &str) -> Option<String> {
+    health_url_for(&daemon.url, path)
 }
 
 fn probe_identity(daemon: &Daemon) -> bool {
@@ -169,8 +183,7 @@ fn probe_identity(daemon: &Daemon) -> bool {
         .is_ok_and(|actual| actual == IdentityResponse::current(&daemon.instance_id))
 }
 
-/// Confirm the public daemon instance before sending its bearer, then verify
-/// that the bearer authorizes the expected MCP health endpoint.
+/// Confirm the daemon identity before sending the bearer, then verify it.
 pub fn authenticated_reachable(daemon: &Daemon) -> bool {
     if !probe_identity(daemon) {
         return false;
@@ -248,7 +261,11 @@ pub fn try_lock_store(db_path: &Path) -> io::Result<Option<StoreLock>> {
 /// replaced by a daemon that does not share its lifetime locks.
 pub fn read() -> Option<Daemon> {
     let body = std::fs::read_to_string(discovery_path()).ok()?;
-    let published: PublishedDaemon = serde_json::from_str(&body).ok()?;
+    parse(&body)
+}
+
+fn parse(body: &str) -> Option<Daemon> {
+    let published: PublishedDaemon = serde_json::from_str(body).ok()?;
     if published.protocol_version != PROTOCOL_VERSION
         || published.pid == 0
         || !is_random_id(&published.instance_id)
@@ -269,18 +286,13 @@ pub fn read() -> Option<Daemon> {
     })
 }
 
-/// Publish the live instance atomically and owner-readably.
-///
-/// The daemon holds the home lock while replacing this file, so there is one
-/// publisher. A random, create-new temporary path ensures bearer bytes never
-/// pass through a pre-existing broad-permission file.
+/// Publish the private platform capability, readable only by the user.
 pub fn write(port: u16, token: &str, instance_id: &str, db_path: &Path) -> io::Result<PathBuf> {
     let path = discovery_path();
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "discovery has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    let body = serde_json::to_vec_pretty(&PublishedDaemon {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = PublishedDaemon {
         protocol_version: PROTOCOL_VERSION,
         instance_id: instance_id.into(),
         port,
@@ -288,38 +300,66 @@ pub fn write(port: u16, token: &str, instance_id: &str, db_path: &Path) -> io::R
         url: format!("http://127.0.0.1:{port}/mcp"),
         store: db_path.to_string_lossy().into_owned(),
         pid: std::process::id(),
+    };
+    publish(&path, &serde_json::to_vec_pretty(&body)?)?;
+    Ok(path)
+}
+
+fn temporary_path(path: &Path) -> io::Result<PathBuf> {
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "discovery path must have a file name",
+        )
     })?;
-    let temporary = parent.join(format!(".daemon-{instance_id}.tmp"));
+    let sequence = NEXT_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+    let mut temporary_name = OsString::from(".");
+    temporary_name.push(file_name);
+    temporary_name.push(format!(".{}.{sequence}.tmp", std::process::id()));
+    Ok(path.with_file_name(temporary_name))
+}
+
+fn publish(path: &Path, body: &[u8]) -> io::Result<()> {
+    let temporary = temporary_path(path)?;
+    publish_with_temporary(path, &temporary, body)
+}
+
+fn publish_with_temporary(path: &Path, temporary: &Path, body: &[u8]) -> io::Result<()> {
+    match std::fs::remove_file(temporary) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
 
     let result = (|| {
         let mut options = OpenOptions::new();
-        options.create_new(true).write(true);
+        options.write(true).create_new(true);
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&temporary)?;
-        file.write_all(&body)?;
+
+        let mut file = options.open(temporary)?;
+        file.write_all(body)?;
+        file.flush()?;
         file.sync_all()?;
+        drop(file);
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
-        }
-
-        std::fs::rename(&temporary, &path)
+        std::fs::rename(temporary, path)
     })();
+
     if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+        let _ = std::fs::remove_file(temporary);
     }
-    result?;
-    Ok(path)
+
+    result
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read as _, Write as _};
     use std::path::Path;
 
     const LOCK_CHILD: &str = "THOUGHTD_LOCK_CHILD";
@@ -352,7 +392,6 @@ mod tests {
             String::from_utf8_lossy(&child.stderr),
         );
     }
-
     #[test]
     fn token_is_256_bits_of_hex_and_returns_promptly() {
         let token = super::random_token().expect("urandom is readable");
@@ -363,6 +402,136 @@ mod tests {
             super::random_token().unwrap(),
             "must not be constant"
         );
+    }
+
+    fn published(protocol_version: u32, token: &str) -> serde_json::Value {
+        serde_json::json!({
+            "protocol_version": protocol_version,
+            "instance_id": "c".repeat(64),
+            "port": 1234,
+            "token": token,
+            "url": "http://127.0.0.1:1234/mcp",
+            "store": "/tmp/thought.db",
+            "pid": 1234,
+        })
+    }
+
+    #[test]
+    fn current_single_token_discovery_is_accepted() {
+        let legacy = serde_json::json!({
+            "url": "http://127.0.0.1:1234/mcp",
+            "protocol_version": super::PROTOCOL_VERSION,
+            "token": "mcp-only"
+        });
+        assert!(super::parse(&legacy.to_string()).is_none());
+
+        let token = "a".repeat(64);
+        let current = published(super::PROTOCOL_VERSION, &token);
+        assert_eq!(
+            super::parse(&current.to_string()),
+            Some(super::Daemon {
+                url: "http://127.0.0.1:1234/mcp".into(),
+                protocol_version: super::PROTOCOL_VERSION,
+                instance_id: "c".repeat(64),
+                token,
+            })
+        );
+    }
+
+    #[test]
+    fn incompatible_protocol_discovery_is_rejected() {
+        let future = published(super::PROTOCOL_VERSION + 1, &"a".repeat(64));
+        assert!(super::parse(&future.to_string()).is_none());
+    }
+
+    #[test]
+    fn current_discovery_never_sends_capabilities_to_a_non_loopback_url() {
+        let remote = serde_json::json!({
+            "url": "http://example.com/mcp",
+            "protocol_version": super::PROTOCOL_VERSION,
+            "pid": 4321,
+            "token": "mcp-only"
+        });
+        assert!(super::parse(&remote.to_string()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn published_discovery_has_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.json");
+        super::publish(&path, br#"{"token":"private"}"#).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn publication_replaces_stale_files_with_complete_valid_json() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.json");
+        let temporary = directory.path().join(".daemon.json.stale-test.tmp");
+        std::fs::write(&path, r#"{"generation":"old"}"#).unwrap();
+        std::fs::write(&temporary, "partial secret").unwrap();
+
+        let replacement = serde_json::json!({
+            "generation": "new",
+            "token": "platform-capability"
+        });
+        let replacement = serde_json::to_vec_pretty(&replacement).unwrap();
+        super::publish_with_temporary(&path, &temporary, &replacement).unwrap();
+
+        assert!(!temporary.exists());
+        let published = std::fs::read(&path).unwrap();
+        assert_eq!(published, replacement);
+        let parsed: serde_json::Value = serde_json::from_slice(&published).unwrap();
+        assert_eq!(parsed["generation"], "new");
+        assert_eq!(parsed["token"], "platform-capability");
+    }
+
+    #[test]
+    fn unrelated_404_service_receives_no_capability() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..1 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut chunk).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+            }
+            requests
+        });
+        let daemon = super::Daemon {
+            url: format!("http://{address}/mcp"),
+            protocol_version: super::PROTOCOL_VERSION,
+            instance_id: "c".repeat(64),
+            token: "a".repeat(64),
+        };
+
+        assert!(!super::authenticated_reachable(&daemon));
+
+        let requests = server.join().unwrap();
+        for request in requests {
+            assert!(request.starts_with("GET /health/identity HTTP/1.1"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            assert!(!request.contains(&"a".repeat(64)));
+        }
     }
 
     #[test]
