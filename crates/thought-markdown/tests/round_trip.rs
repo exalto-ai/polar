@@ -158,19 +158,19 @@ fn title_and_h1_remain_distinct_in_the_projection() {
         ],
     );
 
-    assert_eq!(to_markdown(&title), "<!--pot:t-->\n# A title");
+    assert_eq!(to_markdown(&title), "<!--thought:title-->\n# A title");
     assert_eq!(to_markdown(&h1), "# An H1");
     assert_eq!(round_trip(&title), normalize(&title));
     assert_eq!(round_trip(&h1), normalize(&h1));
 
     // A marker only applies to the immediately following H1.
-    let interrupted = normalize(&from_markdown("<!--pot:t-->\n\nParagraph\n\n# H1"));
+    let interrupted = normalize(&from_markdown("<!--thought:title-->\n\nParagraph\n\n# H1"));
     assert_eq!(interrupted.content[1].attr_str("variant"), None);
 
-    let interrupted_by_rule = normalize(&from_markdown("<!--pot:t-->\n\n***\n\n# H1"));
+    let interrupted_by_rule = normalize(&from_markdown("<!--thought:title-->\n\n***\n\n# H1"));
     assert_eq!(interrupted_by_rule.content[1].attr_str("variant"), None);
 
-    let escaped_blockquote = normalize(&from_markdown("> <!--pot:t-->\n\n# H1"));
+    let escaped_blockquote = normalize(&from_markdown("> <!--thought:title-->\n\n# H1"));
     assert_eq!(escaped_blockquote.content[1].attr_str("variant"), None);
 }
 
