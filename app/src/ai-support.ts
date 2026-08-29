@@ -1,3 +1,4 @@
+import { writeClipboardText } from "./clipboard";
 import {
   installReviewerConnections,
   type ReviewerApi,
@@ -34,16 +35,16 @@ export function installAiSupport(
   root: Document,
   options: AiSupportOptions = {},
 ): AiSupportController {
+  const copyText = options.copyText ?? writeClipboardText;
   const toggle = required<HTMLButtonElement>(root, "#ai-support-toggle");
   const sidebar = required<HTMLElement>(root, "#ai-support-sidebar");
   const closeButton = required<HTMLButtonElement>(root, "#ai-sidebar-close");
   const disposers: Array<() => void> = [];
   const reviewers = installReviewerConnections(root, {
     api: options.reviewerApi,
-    copyText: options.copyText,
+    copyText,
     onNotice: options.onNotice,
   });
-
   function listen<K extends keyof DocumentEventMap>(
     target: Document,
     event: K,
