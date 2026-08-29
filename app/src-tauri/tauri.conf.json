@@ -43,6 +43,9 @@
       "binaries/thoughtd",
       "binaries/thought-mcp-stdio"
     ],
+    "resources": {
+      "../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+    },
     "category": "Productivity",
     "shortDescription": "A local-first writing app for humans and agents",
     "longDescription": "Proof of Thought is a local-first writing app where people and AI agents edit the same documents. A background daemon owns the CRDT and the store; the window and every agent are clients of it.",
