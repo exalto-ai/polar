@@ -14,6 +14,10 @@ use thought_schema::Node;
 mod parse;
 mod serialize;
 
+/// Projection metadata that preserves the Title/H1 distinction without
+/// replacing readable Markdown headings with an opaque HTML block.
+pub(crate) const TITLE_MARKER: &str = "<!--pot:t-->";
+
 pub use thought_schema::normalize;
 
 pub use parse::from_markdown;

@@ -12,6 +12,8 @@
  */
 import StarterKit from "@tiptap/starter-kit";
 import { Table, TableRow, TableCell, TableHeader } from "@tiptap/extension-table";
+import { FontSize } from "./font-size";
+import { TitleVariant } from "./title";
 
 export const extensions = [
   StarterKit.configure({
@@ -25,6 +27,8 @@ export const extensions = [
     underline: false,
     heading: { levels: [1, 2, 3] },
   }),
+  TitleVariant,
+  FontSize,
   Table.configure({ resizable: true }),
   TableRow,
   TableHeader,

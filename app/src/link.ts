@@ -8,7 +8,13 @@
 import type { Editor } from "@tiptap/core";
 import { accel } from "./keys";
 
-export function installLinkShortcut(editor: Editor, host: HTMLElement): () => void {
+export type LinkController = {
+  /** Open the link field for a selection or the link under the cursor. */
+  open: () => boolean;
+  destroy: () => void;
+};
+
+export function installLinkShortcut(editor: Editor, host: HTMLElement): LinkController {
   const field = document.createElement("input");
   field.className = "link-input";
   field.type = "text";
@@ -20,37 +26,64 @@ export function installLinkShortcut(editor: Editor, host: HTMLElement): () => vo
   function close(refocus = true) {
     field.hidden = true;
     field.value = "";
+    field.setCustomValidity("");
     if (refocus) editor.commands.focus();
   }
 
   function open() {
-    const { from, to } = editor.state.selection;
+    let { from, to } = editor.state.selection;
+    if (from === to && editor.isActive("link")) {
+      editor.chain().extendMarkRange("link").run();
+      ({ from, to } = editor.state.selection);
+    }
+    if (from === to) return false;
     // Anchored to the selection, so it reads as attached to the words it will
     // wrap rather than floating somewhere.
     const coords = editor.view.coordsAtPos(from);
-    field.style.left = `${coords.left}px`;
-    field.style.top = `${coords.bottom + 6}px`;
     field.hidden = false;
+    const gap = 6;
+    const edge = 8;
+    const width = field.getBoundingClientRect().width || 260;
+    const height = field.getBoundingClientRect().height || 34;
+    const maxLeft = Math.max(edge, window.innerWidth - width - edge);
+    const maxTop = Math.max(edge, window.innerHeight - height - edge);
+    const below = coords.bottom + gap;
+    const top = below <= maxTop ? below : coords.top - height - gap;
+    field.style.left = `${Math.min(Math.max(coords.left, edge), maxLeft)}px`;
+    field.style.top = `${Math.min(Math.max(top, edge), maxTop)}px`;
     field.value = editor.getAttributes("link").href ?? "";
     field.focus();
     field.select();
-    return from !== to;
+    return true;
   }
 
   function apply() {
     const href = field.value.trim();
     const chain = editor.chain().focus();
-    if (!href) {
+    const applied = !href
       // An empty field removes the link rather than setting a broken one.
-      chain.unsetLink().run();
-    } else {
-      chain.setLink({ href: normalize(href) }).run();
+      ? chain.unsetLink().run()
+      : chain.setLink({ href: normalize(href) }).run();
+    if (!applied) {
+      field.setCustomValidity("Enter a valid link");
+      field.reportValidity();
+      field.focus();
+      return;
     }
+    field.setCustomValidity("");
     close(false);
   }
 
   const onKeyDown = (event: KeyboardEvent) => {
-    if (accel(event) && event.shiftKey && event.key.toLowerCase() === "k") {
+    const active = document.activeElement;
+    const editorHasFocus =
+      active === editor.view.dom || (!!active && editor.view.dom.contains(active));
+    if (
+      editorHasFocus &&
+      accel(event) &&
+      event.shiftKey &&
+      event.key.toLowerCase() === "k"
+    ) {
       event.preventDefault();
       const hasSelection = open();
       if (!hasSelection) {
@@ -73,17 +106,33 @@ export function installLinkShortcut(editor: Editor, host: HTMLElement): () => vo
 
   document.addEventListener("keydown", onKeyDown);
   field.addEventListener("keydown", onFieldKey);
+  field.addEventListener("input", () => field.setCustomValidity(""));
   field.addEventListener("blur", () => close(false));
 
-  return () => {
-    document.removeEventListener("keydown", onKeyDown);
-    field.remove();
+  return {
+    open,
+    destroy: () => {
+      document.removeEventListener("keydown", onKeyDown);
+      field.remove();
+    },
   };
 }
 
 /** A bare domain is what people paste; without a scheme it resolves relatively. */
 export function normalize(href: string): string {
-  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return href;
   if (href.startsWith("//")) return `https:${href}`;
+  if (
+    href.startsWith("/") ||
+    href.startsWith("./") ||
+    href.startsWith("../") ||
+    href.startsWith("#") ||
+    href.startsWith("?")
+  ) {
+    return href;
+  }
+  // A hostname followed by a port looks like a URI scheme to a generic scheme
+  // regex. Recognize that common local-development shape first.
+  if (/^(?:localhost|[a-z0-9.-]+):\d+(?:[/?#]|$)/i.test(href)) return `https://${href}`;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return href;
   return `https://${href}`;
 }

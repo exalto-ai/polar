@@ -279,7 +279,7 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .editor {
   max-width: var(--measure);
   margin: 0 auto;
-  padding: 8px 24px 45vh;
+  padding: 18px 24px 45vh;
   /* The rail layer hangs off this box. It is *not* the blocks' offset parent —
      ProseMirror positions its own DOM inside here — so the rails measure the
      gap rather than assuming there is none. See railSpan in provenance.ts. */
@@ -288,7 +288,13 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 /* Deep bottom padding so the line being written sits mid-screen rather than
    pinned to the bottom edge. */
 
-.tiptap { outline: none; font-size: 17px; line-height: 1.65; letter-spacing: -0.003em; }
+.tiptap {
+  outline: none;
+  font-size: 17px;
+  line-height: 1.65;
+  letter-spacing: -0.003em;
+  zoom: var(--editor-zoom, 1);
+}
 .tiptap > * + * { margin-top: 0.85em; }
 .tiptap p { margin: 0; }
 .tiptap p:empty::after { content: ""; display: inline-block; }
@@ -306,6 +312,91 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .tiptap h1 { font-size: 1.7em; }
 .tiptap h2 { font-size: 1.32em; }
 .tiptap h3 { font-size: 1.12em; }
+.tiptap h1[data-thought-variant="title"] {
+  font-size: 2.35em;
+  font-weight: 700;
+  line-height: 1.08;
+  letter-spacing: -0.035em;
+}
+
+/* ---------- formatting toolbar ---------- */
+.format-toolbar {
+  position: sticky;
+  top: 8px;
+  z-index: 18;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  max-width: calc(100vw - 24px);
+  width: max-content;
+  height: 38px;
+  margin: 8px auto 0;
+  padding: 4px 5px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--rule));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--raised) 92%, transparent);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(16px) saturate(125%);
+  -webkit-backdrop-filter: blur(16px) saturate(125%);
+  scrollbar-width: none;
+}
+.format-toolbar::-webkit-scrollbar { display: none; }
+
+.format-select,
+.format-button {
+  height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: 500 12px/1 var(--sans);
+  cursor: default;
+  outline: none;
+}
+.format-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0 19px 0 8px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink-faint) 50%),
+    linear-gradient(135deg, var(--ink-faint) 50%, transparent 50%);
+  background-position:
+    calc(100% - 10px) 12px,
+    calc(100% - 7px) 12px;
+  background-size: 3px 3px, 3px 3px;
+  background-repeat: no-repeat;
+}
+.format-select option { background: var(--raised); color: var(--ink); }
+.zoom-select { width: 66px; }
+.block-select { width: 82px; }
+.size-select { width: 72px; }
+
+.format-button {
+  min-width: 28px;
+  padding: 0 7px;
+  font-size: 13px;
+}
+.format-button.is-bold { font-weight: 750; }
+.format-button.is-italic { font-family: Georgia, serif; font-style: italic; font-size: 15px; }
+.format-button:disabled { opacity: 0.34; }
+.format-select:hover,
+.format-button:not(:disabled):hover { background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink); }
+.format-button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--paper);
+}
+.format-select:focus-visible,
+.format-button:focus-visible { box-shadow: inset 0 0 0 1.5px var(--accent); color: var(--ink); }
+.format-divider {
+  width: 1px;
+  height: 17px;
+  margin: 0 2px;
+  flex: 0 0 auto;
+  background: var(--rule);
+}
 
 .tiptap a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
 .tiptap strong { font-weight: 640; }

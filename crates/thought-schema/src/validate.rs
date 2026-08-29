@@ -136,6 +136,22 @@ impl Schema {
                                 fail(out, format!("mark `{}` requires attr `{key}`", mark.kind));
                             }
                         }
+                        if mark.kind == "fontSize" {
+                            let valid = match mark.attrs.get("size") {
+                                Some(serde_json::Value::String(size)) => {
+                                    crate::normalize_font_size(size).as_deref()
+                                        == Some(size.as_str())
+                                }
+                                _ => false,
+                            };
+                            if !valid {
+                                fail(
+                                    out,
+                                    "mark `fontSize` requires a canonical whole-pixel `size` from 8px to 96px"
+                                        .into(),
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -149,6 +165,28 @@ impl Schema {
         for (key, aspec) in &spec.attrs {
             if aspec.default.is_none() && !node.attrs.contains_key(key) {
                 fail(out, format!("`{}` requires attr `{key}`", node.kind));
+            }
+        }
+
+        if node.kind == "heading" {
+            match node.attrs.get("variant") {
+                None | Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::String(variant)) if variant == "title" => {
+                    let level_is_one = match node.attrs.get("level") {
+                        None => true,
+                        Some(_) => node.attr_i64("level") == Some(1),
+                    };
+                    if !level_is_one {
+                        fail(
+                            out,
+                            "heading variant `title` is only valid at level 1".into(),
+                        );
+                    }
+                }
+                Some(_) => fail(
+                    out,
+                    "heading `variant` must be null or the string `title`".into(),
+                ),
             }
         }
 
@@ -324,5 +362,79 @@ mod tests {
             )],
         );
         assert_eq!(Schema::v0().validate(&doc), Ok(()));
+    }
+
+    #[test]
+    fn font_size_requires_a_safe_canonical_pixel_value() {
+        let with_size = |size: serde_json::Value| {
+            Node::element(
+                "doc",
+                vec![Node::element(
+                    "paragraph",
+                    vec![Node::text(
+                        "x",
+                        vec![Mark::new("fontSize").with_attr("size", size)],
+                    )],
+                )],
+            )
+        };
+
+        assert_eq!(Schema::v0().validate(&with_size("18px".into())), Ok(()));
+        for unsafe_size in [
+            serde_json::json!("7px"),
+            serde_json::json!("018px"),
+            serde_json::json!("18.5px"),
+            serde_json::json!("1rem"),
+            serde_json::json!("18px; color:red"),
+            serde_json::json!(18),
+        ] {
+            let errors = Schema::v0().validate(&with_size(unsafe_size)).unwrap_err();
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.message.contains("whole-pixel")),
+                "expected a font-size complaint, got {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn title_is_the_only_heading_variant_and_requires_level_one() {
+        let heading = |level: serde_json::Value, variant: serde_json::Value| {
+            Node::element(
+                "doc",
+                vec![
+                    Node::element("heading", vec![Node::text("T", vec![])])
+                        .with_attr("level", level)
+                        .with_attr("variant", variant),
+                ],
+            )
+        };
+
+        assert_eq!(
+            Schema::v0().validate(&heading(1.into(), "title".into())),
+            Ok(())
+        );
+        assert_eq!(
+            Schema::v0().validate(&heading(serde_json::json!(1.0), "title".into())),
+            Ok(())
+        );
+        assert_eq!(
+            Schema::v0().validate(&heading(1.into(), serde_json::Value::Null)),
+            Ok(())
+        );
+
+        for invalid in [
+            heading(2.into(), "title".into()),
+            heading(serde_json::json!(1.9), "title".into()),
+            heading("bogus".into(), "title".into()),
+            heading(1.into(), "subtitle".into()),
+        ] {
+            let errors = Schema::v0().validate(&invalid).unwrap_err();
+            assert!(
+                errors.iter().any(|error| error.message.contains("variant")),
+                "expected a heading variant complaint, got {errors:?}"
+            );
+        }
     }
 }

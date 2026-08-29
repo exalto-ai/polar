@@ -538,6 +538,13 @@ critical path:
   the markdown they are good at; anchors travel beside the text rather than polluting it.
 * **Parse:** `pulldown-cmark` into a ProseMirror tree, validated against the schema.
 
+**Extended 2026-08-25.** Toolbar formatting remains tree data. Title is a level-one
+heading with `variant: "title"`; its projection uses the exact one-shot marker
+`<!--pot:t-->` immediately before the heading so Title and H1 remain distinct. Inline
+font size is a `fontSize` mark with a canonical whole-pixel value from 8px through 96px;
+the projection uses an exact `<span style="font-size: 18px">` wrapper. The parser rejects
+other CSS spellings so arbitrary style data cannot enter the document.
+
 This is more work than one line of an ADR makes it sound, and it should be sized as such.
 The property test in M1.0 is the guard: a node that cannot survive `parse(serialize(x))`
 does not ship.
@@ -731,8 +738,9 @@ Single window, no sidebar. ⌘K opens a switcher backed by the daemon's FTS inde
 `search` the agents use, so there is one search implementation rather than two.
 
 System sans throughout, sized and spaced for long-form writing. Light and dark follow the
-system, with the palette defined once as tokens. Markdown input rules give Bear's typing
-feel (`## ` → heading) without markdown storage (AD-3).
+system, with the palette defined once as tokens. A compact, centered toolbar provides local
+zoom plus persistent block style, font size, bold, italic, and link commands. Markdown input
+rules give Bear's typing feel (`## ` → heading) without markdown storage (AD-3).
 
 ## M2.6 — Agents made visible
 
