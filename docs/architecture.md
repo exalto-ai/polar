@@ -769,9 +769,9 @@ M1 proved the daemon is complete without a UI. M2 attaches one, and in doing so 
 two mitigations the probe and the source audit turned up: update coalescing (AD-16) and the
 IME composition guard (AD-17).
 
-**Shape decided 2026-08-23:** single window with a ⌘K switcher, no sidebar. Agent carets and
-authorship colors visible. Full v0 schema including table editing. System sans throughout,
-light and dark.
+**Shape amended 2026-08-28:** document-scoped windows, each with the shared ⌘K switcher,
+plus an optional right AI support sidebar. Agent carets and authorship colors visible. Full
+v0 schema including table editing. System sans throughout, light and dark.
 
 ## M2.0 — Acceptance
 
@@ -854,8 +854,17 @@ adjacency is why both belong to the same milestone.
 
 ## M2.5 — The window
 
-Document-scoped windows, no sidebar. ⌘K opens a switcher backed by the daemon's FTS index,
-the same `search` the agents use, so there is one search implementation rather than two.
+Each document has its own native window. ⌘K opens a switcher backed by the daemon's FTS
+index, the same `search` the agents use, so there is one search implementation rather than
+two. An optional right sidebar contains the first-launch AI support choice and the current
+Connect or Basic explanation. At this milestone it is setup and disclosure UI only. Choosing
+Connect does not establish a live connection or strengthen provenance evidence by itself.
+
+**Cost:** document-scoped windows require every create, open, and import path to choose a
+window, and application quit must serialize the close guard across those windows. The sidebar
+reduces horizontal editing space while open and adds a second focus region that must be removed
+from keyboard and assistive-technology navigation while closed. Neither surface may become a
+second document authority; the daemon and CRDT remain authoritative.
 
 System sans throughout, sized and spaced for long-form writing. The editor and window use
 the fixed deep-blue `#0c1622` ground shared with the app icon. A compact, centered toolbar
