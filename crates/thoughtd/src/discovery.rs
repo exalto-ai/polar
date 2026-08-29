@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -17,6 +17,7 @@ pub const IDENTITY_PATH: &str = "/health/identity";
 pub const MCP_HEALTH_PATH: &str = "/health/mcp";
 const HEALTH_SERVICE: &str = "ai.exalto.thoughtd";
 static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+const MAX_DISCOVERY_BYTES: u64 = 64 * 1024;
 
 /// Exact public response used to confirm that discovery still points at the
 /// daemon instance that published it. This carries no authority.
@@ -260,10 +261,21 @@ pub fn try_lock_store(db_path: &Path) -> io::Result<Option<StoreLock>> {
 /// cases with `discovery_path().exists()` so an older live build is never
 /// replaced by a daemon that does not share its lifetime locks.
 pub fn read() -> Option<Daemon> {
-    let body = std::fs::read_to_string(discovery_path()).ok()?;
-    parse(&body)
+    let body = read_bounded_discovery(&discovery_path())?;
+    parse(body.as_str())
 }
 
+fn read_bounded_discovery(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let initial_length = file.metadata().ok()?.len();
+    let mut body =
+        String::with_capacity(usize::try_from(initial_length.min(MAX_DISCOVERY_BYTES)).ok()?);
+    (&mut file)
+        .take(MAX_DISCOVERY_BYTES + 1)
+        .read_to_string(&mut body)
+        .ok()?;
+    (body.len() as u64 <= MAX_DISCOVERY_BYTES).then_some(body)
+}
 fn parse(body: &str) -> Option<Daemon> {
     let published: PublishedDaemon = serde_json::from_str(body).ok()?;
     if published.protocol_version != PROTOCOL_VERSION
@@ -414,6 +426,19 @@ mod tests {
             "store": "/tmp/thought.db",
             "pid": 1234,
         })
+    }
+
+    #[test]
+    fn discovery_reads_are_bounded_before_json_parsing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.json");
+        let maximum = usize::try_from(super::MAX_DISCOVERY_BYTES).unwrap();
+
+        std::fs::write(&path, vec![b' '; maximum]).unwrap();
+        assert_eq!(super::read_bounded_discovery(&path).unwrap().len(), maximum);
+
+        std::fs::write(&path, vec![b' '; maximum + 1]).unwrap();
+        assert!(super::read_bounded_discovery(&path).is_none());
     }
 
     #[test]
