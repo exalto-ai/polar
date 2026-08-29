@@ -12,6 +12,23 @@ use std::collections::BTreeMap;
 
 pub type Attrs = BTreeMap<String, serde_json::Value>;
 
+/// Font-size values are persisted in Yjs and rendered as inline CSS, so the
+/// allowed representation is deliberately narrow and canonical.
+pub const MIN_FONT_SIZE_PX: u16 = 8;
+pub const MAX_FONT_SIZE_PX: u16 = 96;
+
+pub fn normalize_font_size(value: &str) -> Option<String> {
+    let pixels = value.strip_suffix("px")?;
+    if pixels.is_empty() || !pixels.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+
+    let pixels: u16 = pixels.parse().ok()?;
+    (MIN_FONT_SIZE_PX..=MAX_FONT_SIZE_PX)
+        .contains(&pixels)
+        .then(|| format!("{pixels}px"))
+}
+
 /// A ProseMirror node. Text nodes carry `text` and `marks`; everything else
 /// carries `content`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,7 +89,12 @@ impl Node {
         let value = self.attrs.get(key)?;
         value
             .as_i64()
-            .or_else(|| value.as_f64().map(|f| f as i64))
+            .or_else(|| {
+                value
+                    .as_f64()
+                    .filter(|number| number.fract() == 0.0)
+                    .map(|number| number as i64)
+            })
             .or_else(|| value.as_str()?.parse().ok())
     }
 
@@ -175,6 +197,18 @@ impl Schema {
 pub fn normalize(node: &Node) -> Node {
     let mut out = node.clone();
 
+    // TipTap materializes nullable defaults in `node.attrs`; Rust parsers omit
+    // defaults. Both spellings mean an ordinary heading, so absence is the
+    // canonical form and Title remains the only persisted variant value.
+    if out.kind == "heading"
+        && out
+            .attrs
+            .get("variant")
+            .is_some_and(serde_json::Value::is_null)
+    {
+        out.attrs.remove("variant");
+    }
+
     if out.is_text() {
         out.marks = canonical_marks(&out.marks);
         return out;
@@ -211,7 +245,10 @@ pub fn normalize(node: &Node) -> Node {
 /// Marks are a set, not a sequence, but the tree stores them as a Vec — so a
 /// stable order is required before two trees can be compared.
 fn canonical_marks(marks: &[Mark]) -> Vec<Mark> {
-    const ORDER: &[&str] = &["link", "bold", "italic", "strike", "code"];
+    // fontSize must wrap code in the Markdown projection. If it were inside a
+    // code fence, its HTML span would become literal code and the mark would
+    // disappear on parse.
+    const ORDER: &[&str] = &["link", "bold", "italic", "strike", "fontSize", "code"];
     let rank = |m: &Mark| {
         ORDER
             .iter()
@@ -241,7 +278,7 @@ mod tests {
         ] {
             assert!(s.node(kind).is_some(), "missing node {kind}");
         }
-        for kind in ["bold", "italic", "code", "link"] {
+        for kind in ["bold", "italic", "code", "link", "fontSize"] {
             assert!(s.mark(kind).is_some(), "missing mark {kind}");
         }
         assert!(s.node("codeBlock").unwrap().code);
@@ -260,6 +297,10 @@ mod tests {
             let node = Node::element("heading", vec![]).with_attr("level", value.clone());
             assert_eq!(node.attr_i64("level"), Some(2), "failed for {value}");
         }
+
+        let fractional =
+            Node::element("heading", vec![]).with_attr("level", serde_json::json!(1.9));
+        assert_eq!(fractional.attr_i64("level"), None);
     }
 
     #[test]
@@ -271,5 +312,22 @@ mod tests {
         assert_eq!(json["content"][0]["marks"][0]["type"], "bold");
         // absent rather than null: ProseMirror omits empty fields
         assert!(json.get("attrs").is_none());
+    }
+
+    #[test]
+    fn font_sizes_have_one_safe_canonical_representation() {
+        assert_eq!(normalize_font_size("8px").as_deref(), Some("8px"));
+        assert_eq!(normalize_font_size("18px").as_deref(), Some("18px"));
+        assert_eq!(normalize_font_size("96px").as_deref(), Some("96px"));
+
+        assert_eq!(normalize_font_size("7px"), None);
+        assert_eq!(normalize_font_size("97px"), None);
+        assert_eq!(normalize_font_size("18.5px"), None);
+        assert_eq!(normalize_font_size("1rem"), None);
+        assert_eq!(normalize_font_size("18px; color:red"), None);
+
+        // Parsing may accept an equivalent numeric spelling, but persisted
+        // values and serializers always use the canonical form.
+        assert_eq!(normalize_font_size("018px").as_deref(), Some("18px"));
     }
 }

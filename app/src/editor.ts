@@ -11,6 +11,7 @@ import { extensions } from "./schema";
 import type { SyncProvider } from "./provider";
 import { installLinkShortcut } from "./link";
 import { installSlashMenu } from "./slash";
+import { installToolbar } from "./toolbar";
 
 export type Actor = { name: string; color: string; id: number };
 
@@ -58,8 +59,17 @@ export function createEditor(
     autofocus: "end",
   });
 
-  installSlashMenu(editor, host);
-  installLinkShortcut(editor, host);
+  const destroySlashMenu = installSlashMenu(editor, host);
+  const links = installLinkShortcut(editor, host);
+  const destroyToolbar = installToolbar(editor, element, links.open);
+
+  // Menus and toolbar controls live outside ProseMirror's element, so TipTap
+  // cannot remove them when a document switch destroys the editor.
+  editor.on("destroy", () => {
+    destroySlashMenu();
+    links.destroy();
+    destroyToolbar();
+  });
 
   // AD-17. y-prosemirror applies remote updates while an input method has live
   // marked text, redrawing the node being composed in. The provider holds them

@@ -102,6 +102,137 @@ fn known_shapes_round_trip() {
     }
 }
 
+#[test]
+fn font_size_round_trips_through_a_stable_html_span() {
+    let sized = Node::element(
+        "doc",
+        vec![Node::element(
+            "paragraph",
+            vec![Node::text(
+                "Large",
+                vec![Mark::new("fontSize").with_attr("size", "18px".into())],
+            )],
+        )],
+    );
+    let expected = normalize(&sized);
+
+    assert_eq!(
+        to_markdown(&expected),
+        "<span style=\"font-size: 18px\">Large</span>"
+    );
+    assert_eq!(round_trip(&expected), expected);
+
+    // Font sizing must compose with the CommonMark marks it sits beside.
+    let composed = Node::element(
+        "doc",
+        vec![Node::element(
+            "paragraph",
+            vec![Node::text(
+                "Large",
+                vec![
+                    Mark::new("bold"),
+                    Mark::new("fontSize").with_attr("size", "18px".into()),
+                ],
+            )],
+        )],
+    );
+    let expected = normalize(&composed);
+    assert_eq!(round_trip(&expected), expected);
+}
+
+#[test]
+fn title_and_h1_remain_distinct_in_the_projection() {
+    let title = Node::element(
+        "doc",
+        vec![
+            Node::element("heading", vec![Node::text("A title", vec![])])
+                .with_attr("level", 1.into())
+                .with_attr("variant", "title".into()),
+        ],
+    );
+    let h1 = Node::element(
+        "doc",
+        vec![
+            Node::element("heading", vec![Node::text("An H1", vec![])])
+                .with_attr("level", 1.into()),
+        ],
+    );
+
+    assert_eq!(to_markdown(&title), "<!--thought:title-->\n# A title");
+    assert_eq!(to_markdown(&h1), "# An H1");
+    assert_eq!(round_trip(&title), normalize(&title));
+    assert_eq!(round_trip(&h1), normalize(&h1));
+
+    // A marker only applies to the immediately following H1.
+    let interrupted = normalize(&from_markdown("<!--thought:title-->\n\nParagraph\n\n# H1"));
+    assert_eq!(interrupted.content[1].attr_str("variant"), None);
+
+    let interrupted_by_rule = normalize(&from_markdown("<!--thought:title-->\n\n***\n\n# H1"));
+    assert_eq!(interrupted_by_rule.content[1].attr_str("variant"), None);
+
+    let escaped_blockquote = normalize(&from_markdown("> <!--thought:title-->\n\n# H1"));
+    assert_eq!(escaped_blockquote.content[1].attr_str("variant"), None);
+}
+
+#[test]
+fn font_size_parser_rejects_unsafe_css_and_respects_span_nesting() {
+    for markdown in [
+        "<span style=\"font-size: 7px\">plain</span>",
+        "<span style=\"font-size: 97px\">plain</span>",
+        "<span style=\"font-size: 18.5px\">plain</span>",
+        "<span style=\"font-size: 1rem\">plain</span>",
+        "<span style=\"font-size: 18px; color: red\">plain</span>",
+    ] {
+        let parsed = normalize(&from_markdown(markdown));
+        assert!(
+            parsed.content[0].content[0].marks.is_empty(),
+            "unsafe span produced a mark: {markdown}"
+        );
+    }
+
+    // The ignored inner span must not close the recognized outer span.
+    let nested = normalize(&from_markdown(
+        "<span style=\"font-size: 18px\">a<span class=\"note\">b</span>c</span>",
+    ));
+    assert_eq!(nested.content[0].content.len(), 1);
+    assert_eq!(nested.content[0].content[0].text.as_deref(), Some("abc"));
+    assert_eq!(
+        nested.content[0].content[0].marks,
+        vec![Mark::new("fontSize").with_attr("size", "18px".into())]
+    );
+
+    // A recognized inner size overrides its parent without corrupting the
+    // surrounding CommonMark stack, then restores the parent on close.
+    let nested_sizes = normalize(&from_markdown(
+        "<span style=\"font-size: 18px\">**outer <span style=\"font-size: 20px\">inner</span> outer**</span>",
+    ));
+    let runs = &nested_sizes.content[0].content;
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[0].text.as_deref(), Some("outer "));
+    assert_eq!(runs[1].text.as_deref(), Some("inner"));
+    assert_eq!(runs[2].text.as_deref(), Some(" outer"));
+    assert!(
+        runs.iter()
+            .all(|run| run.marks.iter().any(|mark| mark.kind == "bold"))
+    );
+    assert_eq!(runs[0].marks[1].attrs["size"], "18px");
+    assert_eq!(runs[1].marks[1].attrs["size"], "20px");
+    assert_eq!(runs[2].marks[1].attrs["size"], "18px");
+
+    // A malformed unclosed span is contained to its block.
+    let unclosed = normalize(&from_markdown(
+        "<span style=\"font-size: 18px\">first\n\nsecond",
+    ));
+    assert_eq!(unclosed.content.len(), 2);
+    assert!(
+        unclosed.content[0].content[0]
+            .marks
+            .iter()
+            .any(|mark| mark.kind == "fontSize")
+    );
+    assert!(unclosed.content[1].content[0].marks.is_empty());
+}
+
 /// Pins the exact boundary of the one shape markdown cannot represent, so a
 /// pulldown-cmark upgrade that widens or narrows it is noticed rather than
 /// silently absorbed. `true` means the mark survives a round trip.

@@ -45,6 +45,7 @@ pub fn marks() -> impl Strategy<Value = Vec<Mark>> {
             Just(Mark::new("strike")),
             Just(Mark::new("code")),
             Just(Mark::new("link").with_attr("href", "https://example.com".into())),
+            Just(Mark::new("fontSize").with_attr("size", "18px".into())),
         ],
         0..3,
     )
@@ -106,8 +107,14 @@ fn table(markdown_safe: bool) -> BoxedStrategy<Node> {
 fn block(markdown_safe: bool) -> BoxedStrategy<Node> {
     let leaf = prop_oneof![
         inlines(markdown_safe).prop_map(|c| Node::element("paragraph", c)),
-        (1i64..=3, inlines(markdown_safe))
-            .prop_map(|(l, c)| Node::element("heading", c).with_attr("level", l.into())),
+        (1i64..=3, any::<bool>(), inlines(markdown_safe)).prop_map(|(l, title, c)| {
+            let heading = Node::element("heading", c).with_attr("level", l.into());
+            if l == 1 && title {
+                heading.with_attr("variant", "title".into())
+            } else {
+                heading
+            }
+        }),
         Just(Node::element("horizontalRule", vec![])),
         ("[a-z ;=(){}\n]{1,30}", prop::option::of("[a-z]{1,6}")).prop_map(|(code, lang)| {
             let mut n = Node::element("codeBlock", vec![Node::text(code, vec![])]);
