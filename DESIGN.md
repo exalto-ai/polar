@@ -37,7 +37,7 @@ without adding a wordmark to small app surfaces. The icon uses the white mark
 on the deep-blue tile; standalone blue and white SVG variants support light and
 dark external grounds.
 
-The supplied master files live in [`assets/svg/`](assets/svg/),
+The supplied master files live in [`assets/orbit/`](assets/orbit/),
 [`assets/macos/`](assets/macos/), and [`assets/web/`](assets/web/).
 [`assets/icon-manifest.json`](assets/icon-manifest.json) carries the shared
 ground into generated platform assets. See [`assets/README.md`](assets/README.md)

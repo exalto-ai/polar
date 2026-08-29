@@ -5,7 +5,7 @@ authoritative source package is checked in here:
 
 - `avatar-1024.png` is the full-field avatar.
 - `macos/` contains the transparent macOS icon sizes and supplied ICNS.
-- `svg/` contains the tile and light/dark mark variants.
+- `orbit/` contains the tile and light/dark mark variants.
 - `web/` contains browser and installable-web-app icons.
 
 `icon.png` is an exact copy of `macos/AppIcon-1024.png` and drives the
