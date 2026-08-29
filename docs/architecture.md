@@ -751,6 +751,11 @@ provides local zoom plus persistent block style, font size, bold, italic, and li
 Markdown input rules give Bear's typing feel (`## ` → heading) without markdown storage
 (AD-3).
 
+**Cost:** the editor deliberately does not follow the system light or dark appearance. A future
+theme must revisit the editor and app-icon relationship rather than tinting either independently.
+Changing the ground or mark also requires keeping the style tokens, canonical `assets/orbit/`
+sources, generated desktop and web assets, and `DESIGN.md` in sync.
+
 ## M2.6 — Agents made visible
 
 Agent carets ride the awareness protocol, labelled with the actor's display name and colored
