@@ -745,10 +745,16 @@ adjacency is why both belong to the same milestone.
 Single window, no sidebar. ⌘K opens a switcher backed by the daemon's FTS index — the same
 `search` the agents use, so there is one search implementation rather than two.
 
-System sans throughout, sized and spaced for long-form writing. Light and dark follow the
-system, with the palette defined once as tokens. A compact, centered toolbar provides local
-zoom plus persistent block style, font size, bold, italic, and link commands. Markdown input
-rules give Bear's typing feel (`## ` → heading) without markdown storage (AD-3).
+System sans throughout, sized and spaced for long-form writing. The editor and window use
+the fixed deep-blue `#0c1622` ground shared with the app icon. A compact, centered toolbar
+provides local zoom plus persistent block style, font size, bold, italic, and link commands.
+Markdown input rules give Bear's typing feel (`## ` → heading) without markdown storage
+(AD-3).
+
+**Cost:** the editor deliberately does not follow the system light or dark appearance. A future
+theme must revisit the editor and app-icon relationship rather than tinting either independently.
+Changing the ground or mark also requires keeping the style tokens, canonical `assets/orbit/`
+sources, generated desktop and web assets, and `DESIGN.md` in sync.
 
 ## M2.6 — Agents made visible
 

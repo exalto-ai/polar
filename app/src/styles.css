@@ -1,19 +1,20 @@
 /*
- * Light and dark, system sans, as little chrome as the app can get away with.
+ * Deep blue, system sans, as little chrome as the app can get away with.
  *
- * Every colour is a token defined once on :root and re-bound under
- * prefers-color-scheme, so nothing is defined only inside a media query.
+ * The supplied logo ground is #0c1622. It is the window ground in every system
+ * appearance, so the writing surface and the app icon never disagree.
  */
 :root {
-  --paper: #ffffff;
-  --ink: #1b1d21;
-  --ink-soft: #5c6470;
-  --ink-faint: #9aa3af;
-  --rule: #e7e9ee;
-  --raised: #f6f7f9;
-  --overlay: rgba(24, 26, 30, 0.28);
-  --accent: #2f6fed;
-  --shadow: 0 18px 48px rgba(20, 24, 34, 0.18);
+  color-scheme: dark;
+  --paper: #0c1622;
+  --ink: #edf3f9;
+  --ink-soft: #a8b5c4;
+  --ink-faint: #718095;
+  --rule: #283748;
+  --raised: #182533;
+  --overlay: rgba(2, 7, 12, 0.68);
+  --accent: #6ea1ff;
+  --shadow: 0 18px 48px rgba(0, 0, 0, 0.46);
 
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   --display: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
@@ -28,20 +29,6 @@
      tables and code in it, not a book, and those want the room. */
   --measure: 48rem;
   --chrome-height: 44px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #16181c;
-    --ink: #e8eaee;
-    --ink-soft: #98a1ae;
-    --ink-faint: #646d7a;
-    --rule: #262a31;
-    --raised: #1e2127;
-    --overlay: rgba(0, 0, 0, 0.5);
-    --accent: #6ea1ff;
-    --shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
-  }
 }
 
 * { box-sizing: border-box; }
