@@ -525,7 +525,7 @@ function renderConnectionPeers() {
 async function refreshConnectionActors() {
   if (!open) return;
   const docId = openDocId;
-  // Agents have *edited* — they come in over MCP, which carries no presence,
+  // Agents have *edited*; they come in over MCP, which carries no presence,
   // so this is history from the op log rather than who is attached right now.
   try {
     const actors = await mcp.documentActors(docId);

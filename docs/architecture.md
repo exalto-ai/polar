@@ -510,7 +510,7 @@ needs one; it is not a dormant permission flag in the current protocol.
 **Cost:** reviewers always wait for acceptance, including on local unshared documents. This
 is simpler and safer than shipping an unused grant lifecycle in the MVP.
 
-### AD-20 — One product name and one machine namespace
+### AD-20: One product name and one machine namespace
 
 The interface and application bundle are **Proof of Thought**. Names resolved by package
 managers, process launchers, protocols, and local paths use **thought**: the frontend and
