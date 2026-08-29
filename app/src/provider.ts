@@ -35,9 +35,20 @@ export type AgentPresence = {
 };
 
 type OutboundUpdate = {
+  kind: "update";
   source: LocalInputSourceValue;
   update: Uint8Array;
 };
+
+type OutboundSnapshot = {
+  kind: "snapshot";
+};
+
+type OutboundWork = OutboundUpdate | OutboundSnapshot;
+
+/** Strict bounds for source-labelled update bytes retained by the outbox. */
+export const MAX_PENDING_OUTBOUND_RUNS = 64;
+export const MAX_PENDING_OUTBOUND_BYTES = 256 * 1024;
 
 /**
  * Acknowledgements are positional, so the update already sent must remain
@@ -46,8 +57,8 @@ type OutboundUpdate = {
  * permanently erase the distinction because Yjs updates carry no origin.
  */
 class OutboundQueue {
-  private inFlight: OutboundUpdate | null = null;
-  private queued: OutboundUpdate[] = [];
+  private inFlight: OutboundWork | null = null;
+  private queued: OutboundWork[] = [];
 
   get length(): number {
     return this.queued.length + (this.inFlight === null ? 0 : 1);
@@ -57,18 +68,50 @@ class OutboundQueue {
     return this.length > 0;
   }
 
+  get bytes(): number {
+    return (
+      this.workBytes(this.inFlight) +
+      this.queued.reduce((sum, item) => sum + this.workBytes(item), 0)
+    );
+  }
+
   enqueue(update: Uint8Array, source: LocalInputSourceValue) {
-    const incoming = { source, update: update.slice() };
-    const tail = this.queued[this.queued.length - 1];
-    if (tail?.source === incoming.source) {
-      tail.update = Y.mergeUpdates([tail.update, incoming.update]);
-    } else {
-      this.queued.push(incoming);
+    // A queued snapshot is generated from the live Y.Doc only when it is sent,
+    // so it already covers every later edit without retaining another update.
+    if (this.queued.some((item) => item.kind === "snapshot")) return;
+
+    // The in-flight snapshot represents only the state at its send boundary.
+    // One queued snapshot captures edits made while that ACK is outstanding.
+    if (this.inFlight?.kind === "snapshot") {
+      this.queued = [{ kind: "snapshot" }];
+      return;
     }
+
+    const incoming: OutboundUpdate = { kind: "update", source, update: update.slice() };
+    const tail = this.queued[this.queued.length - 1];
+    if (tail?.kind === "update" && tail.source === incoming.source) {
+      const merged = Y.mergeUpdates([tail.update, incoming.update]);
+      const prospectiveBytes = this.bytes - tail.update.byteLength + merged.byteLength;
+      if (prospectiveBytes <= MAX_PENDING_OUTBOUND_BYTES) {
+        tail.update = merged;
+        return;
+      }
+      this.collapseQueuedToSnapshot();
+      return;
+    }
+
+    if (
+      this.length + 1 > MAX_PENDING_OUTBOUND_RUNS ||
+      this.bytes + incoming.update.byteLength > MAX_PENDING_OUTBOUND_BYTES
+    ) {
+      this.collapseQueuedToSnapshot();
+      return;
+    }
+    this.queued.push(incoming);
   }
 
   /** Move the oldest unsent source run into the in-flight position. */
-  beginSend(): OutboundUpdate | null {
+  beginSend(): OutboundWork | null {
     if (this.inFlight !== null) return null;
     this.inFlight = this.queued.shift() ?? null;
     return this.inFlight;
@@ -91,11 +134,33 @@ class OutboundQueue {
     const head = this.inFlight;
     this.inFlight = null;
     const next = this.queued[0];
-    if (next?.source === head.source) {
-      next.update = Y.mergeUpdates([head.update, next.update]);
-    } else {
-      this.queued.unshift(head);
+
+    // Once an ACK is lost across an evidence overflow, the safe retry is one
+    // current-document snapshot labelled Unknown. Retaining the old strong
+    // source would overclaim which bytes the daemon still needs.
+    if (head.kind === "snapshot" || next?.kind === "snapshot") {
+      this.collapseQueuedToSnapshot();
+      return;
     }
+
+    if (next?.kind === "update" && next.source === head.source) {
+      const merged = Y.mergeUpdates([head.update, next.update]);
+      if (this.bytes - next.update.byteLength + merged.byteLength <= MAX_PENDING_OUTBOUND_BYTES) {
+        next.update = merged;
+        return;
+      }
+      this.collapseQueuedToSnapshot();
+      return;
+    }
+    this.queued.unshift(head);
+  }
+
+  private collapseQueuedToSnapshot() {
+    this.queued = [{ kind: "snapshot" }];
+  }
+
+  private workBytes(item: OutboundWork | null): number {
+    return item?.kind === "update" ? item.update.byteLength : 0;
   }
 }
 
@@ -386,7 +451,10 @@ export class SyncProvider {
 
     const update = this.outbound.beginSend();
     if (update === null) return;
-    socket.send(encodeSourcedUpdate(this.docId, update.source, update.update));
+    const source = update.kind === "snapshot" ? LocalInputSource.Unknown : update.source;
+    const body =
+      update.kind === "snapshot" ? Y.encodeStateAsUpdate(this.doc) : update.update;
+    socket.send(encodeSourcedUpdate(this.docId, source, body));
     this.setSaveStatus("saving");
   }
 
@@ -458,5 +526,10 @@ export class SyncProvider {
   /** Pending outbound queue entries. The in-flight head counts as one. */
   get pendingOutbound() {
     return this.outbound.length;
+  }
+
+  /** Source-labelled update bytes retained by the bounded outbound queue. */
+  get pendingOutboundBytes() {
+    return this.outbound.bytes;
   }
 }

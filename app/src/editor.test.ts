@@ -120,8 +120,8 @@ describe("editor source dispatch wrapper", () => {
       { id: doc.clientID, name: "Writer", color: "#123456" },
       {
         newDocument: () => {},
-        openMarkdown: () => {},
-        saveMarkdown: () => {},
+        importMarkdown: () => {},
+        exportMarkdown: () => {},
       },
     );
 

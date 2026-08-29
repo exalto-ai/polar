@@ -770,6 +770,15 @@ source-aware layer adds its byte ceiling. The daemon must preserve positional re
 acknowledge idempotent no-op retries, and keep the legacy `UPDATE` frame compatible while older
 clients migrate.
 
+The window retains at most 64 source runs and 256 KiB of source-labelled update bytes.
+Crossing either limit replaces the queued evidence with a current-document Yjs snapshot
+labelled `Unknown`. The document remains complete, while attribution fails closed instead
+of retaining an incorrect strong source label.
+
+**Cost:** a long offline session can lose per-run source detail after the bound is crossed.
+Its text is still durable once the connection returns, but the affected content is reported
+as unknown rather than typed, pasted, or AI generated.
+
 ## M2.2 — The schema, exported not authored twice
 
 Correcting M1.2's direction, which was unimplementable as written: TipTap builds its schema

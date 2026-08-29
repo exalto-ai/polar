@@ -13,7 +13,11 @@ import {
   LocalInputSource,
   Tag,
 } from "./protocol";
-import { SyncProvider } from "./provider";
+import {
+  MAX_PENDING_OUTBOUND_BYTES,
+  MAX_PENDING_OUTBOUND_RUNS,
+  SyncProvider,
+} from "./provider";
 
 /** A socket we drive by hand, so nothing depends on timing or a real server. */
 class FakeSocket {
@@ -391,6 +395,92 @@ describe("outbound coalescing", () => {
     expect(provider.pendingOutbound).toBe(0);
     expect(provider.hasPendingChanges).toBe(false);
     expect(seen[seen.length - 1]).toBe("saved");
+  });
+
+  it("bounds ten thousand alternating source runs and degrades overflow to Unknown", async () => {
+    vi.useFakeTimers();
+    socket.sent.length = 0;
+    socket.close();
+
+    for (let index = 0; index < 10_000; index++) {
+      const source = index % 2 === 0 ? LocalInputSource.Written : LocalInputSource.Paste;
+      provider.withLocalInputSource(source, () => appendParagraph(doc, `alternating ${index}`));
+      expect(provider.pendingOutbound).toBeLessThanOrEqual(MAX_PENDING_OUTBOUND_RUNS);
+      expect(provider.pendingOutboundBytes).toBeLessThanOrEqual(MAX_PENDING_OUTBOUND_BYTES);
+    }
+
+    expect(provider.pendingOutbound).toBe(1);
+    expect(provider.pendingOutboundBytes).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(250);
+    const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
+    reconnected.open();
+    const frames = sentUpdates(reconnected);
+    expect(frames).toHaveLength(1);
+    expect(updateSource(frames[0])).toBe(LocalInputSource.Unknown);
+    expect(replicaFrom(frames).getXmlFragment("content").length).toBe(10_000);
+
+    reconnected.deliver(encode(Tag.Ack, "doc-1", new Uint8Array()));
+    expect(provider.pendingOutbound).toBe(0);
+  });
+
+  it("does not retain an oversized local update in the bounded outbox", async () => {
+    vi.useFakeTimers();
+    socket.sent.length = 0;
+    socket.close();
+
+    const text = "x".repeat(MAX_PENDING_OUTBOUND_BYTES * 2);
+    provider.withLocalInputSource(LocalInputSource.Paste, () => appendParagraph(doc, text));
+    expect(provider.pendingOutbound).toBe(1);
+    expect(provider.pendingOutboundBytes).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(250);
+    const reconnected = FakeSocket.instances[FakeSocket.instances.length - 1];
+    reconnected.open();
+    const frames = sentUpdates(reconnected);
+    expect(frames).toHaveLength(1);
+    expect(updateSource(frames[0])).toBe(LocalInputSource.Unknown);
+    expect(replicaFrom(frames).getXmlFragment("content").toString()).toContain(text);
+  });
+
+  it("stays bounded when a snapshot retry is interrupted by more local edits", async () => {
+    vi.useFakeTimers();
+    socket.sent.length = 0;
+    provider.withLocalInputSource(LocalInputSource.Written, () => appendParagraph(doc, "head"));
+    socket.close();
+
+    for (let index = 0; index < 256; index++) {
+      const source = index % 2 === 0 ? LocalInputSource.Written : LocalInputSource.Paste;
+      provider.withLocalInputSource(source, () => appendParagraph(doc, `before retry ${index}`));
+    }
+    expect(provider.pendingOutbound).toBeLessThanOrEqual(MAX_PENDING_OUTBOUND_RUNS);
+    expect(provider.pendingOutboundBytes).toBeLessThanOrEqual(MAX_PENDING_OUTBOUND_BYTES);
+
+    await vi.advanceTimersByTimeAsync(250);
+    const firstRetry = FakeSocket.instances[FakeSocket.instances.length - 1];
+    firstRetry.open();
+    expect(updateSource(sentUpdates(firstRetry)[0])).toBe(LocalInputSource.Unknown);
+
+    for (let index = 0; index < 256; index++) {
+      provider.withLocalInputSource(LocalInputSource.Paste, () =>
+        appendParagraph(doc, `during retry ${index}`),
+      );
+      expect(provider.pendingOutbound).toBeLessThanOrEqual(MAX_PENDING_OUTBOUND_RUNS);
+      expect(provider.pendingOutboundBytes).toBeLessThanOrEqual(MAX_PENDING_OUTBOUND_BYTES);
+    }
+    firstRetry.close();
+    expect(provider.pendingOutbound).toBe(1);
+    expect(provider.pendingOutboundBytes).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(500);
+    const secondRetry = FakeSocket.instances[FakeSocket.instances.length - 1];
+    secondRetry.open();
+    const frames = sentUpdates(secondRetry);
+    expect(frames).toHaveLength(1);
+    expect(updateSource(frames[0])).toBe(LocalInputSource.Unknown);
+    const replica = replicaFrom(frames);
+    expect(replica.getXmlFragment("content").length).toBe(513);
+    expect(replica.getXmlFragment("content").toString()).toContain("during retry 255");
   });
 });
 
