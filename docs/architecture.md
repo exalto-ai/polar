@@ -469,6 +469,13 @@ editor-only capability separates trusted product paths from public MCP calls, bu
 device-security boundary. External verification still requires the signing and publication work
 defined in [provenance.md](provenance.md).
 
+**Cost:** the editor retains one stable ID, range set, and update for each pending semantic
+mutation. The daemon commits a batch in order rather than wrapping the whole frame in one SQLite
+transaction, so a late failure can leave a durable prefix. The client must retry the same batch;
+event idempotency then skips the prefix before committing the repaired tail. Once the bounded
+editor outbox overflows, its current-document fallback is labelled `Unknown` and has no anchors,
+so that wording is not eligible for exact consumer attribution.
+
 ### AD-20 — One product name and one machine namespace
 
 The interface and application bundle are **Proof of Thought**. Names resolved by package
@@ -807,10 +814,10 @@ source-aware layer adds its byte ceiling. The daemon must preserve positional re
 acknowledge idempotent no-op retries, and keep the legacy `UPDATE` frame compatible while older
 clients migrate.
 
-The window retains at most 64 source runs and 256 KiB of source-labelled update bytes.
-Crossing either limit replaces the queued evidence with a current-document Yjs snapshot
-labelled `Unknown`. The document remains complete, while attribution fails closed instead
-of retaining an incorrect strong source label.
+The window retains at most 256 semantic mutations and 256 KiB of update bytes. Crossing either
+limit replaces the queued evidence with a current-document Yjs snapshot labelled `Unknown` and
+without range anchors. The document remains complete, while attribution fails closed instead of
+retaining an incorrect strong source label.
 
 **Cost:** a long offline session can lose per-run source detail after the bound is crossed.
 Its text is still durable once the connection returns, but the affected content is reported

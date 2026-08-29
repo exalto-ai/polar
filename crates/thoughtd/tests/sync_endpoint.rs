@@ -358,7 +358,6 @@ async fn retrying_an_anchored_batch_after_a_lost_ack_is_exactly_once() {
             update: local.diff_since(&before),
         }],
     };
-
     send(&mut socket, batch.clone()).await;
     // The transport delivered this ACK, but the application intentionally
     // forgets it and reconnects. That models a disconnect after the durable
@@ -398,6 +397,190 @@ async fn retrying_an_anchored_batch_after_a_lost_ack_is_exactly_once() {
         daemon.call("document_lineage", serde_json::json!({ "doc_id": doc_id })),
         lineage_before_retry,
         "retry must not change the durable lineage"
+    );
+}
+
+#[tokio::test]
+async fn a_partial_anchored_batch_retries_without_duplicating_its_prefix() {
+    let daemon = Daemon::start();
+    let doc_id = daemon.create_document("");
+    let mut observer = connect(&daemon).await;
+    send(
+        &mut observer,
+        Frame::Subscribe {
+            doc_id: doc_id.clone(),
+            state_vector: vec![],
+        },
+    )
+    .await;
+    let local = Document::new();
+    match recv(&mut observer).await {
+        Frame::Sync { update, .. } => local.apply_update(&update).expect("valid sync"),
+        other => panic!("expected SYNC, got {other:?}"),
+    }
+
+    let block = local.blocks()[0].block_id.clone();
+    let before_first = local.state_vector();
+    local
+        .replace_block(
+            &block,
+            &normalize(&Node::element(
+                "paragraph",
+                vec![Node::text("durable prefix", vec![])],
+            )),
+        )
+        .expect("first replacement");
+    let first_update = local.diff_since(&before_first);
+
+    let before_second = local.state_vector();
+    local
+        .replace_block(
+            &block,
+            &normalize(&Node::element(
+                "paragraph",
+                vec![Node::text("completed retry", vec![])],
+            )),
+        )
+        .expect("second replacement");
+    let second_update = local.diff_since(&before_second);
+
+    let first = AnchoredMutation {
+        source: LocalInputSource::Written,
+        client_event_id: "partial-prefix".into(),
+        hints: vec![],
+        update: first_update.clone(),
+    };
+    let second = AnchoredMutation {
+        source: LocalInputSource::Paste,
+        client_event_id: "partial-tail".into(),
+        hints: vec![],
+        update: second_update.clone(),
+    };
+
+    let mut publisher = connect(&daemon).await;
+    send(
+        &mut publisher,
+        Frame::AnchoredBatch {
+            doc_id: doc_id.clone(),
+            mutations: vec![
+                first.clone(),
+                AnchoredMutation {
+                    update: vec![0xff],
+                    ..second.clone()
+                },
+            ],
+        },
+    )
+    .await;
+    match recv(&mut publisher).await {
+        Frame::Error {
+            doc_id: failed_doc,
+            message,
+        } => {
+            assert_eq!(failed_doc, doc_id);
+            assert!(
+                message.contains("bad update"),
+                "unexpected error: {message}"
+            );
+        }
+        other => panic!("expected partial-batch error, got {other:?}"),
+    }
+    match recv(&mut observer).await {
+        Frame::Broadcast {
+            doc_id: broadcast_doc,
+            update,
+        } => {
+            assert_eq!(broadcast_doc, doc_id);
+            assert_eq!(update, first_update);
+        }
+        other => panic!("expected durable-prefix BROADCAST, got {other:?}"),
+    }
+    assert_no_additional_frame(
+        &mut observer,
+        "a failed tail must not duplicate the durable prefix",
+    )
+    .await;
+    assert_eq!(editor_edit_count(&daemon, &doc_id), 1);
+    assert_eq!(
+        daemon.read_document(&doc_id)["markdown"].as_str(),
+        Some("durable prefix")
+    );
+
+    let completed = Frame::AnchoredBatch {
+        doc_id: doc_id.clone(),
+        mutations: vec![first.clone(), second],
+    };
+    send(&mut publisher, completed.clone()).await;
+    recv_ack(&mut publisher, &doc_id).await;
+    match recv(&mut observer).await {
+        Frame::Broadcast {
+            doc_id: broadcast_doc,
+            update,
+        } => {
+            assert_eq!(broadcast_doc, doc_id);
+            assert_eq!(update, second_update);
+        }
+        other => panic!("expected repaired-tail BROADCAST, got {other:?}"),
+    }
+    assert_no_additional_frame(
+        &mut observer,
+        "retry must not broadcast the durable prefix twice",
+    )
+    .await;
+    assert_eq!(editor_edit_count(&daemon, &doc_id), 2);
+    assert_eq!(
+        daemon.read_document(&doc_id)["markdown"].as_str(),
+        Some("completed retry")
+    );
+
+    send(&mut publisher, completed).await;
+    recv_ack(&mut publisher, &doc_id).await;
+    assert_no_additional_frame(
+        &mut observer,
+        "a fully replayed batch must not broadcast any mutation",
+    )
+    .await;
+    assert_eq!(editor_edit_count(&daemon, &doc_id), 2);
+
+    let before_conflict = local.state_vector();
+    local
+        .replace_block(
+            &block,
+            &normalize(&Node::element(
+                "paragraph",
+                vec![Node::text("conflicting reuse", vec![])],
+            )),
+        )
+        .expect("conflicting replacement");
+    send(
+        &mut publisher,
+        Frame::AnchoredBatch {
+            doc_id: doc_id.clone(),
+            mutations: vec![AnchoredMutation {
+                source: LocalInputSource::Written,
+                client_event_id: "partial-prefix".into(),
+                hints: vec![],
+                update: local.diff_since(&before_conflict),
+            }],
+        },
+    )
+    .await;
+    match recv(&mut publisher).await {
+        Frame::Error { message, .. } => assert!(
+            message.contains("reused with different provenance"),
+            "unexpected conflict error: {message}"
+        ),
+        other => panic!("expected client-event conflict, got {other:?}"),
+    }
+    assert_no_additional_frame(
+        &mut observer,
+        "conflicting client event bytes must not broadcast",
+    )
+    .await;
+    assert_eq!(editor_edit_count(&daemon, &doc_id), 2);
+    assert_eq!(
+        daemon.read_document(&doc_id)["markdown"].as_str(),
+        Some("completed retry")
     );
 }
 

@@ -280,12 +280,13 @@ Any future evidence version must add version-dispatched hashing, validation, and
 while leaving both old suites readable; individual internal digest constants are not independent
 compatibility promises.
 
-The V1 digest root and domain separators use the machine namespace `thought`, including
+The evidence digest root and domain separators use the machine namespace `thought`, including
 `thought/canonical-evidence`, `thought/document`, `thought/event-chain`,
-`thought/yjs-update-log`, and `thought/live-lineage`. This namespace correction predates a
-release and intentionally invalidates evidence produced by development builds that used the old
-product-name strings. Once released, changing any of these bytes requires a new format version,
-a migration plan, and a verifier that can dispatch across every supported version.
+`thought/yjs-update-log`, `thought/live-lineage`, and the V2 `thought/anchor-text` domain. This
+namespace correction predates a release and intentionally invalidates evidence produced by
+development builds that used the old product-name strings. Once released, changing any of these
+bytes requires a new format version, a migration plan, and a verifier that can dispatch across
+every supported version.
 
 A normal edit commits its actor registration, Yjs update, event, ordered changes, complete live
 spans, lineage watermark, title, deletion state, search projection, and compatibility block rails
