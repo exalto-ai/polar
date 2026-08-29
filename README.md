@@ -67,7 +67,9 @@ cargo run -p thoughtd
 
 It prints its port and writes `daemon.json` (mode 0600) with a bearer token. MCP clients
 that speak HTTP can use the URL inside; clients that spawn a stdio server should spawn
-`thought-mcp-stdio`, which finds or starts the daemon and proxies to it.
+`thought-mcp-stdio`, which reuses the published daemon or starts one only when nothing is
+published, then proxies to it. A stale or unauthenticated discovery record is reported for
+the developer to resolve instead of causing one process to replace another.
 
 ## Shape
 

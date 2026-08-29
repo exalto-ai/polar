@@ -57,34 +57,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Use the published daemon if it answers; otherwise start one.
+/// Use a published daemon only when its bearer token works. Start one only
+/// when nothing is published, so this shim never retires or races another
+/// process that may still own the store.
 fn connect() -> Result<Daemon, Box<dyn std::error::Error>> {
-    if let Some(daemon) = discovery::read()
-        && alive(&daemon)
-    {
-        return Ok(daemon);
+    if let Some(daemon) = discovery::read() {
+        if discovery::authenticated_reachable(&daemon) {
+            return Ok(daemon);
+        }
+        return Err(format!(
+            "a thought daemon is already published but did not accept its bearer token; quit any running Proof of Thought or thoughtd process, then remove {} if the problem persists",
+            discovery::discovery_path().display()
+        )
+        .into());
     }
-    spawn()
-}
 
-/// A stale discovery file outlives the process that wrote it, so ask.
-///
-/// The question is "is something answering on that port", not "did it like my
-/// request". An HTTP error status *is* an answer — rejecting an uninitialized
-/// `ping` is exactly what a healthy MCP server should do — so only a transport
-/// failure counts as absent. Treating a status code as death made the shim
-/// spawn a second daemon every time and then time out waiting for it.
-fn alive(daemon: &Daemon) -> bool {
-    let sent = ureq::post(&daemon.url)
-        .header("Authorization", &format!("Bearer {}", daemon.token))
-        .header("Accept", "application/json, text/event-stream")
-        .send_json(serde_json::json!({
-            "jsonrpc": "2.0", "id": 0, "method": "ping"
-        }));
-    !matches!(
-        sent,
-        Err(ureq::Error::ConnectionFailed | ureq::Error::Io(_))
-    )
+    spawn()
 }
 
 fn spawn() -> Result<Daemon, Box<dyn std::error::Error>> {
@@ -104,7 +92,7 @@ fn spawn() -> Result<Daemon, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Some(daemon) = discovery::read()
-            && alive(&daemon)
+            && discovery::authenticated_reachable(&daemon)
         {
             return Ok(daemon);
         }

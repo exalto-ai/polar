@@ -8,6 +8,7 @@ mod harness;
 use harness::Daemon;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use thoughtd::discovery::{self, Daemon as PublishedDaemon};
 
 #[test]
 fn an_agent_drives_the_daemon_over_mcp() {
@@ -102,6 +103,58 @@ fn the_endpoint_refuses_an_unauthenticated_client() {
         Err(ureq::Error::StatusCode(401)) => {}
         other => panic!("expected 401, got {other:?}"),
     }
+}
+
+#[test]
+fn discovery_probe_verifies_the_published_bearer_token() {
+    let daemon = Daemon::start();
+    let published = PublishedDaemon {
+        url: daemon.url.clone(),
+        token: daemon.token.clone(),
+    };
+    assert!(discovery::authenticated_reachable(&published));
+
+    let mut wrong_token = published;
+    wrong_token.token.push_str("-wrong");
+    assert!(
+        !discovery::authenticated_reachable(&wrong_token),
+        "an unrelated or stale bearer credential must not validate the endpoint"
+    );
+}
+
+#[test]
+fn the_stdio_shim_refuses_to_replace_a_daemon_that_rejects_its_token() {
+    let daemon = Daemon::start();
+    let published = daemon.home.path().join("daemon.json");
+    let mut wrong: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&published).expect("discovery is readable"))
+            .expect("discovery is json");
+    wrong["token"] = "not-the-daemon-token".into();
+    std::fs::write(&published, serde_json::to_vec_pretty(&wrong).unwrap()).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
+        .env("THOUGHT_HOME", daemon.home.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn stdio shim");
+    assert!(
+        !output.status.success(),
+        "the shim must not replace a published daemon"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("quit any running Proof of Thought or thoughtd process"),
+        "the failure must explain how to resolve the published daemon: {stderr}"
+    );
+
+    let original_daemon = PublishedDaemon {
+        url: daemon.url.clone(),
+        token: daemon.token.clone(),
+    };
+    assert!(
+        discovery::authenticated_reachable(&original_daemon),
+        "the shim must leave the existing process running"
+    );
 }
 
 /// The shim is what an MCP client actually spawns (AD-10). Its job is to make

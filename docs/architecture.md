@@ -321,6 +321,10 @@ port in a well-known file, plus a stdio shim that proxies to it and only spawns 
 absent. A plain stdio MCP server would let each agent client spawn its own daemon — two
 processes writing one SQLite store.
 
+**Cost:** startup performs an authenticated loopback probe and acquires a process-lifetime
+store lock. A stale or incompatible discovery record fails closed and requires the user to
+quit the old process or remove the record instead of being repaired automatically.
+
 ### AD-11 — ⌘Z is scoped to your own edits; agent runs get "Revert this run"
 Undoing a collaborator's edit is the classic violation and agents get no exception. But agent
 edits are discrete batches keyed by `session_id`, so per-run revert is a separate affordance
@@ -630,11 +634,12 @@ streamable-HTTP server. Corrections found while building:
 HTTP on localhost. The port and a token live in
 `~/Library/Application Support/ai.exalto.thought/daemon.json`, mode `0600` — any local
 process can reach a localhost port, and documents are the user's private writing.
-`thought-mcp-stdio` reads that file, proxies stdio to HTTP, and spawns `thoughtd` if it is not
-already running (AD-10). **Built.** Its liveness probe treats an HTTP *error status* as
-proof of life — rejecting an uninitialized `ping` is what a healthy MCP server should do, so
-only a transport failure means absent. Reading a status code as death made the shim start a
-second daemon on every invocation, which is the exact failure AD-10 exists to prevent.
+`thought-mcp-stdio` reads that file, proxies stdio to HTTP, and spawns `thoughtd` only when
+nothing is published (AD-10). **Built.** Its probe sends the published bearer token and
+accepts application-level HTTP errors, because rejecting an uninitialized `ping` is normal.
+A 401 or transport failure is reported for the developer to resolve instead of replacing a
+process that may still own the store. Racing fresh launches are made safe by the
+process-lifetime store lock.
 
 ```
 list_documents(query?, limit?)   -> [{doc_id, title, updated_at, word_count}]

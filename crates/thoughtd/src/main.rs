@@ -39,6 +39,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _logs = logging::init(&discovery::home());
     tracing::info!(store = %db_path.display(), "starting");
 
+    // This must precede `Workspace::open`: discovery is published later, so
+    // app and stdio clients can race to launch here. Only the process holding
+    // this OS lock may ever open the store as its daemon writer.
+    let _store_lock = discovery::try_lock_store(&db_path)?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "another thought daemon already owns this store",
+        )
+    })?;
+
     let workspace = Arc::new(Workspace::open(&db_path)?);
     let token = discovery::random_token()?;
 
