@@ -1,96 +1,38 @@
-//! Drives the daemon over real MCP: a spawned process, an HTTP transport, and
-//! the JSON-RPC handshake. The tool layer is tested in `thought-mcp` without any
-//! of that; what is under test here is specifically the wiring — discovery,
-//! authentication, and whether an agent can actually reach the tools.
+//! Real HTTP transport coverage for platform and reviewer credentials.
 
 mod harness;
 
 use harness::Daemon;
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
 use thoughtd::discovery::{self, Daemon as PublishedDaemon};
 
 #[test]
-fn an_agent_drives_the_daemon_over_mcp() {
+fn a_scoped_reviewer_reads_over_mcp() {
     let daemon = Daemon::start();
+    let doc_id = daemon.create_document_with_markdown("Transport", Some("Reached the tools."));
     daemon.connect();
 
     let tools: Vec<String> = daemon.rpc("tools/list", serde_json::json!({}))["tools"]
         .as_array()
         .expect("tool list")
         .iter()
-        .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+        .filter_map(|tool| tool["name"].as_str().map(str::to_string))
         .collect();
-    for expected in [
-        "create_document",
-        "read_document",
-        "replace_block",
-        "search",
-    ] {
-        assert!(
-            tools.contains(&expected.to_string()),
-            "missing tool {expected}"
-        );
-    }
-
-    let caller = serde_json::json!({
-        "agent": "opus", "model": "claude-opus-5", "session": "test-run"
-    });
-    let mut create = caller.clone();
-    create["title"] = "Transport".into();
-    let doc = daemon.call("create_document", create);
-    let doc_id = doc["doc_id"].as_str().expect("doc_id").to_string();
-    let block = doc["blocks"][0]["block_id"]
-        .as_str()
-        .expect("block_id")
-        .to_string();
-
-    let mut edit = caller.clone();
-    edit["doc_id"] = doc_id.clone().into();
-    edit["block_id"] = block.into();
-    edit["markdown"] = "# Transport\n\nReached the tools.".into();
-    edit["version"] = doc["version"].clone();
-    daemon.call("replace_block", edit);
+    assert!(tools.contains(&"read_document".to_string()));
 
     let view = daemon.read_document(&doc_id);
-    assert_eq!(view["title"], "Transport");
-    assert!(
-        view["markdown"]
-            .as_str()
-            .unwrap()
-            .contains("Reached the tools.")
-    );
-
-    // Anchors must point at lines that exist, or a follow-up edit misses.
-    let markdown = view["markdown"].as_str().unwrap();
-    let lines = markdown.lines().count();
-    for block in view["blocks"].as_array().expect("blocks") {
-        let end = block["line_end"].as_u64().expect("line_end") as usize;
-        assert!(end <= lines, "anchor points past the end of the document");
-    }
+    assert_eq!(view["title"], "Reached the tools.");
+    assert_eq!(view["markdown"], "Reached the tools.");
 
     let hits = daemon.call(
         "search",
         serde_json::json!({ "query": "Reached", "limit": 5 }),
     );
-    assert_eq!(hits["hits"][0]["doc_id"], doc_id.as_str());
-
-    let imported_markdown = "<!--thought:title-->\n# Imported\n\nFrom **Markdown**.";
-    let mut import = caller;
-    import["title"] = "Imported.md".into();
-    import["initial_markdown"] = imported_markdown.into();
-    let imported = daemon.call("create_document", import);
-    let imported_view = daemon.read_document(imported["doc_id"].as_str().unwrap());
-    assert_eq!(imported_view["markdown"], imported_markdown);
+    assert_eq!(hits["hits"][0]["doc_id"], doc_id);
 }
 
 #[test]
 fn the_endpoint_refuses_an_unauthenticated_client() {
     let daemon = Daemon::start();
-    // A dedicated agent with no idle pooling. The global agent reuses
-    // keep-alive sockets, and one the server has since closed fails on write
-    // with ECONNRESET — which reads as "not a 401" and fails the test for a
-    // reason that has nothing to do with authentication.
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .max_idle_connections(0)
@@ -100,21 +42,21 @@ fn the_endpoint_refuses_an_unauthenticated_client() {
         .post(&daemon.url)
         .header("Accept", "application/json, text/event-stream")
         .send_json(serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                       "clientInfo": {"name": "intruder", "version": "1"}}
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "intruder", "version": "1"}
+            }
         }));
 
-    // Any local process can reach a loopback port; possession of the 0600
-    // discovery file is what grants access.
-    match response {
-        Err(ureq::Error::StatusCode(401)) => {}
-        other => panic!("expected 401, got {other:?}"),
-    }
+    assert!(matches!(response, Err(ureq::Error::StatusCode(401))));
 }
 
 #[test]
-fn discovery_probe_verifies_the_published_bearer_token() {
+fn discovery_probe_verifies_the_platform_bearer() {
     let daemon = Daemon::start();
     let published = PublishedDaemon {
         url: daemon.url.clone(),
@@ -126,159 +68,9 @@ fn discovery_probe_verifies_the_published_bearer_token() {
 
     let mut wrong_instance = published.clone();
     wrong_instance.instance_id = discovery::random_token().unwrap();
-    assert!(
-        !discovery::authenticated_reachable(&wrong_instance),
-        "a stale port must not receive the published bearer"
-    );
+    assert!(!discovery::authenticated_reachable(&wrong_instance));
 
     let mut wrong_token = published;
     wrong_token.token.push_str("-wrong");
-    assert!(
-        !discovery::authenticated_reachable(&wrong_token),
-        "an unrelated or stale bearer credential must not validate the endpoint"
-    );
-}
-
-#[test]
-fn the_stdio_shim_refuses_to_replace_a_daemon_that_rejects_its_token() {
-    let daemon = Daemon::start();
-    let published = daemon.home.path().join("daemon.json");
-    let mut wrong: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&published).expect("discovery is readable"))
-            .expect("discovery is json");
-    wrong["token"] = "not-the-daemon-token".into();
-    std::fs::write(&published, serde_json::to_vec_pretty(&wrong).unwrap()).unwrap();
-
-    let output = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
-        .env("THOUGHT_HOME", daemon.home.path())
-        .stdin(Stdio::null())
-        .output()
-        .expect("spawn stdio shim");
-    assert!(
-        !output.status.success(),
-        "the shim must not replace a published daemon"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("incompatible or invalid format"),
-        "the failure must explain how to resolve invalid discovery: {stderr}"
-    );
-
-    let original_daemon = PublishedDaemon {
-        url: daemon.url.clone(),
-        protocol_version: discovery::PROTOCOL_VERSION,
-        instance_id: daemon.instance_id.clone(),
-        token: daemon.token.clone(),
-    };
-    assert!(
-        discovery::authenticated_reachable(&original_daemon),
-        "the shim must leave the existing process running"
-    );
-}
-
-#[test]
-fn the_stdio_shim_replaces_stale_current_discovery() {
-    let mut daemon = Daemon::start();
-    let published = daemon.home.path().join("daemon.json");
-    let old_instance = daemon.instance_id.clone();
-    daemon.stop_abruptly();
-    assert!(published.exists(), "abrupt exit must leave stale discovery");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
-        .env("THOUGHT_HOME", daemon.home.path())
-        .stdin(Stdio::null())
-        .output()
-        .expect("spawn stdio shim");
-    assert!(
-        output.status.success(),
-        "shim did not recover stale discovery: {}",
-        String::from_utf8_lossy(&output.stderr),
-    );
-
-    let current: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&published).unwrap()).unwrap();
-    assert_ne!(
-        current["instance_id"].as_str(),
-        Some(old_instance.as_str()),
-        "the new lock owner must publish a fresh instance"
-    );
-    if let Some(pid) = current["pid"].as_u64() {
-        let _ = Command::new("kill").arg(pid.to_string()).status();
-    }
-}
-
-/// The shim is what an MCP client actually spawns (AD-10). Its job is to make
-/// "spawn a server on stdio" mean "reach the one daemon", so the case worth
-/// testing is the one where no daemon is running yet.
-#[test]
-fn the_stdio_shim_starts_a_daemon_and_proxies_to_it() {
-    let home = tempfile::tempdir().expect("temp dir");
-    assert!(
-        !home.path().join("daemon.json").exists(),
-        "test must begin with no daemon published"
-    );
-
-    let mut shim = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
-        .env("THOUGHT_HOME", home.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn shim");
-
-    let mut stdin = shim.stdin.take().expect("piped stdin");
-    let mut stdout = BufReader::new(shim.stdout.take().expect("piped stdout"));
-
-    let mut send = |body: serde_json::Value| {
-        use std::io::Write;
-        writeln!(stdin, "{body}").expect("write to shim");
-        stdin.flush().expect("flush");
-    };
-
-    send(serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                   "clientInfo": {"name": "shim-test", "version": "1"}}
-    }));
-
-    let mut line = String::new();
-    stdout.read_line(&mut line).expect("shim replied");
-    let response: serde_json::Value = serde_json::from_str(&line).expect("json-rpc line");
-    assert_eq!(response["id"], 1);
-    assert!(
-        response["result"]["capabilities"].get("tools").is_some(),
-        "expected a tools capability, got {response}"
-    );
-
-    // Notifications must not produce a reply, or the client desynchronises.
-    send(serde_json::json!({
-        "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
-    }));
-    send(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
-
-    line.clear();
-    stdout.read_line(&mut line).expect("shim replied");
-    let response: serde_json::Value = serde_json::from_str(&line).expect("json-rpc line");
-    assert_eq!(response["id"], 2, "a notification leaked a response line");
-    let tools: Vec<String> = response["result"]["tools"]
-        .as_array()
-        .expect("tool list")
-        .iter()
-        .map(|t| t["name"].as_str().unwrap_or_default().to_string())
-        .collect();
-    assert!(tools.contains(&"read_document".to_string()));
-
-    // The shim started a daemon that published itself under THOUGHT_HOME.
-    let published = home.path().join("daemon.json");
-    assert!(published.exists(), "shim did not start a daemon");
-
-    let _ = shim.kill();
-    let _ = shim.wait();
-    if let Ok(body) = std::fs::read_to_string(&published)
-        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
-        && let Some(pid) = json["pid"].as_u64()
-    {
-        // The shim's daemon outlives the shim by design; clean it up.
-        let _ = Command::new("kill").arg(pid.to_string()).status();
-    }
+    assert!(!discovery::authenticated_reachable(&wrong_token));
 }

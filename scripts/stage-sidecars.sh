@@ -14,6 +14,25 @@ DEST="$ROOT/app/src-tauri/binaries"
 echo "staging sidecars for $TARGET"
 mkdir -p "$DEST"
 
+sign_macos_sidecar() {
+  local path="$1"
+  local name="$2"
+  local identifier
+  case "$name" in
+    thoughtd) identifier="ai.exalto.thought.thoughtd" ;;
+    thought-mcp-stdio) identifier="ai.exalto.thought.thought-mcp-stdio" ;;
+    *)
+      echo "unknown Proof of Thought sidecar: $name" >&2
+      return 1
+      ;;
+  esac
+
+  # Rust's linker signature uses a content-derived identifier. Replace it so
+  # unsigned local bundles still expose the same named helper identities that
+  # a Developer ID release gets from the embedded Info.plist.
+  codesign --force --sign - --identifier "$identifier" "$path"
+}
+
 if [[ "$TARGET" == universal-apple-darwin ]]; then
   # Tauri builds a universal app by compiling each architecture separately and
   # lipo-ing the result, and during each of those passes it looks for a sidecar
@@ -25,12 +44,14 @@ if [[ "$TARGET" == universal-apple-darwin ]]; then
       --bin thoughtd --bin thought-mcp-stdio
     for name in thoughtd thought-mcp-stdio; do
       cp "$ROOT/target/$arch/release/$name" "$DEST/$name-$arch"
+      sign_macos_sidecar "$DEST/$name-$arch" "$name"
     done
   done
   for name in thoughtd thought-mcp-stdio; do
     lipo -create -output "$DEST/$name-$TARGET" \
       "$DEST/$name-aarch64-apple-darwin" \
       "$DEST/$name-x86_64-apple-darwin"
+    sign_macos_sidecar "$DEST/$name-$TARGET" "$name"
   done
 else
   rustup target add "$TARGET" >/dev/null 2>&1 || true
@@ -38,6 +59,9 @@ else
     --bin thoughtd --bin thought-mcp-stdio
   for name in thoughtd thought-mcp-stdio; do
     cp "$ROOT/target/$TARGET/release/$name" "$DEST/$name-$TARGET"
+    if [[ "$TARGET" == *-apple-darwin ]]; then
+      sign_macos_sidecar "$DEST/$name-$TARGET" "$name"
+    fi
   done
 fi
 

@@ -115,4 +115,161 @@ CREATE INDEX IF NOT EXISTS lineage_spans_source ON lineage_spans(source_event_id
 CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
   doc_id UNINDEXED, title, body, tokenize='porter unicode61'
 );
+
+CREATE TABLE IF NOT EXISTS reviewer_connections (
+  id                      TEXT PRIMARY KEY CHECK (
+                            length(id) BETWEEN 1 AND 64
+                            AND id NOT GLOB '*[^a-z0-9-]*'
+                          ),
+  client                  TEXT NOT NULL CHECK (client IN (
+                            'chatgpt', 'codex', 'claude_desktop', 'claude_code'
+                          )),
+  provider                TEXT NOT NULL CHECK (provider IN ('openai', 'anthropic')),
+  display_label           TEXT NOT NULL CHECK (
+                            length(trim(display_label)) BETWEEN 1 AND 80
+                          ),
+  status                  TEXT NOT NULL CHECK (status IN (
+                            'configured', 'connected', 'disconnected', 'failed', 'revoked'
+                          )),
+  document_scope          TEXT NOT NULL CHECK (document_scope IN ('selected', 'all')),
+  can_read                INTEGER NOT NULL DEFAULT 1 CHECK (can_read = 1),
+  can_edit                INTEGER NOT NULL DEFAULT 1 CHECK (can_edit IN (0, 1)),
+  can_create              INTEGER NOT NULL DEFAULT 0 CHECK (can_create IN (0, 1)),
+  can_trash               INTEGER NOT NULL DEFAULT 0 CHECK (can_trash IN (0, 1)),
+  credential_hash         BLOB NOT NULL UNIQUE CHECK (length(credential_hash) = 32),
+  pending_credential_hash BLOB UNIQUE CHECK (
+                            pending_credential_hash IS NULL
+                            OR length(pending_credential_hash) = 32
+                          ),
+  credential_version      INTEGER NOT NULL DEFAULT 1 CHECK (credential_version > 0),
+  revision                INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  reported_model          TEXT CHECK (
+                            reported_model IS NULL OR length(reported_model) <= 256
+                          ),
+  failure_code            TEXT CHECK (failure_code IS NULL OR failure_code IN (
+                            'transport', 'protocol', 'credential_missing', 'credential_store'
+                          )),
+  created_at              INTEGER NOT NULL,
+  updated_at              INTEGER NOT NULL,
+  first_connected_at      INTEGER,
+  last_seen_at            INTEGER,
+  lease_expires_at        INTEGER,
+  credential_expires_at   INTEGER,
+  revoked_at              INTEGER,
+  CHECK (can_create = 0 OR document_scope = 'all'),
+  CHECK (
+    (status = 'revoked' AND revoked_at IS NOT NULL)
+    OR (status != 'revoked' AND revoked_at IS NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS reviewer_connections_status
+  ON reviewer_connections(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS reviewer_connections_lease
+  ON reviewer_connections(lease_expires_at)
+  WHERE status = 'connected';
+
+CREATE TABLE IF NOT EXISTS reviewer_connection_documents (
+  connection_id TEXT    NOT NULL REFERENCES reviewer_connections(id),
+  doc_id        TEXT    NOT NULL REFERENCES documents(id),
+  created_at    INTEGER NOT NULL,
+  PRIMARY KEY (connection_id, doc_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS reviewer_connection_documents_doc
+  ON reviewer_connection_documents(doc_id, connection_id);
+
+CREATE TABLE IF NOT EXISTS reviewer_connection_events (
+  seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+  connection_id   TEXT    NOT NULL REFERENCES reviewer_connections(id),
+  revision        INTEGER NOT NULL CHECK (revision > 0),
+  event_type      TEXT    NOT NULL CHECK (event_type IN (
+                    'created', 'renamed', 'permissions_changed', 'credential_rotated',
+                    'connected', 'disconnected', 'failed', 'revoked'
+                  )),
+  display_label   TEXT    NOT NULL,
+  status          TEXT    NOT NULL CHECK (status IN (
+                    'configured', 'connected', 'disconnected', 'failed', 'revoked'
+                  )),
+  document_scope  TEXT    NOT NULL CHECK (document_scope IN ('selected', 'all')),
+  can_read        INTEGER NOT NULL CHECK (can_read = 1),
+  can_edit        INTEGER NOT NULL CHECK (can_edit IN (0, 1)),
+  can_create      INTEGER NOT NULL CHECK (can_create IN (0, 1)),
+  can_trash       INTEGER NOT NULL CHECK (can_trash IN (0, 1)),
+  document_ids_json TEXT NOT NULL CHECK (
+                      json_valid(document_ids_json)
+                      AND json_type(document_ids_json) = 'array'
+                      AND (
+                        document_scope != 'all'
+                        OR json_array_length(document_ids_json) = 0
+                      )
+                    ),
+  failure_code    TEXT,
+  created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reviewer_connection_events_connection
+  ON reviewer_connection_events(connection_id, seq);
+
+CREATE TRIGGER IF NOT EXISTS reviewer_connections_reject_delete
+BEFORE DELETE ON reviewer_connections
+BEGIN
+  SELECT RAISE(ABORT, 'reviewer connections are never deleted');
+END;
+
+CREATE TRIGGER IF NOT EXISTS reviewer_connections_reject_identity_update
+BEFORE UPDATE OF id, client, provider, created_at ON reviewer_connections
+BEGIN
+  SELECT RAISE(ABORT, 'reviewer connection identity is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS reviewer_connections_reject_revoked_update
+BEFORE UPDATE ON reviewer_connections
+WHEN OLD.revoked_at IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'revoked reviewer connections are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS reviewer_connections_reject_credential_collision_insert
+BEFORE INSERT ON reviewer_connections
+WHEN EXISTS (
+  SELECT 1 FROM reviewer_connections
+  WHERE pending_credential_hash = NEW.credential_hash
+)
+BEGIN
+  SELECT RAISE(ABORT, 'reviewer credential hash already exists');
+END;
+
+CREATE TRIGGER IF NOT EXISTS reviewer_connections_reject_credential_collision_update
+BEFORE UPDATE OF credential_hash, pending_credential_hash ON reviewer_connections
+WHEN (
+  NEW.pending_credential_hash IS NOT NULL
+  AND NEW.pending_credential_hash = NEW.credential_hash
+) OR EXISTS (
+  SELECT 1 FROM reviewer_connections AS other
+  WHERE other.id != NEW.id
+    AND (
+      other.credential_hash = NEW.credential_hash
+      OR other.pending_credential_hash = NEW.credential_hash
+      OR (
+        NEW.pending_credential_hash IS NOT NULL
+        AND (
+          other.credential_hash = NEW.pending_credential_hash
+          OR other.pending_credential_hash = NEW.pending_credential_hash
+        )
+      )
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'reviewer credential hash already exists');
+END;
+
+CREATE TRIGGER IF NOT EXISTS reviewer_connection_events_reject_update
+BEFORE UPDATE ON reviewer_connection_events
+BEGIN
+  SELECT RAISE(ABORT, 'reviewer connection events are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS reviewer_connection_events_reject_delete
+BEFORE DELETE ON reviewer_connection_events
+BEGIN
+  SELECT RAISE(ABORT, 'reviewer connection events are append-only');
+END;
 "#;

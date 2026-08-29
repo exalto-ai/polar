@@ -1,4 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const reviewers = vi.hoisted(() => ({
+  setSidebarOpen: vi.fn(),
+  setStdioExecutable: vi.fn(),
+  setBridge: vi.fn(),
+  setDocumentContext: vi.fn(),
+  destroy: vi.fn(),
+}));
+
+vi.mock("./reviewer-connections", () => ({
+  installReviewerConnections: () => reviewers,
+}));
+
 import { installAiSupport } from "./ai-support";
 
 beforeEach(() => {
@@ -6,10 +19,9 @@ beforeEach(() => {
     <button id="ai-support-toggle" aria-expanded="false"></button>
     <aside id="ai-support-sidebar" hidden>
       <button id="ai-sidebar-close"></button>
-      <pre id="stdio-command"></pre>
-      <button id="copy-command"></button>
     </aside>
   `;
+  vi.clearAllMocks();
 });
 
 afterEach(() => {
@@ -30,6 +42,7 @@ describe("AI support sidebar", () => {
 
     expect(sidebar.hidden).toBe(false);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(reviewers.setSidebarOpen).toHaveBeenLastCalledWith(true);
     expect(document.activeElement).toBe(
       document.querySelector("#ai-sidebar-close"),
     );
@@ -41,20 +54,19 @@ describe("AI support sidebar", () => {
     controller.destroy();
   });
 
-  it("copies the current connection command", async () => {
-    const copyText = vi.fn().mockResolvedValue(undefined);
-    const controller = installAiSupport(document, { copyText });
-    const button = document.querySelector<HTMLButtonElement>("#copy-command")!;
+  it("delegates reviewer state without owning it", () => {
+    const controller = installAiSupport(document);
+    const bridge = {} as never;
+    const context = { id: "doc-1", title: "Draft" };
 
     controller.setConnectionCommand("thought-mcp-stdio");
-    expect(document.querySelector("#stdio-command")?.textContent).toBe(
-      "thought-mcp-stdio",
-    );
-    expect(button.disabled).toBe(false);
-    button.click();
-    await Promise.resolve();
+    controller.setReviewerBridge(bridge);
+    controller.setCurrentDocument(context);
 
-    expect(copyText).toHaveBeenCalledWith("thought-mcp-stdio");
+    expect(reviewers.setStdioExecutable).toHaveBeenCalledWith("thought-mcp-stdio");
+    expect(reviewers.setBridge).toHaveBeenCalledWith(bridge);
+    expect(reviewers.setDocumentContext).toHaveBeenCalledWith(context);
     controller.destroy();
+    expect(reviewers.destroy).toHaveBeenCalledOnce();
   });
 });

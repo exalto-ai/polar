@@ -4,6 +4,7 @@
 //! tested with no window, no server, and no client — which is the whole claim
 //! of AD-2.
 
+mod connections;
 mod lineage;
 mod mutation;
 mod workspace;
@@ -12,8 +13,18 @@ mod workspace;
 /// be told who it is rather than hardcoding a string that `sync.rs` owns.
 pub const EDITOR_ACTOR_ID: &str = "human:editor";
 
+pub use connections::{
+    CreateReviewerConnection, ReviewerClient, ReviewerConnection, ReviewerConnectionModelError,
+    ReviewerConnectionStatus, ReviewerDocumentScope, ReviewerPermissions, ReviewerProvider,
+    UpdateReviewerConnection,
+};
 pub use lineage::ProseMirrorRange;
 pub use mutation::MutationContext;
+pub use thought_provenance::{
+    Assurance, CurrentSourceSummary, GroupedSourceContribution, Ingress, LiveLineageSpan,
+    SourceContribution, SourceDescriptor, SourceGroup, SourceId,
+};
+
 pub use workspace::{
     ActorRef, ActorSummary, BlockAttribution, BlockSpan, DocumentLineage, DocumentSummary,
     DocumentView, EditOutcome, SearchHit, TextEdit, Workspace, WorkspaceError,
