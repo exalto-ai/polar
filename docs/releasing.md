@@ -21,6 +21,14 @@ environment to protected `v*` tags and manual runs from `main`, and restrict cre
 `v*` tags to release maintainers. The approver must compare the displayed tag and commit with the
 intended release.
 
+The protected macOS build, signing, and verification job has read-only repository permission, and
+its checkouts never persist a GitHub token. It hands one verified DMG and checksum file to a
+separate minimal publish job through an immutable run artifact. Only that final job receives
+`contents: write`, and it rechecks the tag and its containment in `main` before changing a draft
+release. Every reusable action in the release workflow is pinned to a reviewed commit rather than
+a mutable version tag. Updating one of those actions requires reviewing and recording its new
+commit deliberately.
+
 The downloaded `ProofOfThought_<version>_<architecture>.dmg` name is a human-facing product
 artifact. Internal release scratch files and paths use the `thought` machine namespace.
 
