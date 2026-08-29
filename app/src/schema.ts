@@ -26,6 +26,10 @@ export const extensions = [
     // Likewise absent from CommonMark and GFM.
     underline: false,
     heading: { levels: [1, 2, 3] },
+    // A click selects the marked text so our contextual link card can offer
+    // explicit open, copy, edit, and remove actions. Opening immediately makes
+    // a link impossible to edit with the mouse.
+    link: { openOnClick: false, enableClickSelection: true },
   }),
   TitleVariant,
   FontSize,

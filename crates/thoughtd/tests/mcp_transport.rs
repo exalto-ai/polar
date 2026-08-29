@@ -74,6 +74,14 @@ fn an_agent_drives_the_daemon_over_mcp() {
         serde_json::json!({ "query": "Reached", "limit": 5 }),
     );
     assert_eq!(hits["hits"][0]["doc_id"], doc_id.as_str());
+
+    let imported_markdown = "<!--thought:title-->\n# Imported\n\nFrom **Markdown**.";
+    let mut import = caller;
+    import["title"] = "Imported.md".into();
+    import["initial_markdown"] = imported_markdown.into();
+    let imported = daemon.call("create_document", import);
+    let imported_view = daemon.read_document(imported["doc_id"].as_str().unwrap());
+    assert_eq!(imported_view["markdown"], imported_markdown);
 }
 
 #[test]

@@ -56,7 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = StreamableHttpService::new(
         move || Ok(tools::Thought::new(service_workspace.clone())),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        StreamableHttpServerConfig::default()
+            .with_max_request_body_bytes(thoughtd::MAX_MCP_REQUEST_BODY_BYTES),
     );
 
     let expected = token.clone();

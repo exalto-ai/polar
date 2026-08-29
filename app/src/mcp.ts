@@ -109,6 +109,10 @@ export class Mcp {
     return (await this.call("document_actors", { doc_id: docId })).actors as Actor[];
   }
 
+  async readDocument(docId: string): Promise<DocumentView> {
+    return await this.call("read_document", { doc_id: docId });
+  }
+
   async blockProvenance(docId: string) {
     return (await this.call("block_provenance", { doc_id: docId }))
       .blocks as BlockAttribution[];
@@ -118,8 +122,12 @@ export class Mcp {
     return await this.call("set_document_deleted", { doc_id: docId, deleted, ...WINDOW });
   }
 
-  async createDocument(title: string) {
-    return await this.call("create_document", { title, ...WINDOW });
+  async createDocument(title: string, initialMarkdown?: string): Promise<DocumentView> {
+    return await this.call("create_document", {
+      title,
+      ...(initialMarkdown === undefined ? {} : { initial_markdown: initialMarkdown }),
+      ...WINDOW,
+    });
   }
 }
 
@@ -150,3 +158,15 @@ export type BlockAttribution = {
 
 export type DocumentSummary = { doc_id: string; title: string; updated_at: number };
 export type SearchHit = { doc_id: string; title: string; snippet: string };
+export type DocumentView = {
+  doc_id: string;
+  title: string;
+  markdown: string;
+  version: string;
+  blocks: Array<{
+    block_id: string;
+    kind: string;
+    line_start: number;
+    line_end: number;
+  }>;
+};
