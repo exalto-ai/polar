@@ -560,7 +560,9 @@ document.addEventListener("keydown", (event) => {
     void invoke("new_window");
     return;
   }
-  if (accel(event) && event.key.toLowerCase() === "k") {
+  // Shift+accelerator+K belongs to the link editor. Keeping this exact avoids
+  // the document switcher swallowing the more specific formatting shortcut.
+  if (accel(event) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "k") {
     event.preventDefault();
     els.scrim.hidden ? openSwitcher() : closeSwitcher();
     return;

@@ -1,6 +1,8 @@
 //! ProseMirror tree -> CommonMark + GFM.
 
-use thought_schema::{Mark, Node};
+use thought_schema::{Mark, Node, normalize_font_size};
+
+use crate::TITLE_MARKER;
 
 pub fn to_markdown(doc: &Node) -> String {
     to_markdown_with_spans(doc).0
@@ -86,6 +88,10 @@ fn block(node: &Node, out: &mut String) {
         }
         "heading" => {
             let level = node.attr_i64("level").unwrap_or(1).clamp(1, 6) as usize;
+            if level == 1 && node.attr_str("variant") == Some("title") {
+                out.push_str(TITLE_MARKER);
+                out.push('\n');
+            }
             out.push_str(&"#".repeat(level));
             out.push(' ');
             let mut text = inlines(&node.content);
@@ -250,6 +256,15 @@ fn wrap(s: &str, mark: &Mark) -> String {
         "bold" => format!("**{s}**"),
         "italic" => format!("*{s}*"),
         "strike" => format!("~~{s}~~"),
+        "fontSize" => mark
+            .attrs
+            .get("size")
+            .and_then(|value| value.as_str())
+            .and_then(normalize_font_size)
+            .map_or_else(
+                || s.to_string(),
+                |size| format!("<span style=\"font-size: {size}\">{s}</span>"),
+            ),
         "code" => {
             let longest = s.split(|c| c != '`').map(str::len).max().unwrap_or(0);
             let fence = "`".repeat(longest + 1);
