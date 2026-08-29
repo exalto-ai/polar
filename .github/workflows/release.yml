@@ -24,14 +24,16 @@ jobs:
     outputs:
       commit: ${{ steps.verify.outputs.commit }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Verify trusted release tag
         id: verify
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
@@ -49,8 +51,10 @@ jobs:
             echo "::error::Checked-out commit $head_commit does not match $TAG at $tag_commit."
             exit 1
           fi
-          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
-          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+          compare_status=$(gh api \
+            "repos/$GITHUB_REPOSITORY/compare/${tag_commit}...main" \
+            --jq '.status')
+          if [ "$compare_status" != "ahead" ] && [ "$compare_status" != "identical" ]; then
             echo "::error::Release tag $TAG is not contained in origin/main."
             exit 1
           fi
@@ -61,7 +65,9 @@ jobs:
     runs-on: macos-latest
     environment: release
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      artifact-name: ${{ steps.release-artifact.outputs.name }}
     env:
       TARGET: universal-apple-darwin
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -70,19 +76,29 @@ jobs:
       SIGN: ${{ secrets.APPLE_CERTIFICATE != '' }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ needs.release-ref.outputs.commit }}
 
       - name: Recheck approved release checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag_commit="$(git rev-parse "${TAG}^{commit}")"
           head_commit="$(git rev-parse HEAD)"
           approved_commit="${{ needs.release-ref.outputs.commit }}"
+          tag_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/tags/$TAG" --jq '.sha')
+          compare_status=$(gh api \
+            "repos/$GITHUB_REPOSITORY/compare/${approved_commit}...main" \
+            --jq '.status')
           if [ "$head_commit" != "$tag_commit" ] || [ "$head_commit" != "$approved_commit" ]; then
             echo "::error::The approved release commit changed before the protected job."
+            exit 1
+          fi
+          if [ "$compare_status" != "ahead" ] && [ "$compare_status" != "identical" ]; then
+            echo "::error::The approved release commit is no longer contained in main."
             exit 1
           fi
 
@@ -131,7 +147,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24"
           cache: npm
@@ -143,7 +159,7 @@ jobs:
           rustup default stable
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - run: npm ci --prefix app
 
@@ -154,7 +170,7 @@ jobs:
 
       - name: Import Developer ID certificate
         if: env.SIGN == 'true'
-        uses: apple-actions/import-codesign-certs@v5
+        uses: apple-actions/import-codesign-certs@95e84a1a18f2bdbc5c6ab9b7f4429372e4b13a8b # v5
         with:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -339,13 +355,53 @@ jobs:
           (cd release && shasum -a 256 *.dmg > SHA256SUMS)
           ls -la release
 
+      - name: Name verified release candidate
+        id: release-artifact
+        run: echo "name=proof-of-thought-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified release candidate
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ${{ steps.release-artifact.outputs.name }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  publish:
+    needs: [release-ref, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Download verified release candidate
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: ${{ needs.macos.outputs.artifact-name }}
+          path: release
+
       - name: Create draft release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           APPROVED_COMMIT: ${{ needs.release-ref.outputs.commit }}
         run: |
           set -euo pipefail
-          if [ "$SIGN" = "true" ]; then
+          dmg_count=$(find release -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')
+          if [ "$dmg_count" != "1" ] || [ ! -f release/SHA256SUMS ]; then
+            echo "::error::The verified release artifact must contain one DMG and SHA256SUMS."
+            exit 1
+          fi
+          (cd release && shasum -a 256 -c SHA256SUMS)
+          dmg=$(find release -maxdepth 1 -type f -name '*.dmg' -print -quit)
+          case "$dmg" in
+            *_unsigned.dmg) signed=false ;;
+            *) signed=true ;;
+          esac
+
+          if [ "$signed" = "true" ]; then
             notes=$(cat <<'NOTES'
           A local-first writing app where AI reviewers suggest changes for a person to accept.
 
@@ -362,12 +418,20 @@ jobs:
           NOTES
             )
           fi
-          git fetch --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
-          remote_tag_commit="$(git rev-parse "${TAG}^{commit}")"
+
+          remote_tag_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/tags/$TAG" --jq '.sha')
           if [ "$remote_tag_commit" != "$APPROVED_COMMIT" ]; then
             echo "::error::Release tag $TAG moved after approval."
             exit 1
           fi
+          compare_status=$(gh api \
+            "repos/$GITHUB_REPOSITORY/compare/${APPROVED_COMMIT}...main" \
+            --jq '.status')
+          if [ "$compare_status" != "ahead" ] && [ "$compare_status" != "identical" ]; then
+            echo "::error::The approved release commit is no longer contained in main."
+            exit 1
+          fi
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             is_draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
             if [ "$is_draft" != "true" ]; then
