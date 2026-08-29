@@ -176,6 +176,36 @@ describe("Pro provider setup", () => {
     controller.destroy();
   });
 
+  it("uses a labelled nonmodal removal dialog with safe focus and Escape restoration", async () => {
+    const bridge: ProProviderBridge = {
+      list: vi.fn().mockResolvedValue([configuration("openai", true)]),
+      configure: vi.fn(),
+      revalidate: vi.fn(),
+      remove: vi.fn(),
+    };
+    const controller = installProProvider(document, { bridge });
+    controller.setActive(true);
+    await vi.waitFor(() => expect(providerButton("openai", "remove").hidden).toBe(false));
+
+    const trigger = providerButton("openai", "remove");
+    trigger.focus();
+    trigger.click();
+    const dialog = document.querySelector<HTMLElement>(
+      '[data-pro-provider-card="openai"] [data-pro-provider-remove-confirmation]',
+    )!;
+    expect(dialog.getAttribute("role")).toBe("dialog");
+    expect(dialog.hasAttribute("aria-modal")).toBe(false);
+    expect(dialog.getAttribute("aria-labelledby")).toBe("pro-remove-openai-title");
+    expect(dialog.getAttribute("aria-describedby")).toBe("pro-remove-openai-description");
+    await vi.waitFor(() => expect(document.activeElement).toBe(providerButton("openai", "cancel-remove")));
+
+    dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(dialog.hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger);
+    expect(bridge.remove).not.toHaveBeenCalled();
+    controller.destroy();
+  });
+
   it("opens only the provider’s official key page", async () => {
     const openExternal = vi.fn().mockResolvedValue(undefined);
     const controller = installProProvider(document, {
