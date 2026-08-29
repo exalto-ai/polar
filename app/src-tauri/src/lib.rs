@@ -9,10 +9,17 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{
     io::{Read, Write},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
 };
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 use thoughtd::discovery::{self, Daemon};
+
+#[cfg(target_os = "macos")]
+mod macos_termination;
 
 #[derive(serde::Serialize)]
 struct Connection {
@@ -55,6 +62,215 @@ struct ImportedMarkdown {
 #[derive(serde::Serialize)]
 struct ExportedMarkdown {
     file_name: String,
+}
+
+#[derive(Default)]
+struct QuitAttempt {
+    requested: bool,
+    native_reply_pending: bool,
+    native_reply_scheduled: bool,
+    active_window: Option<String>,
+}
+
+#[derive(Default)]
+struct QuitState(Mutex<QuitAttempt>);
+
+/// Heuristic pause between closing one document window and presenting the
+/// next one's guard. Tauri does not expose the originating guard-dismissal
+/// event or mouse-button state here, so this lets the triggering mouse-up or
+/// Return finish before another default button exists to receive it.
+const QUIT_INPUT_SETTLE_MS: u64 = 150;
+
+impl QuitState {
+    fn attempt(&self) -> MutexGuard<'_, QuitAttempt> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Begin one quit attempt. Repeated menu, Dock, or system requests join
+    /// the in-flight attempt instead of opening another set of close sheets.
+    fn begin(&self, native: bool) {
+        let mut attempt = self.attempt();
+        if native {
+            attempt.native_reply_pending = true;
+        }
+        if !attempt.requested {
+            attempt.requested = true;
+            attempt.active_window = None;
+        }
+    }
+
+    fn is_requested(&self) -> bool {
+        self.attempt().requested
+    }
+
+    fn native_reply_pending(&self) -> bool {
+        self.attempt().native_reply_pending
+    }
+
+    fn activate(&self, label: &str) -> bool {
+        let mut attempt = self.attempt();
+        if !attempt.requested || attempt.active_window.is_some() {
+            return false;
+        }
+        attempt.active_window = Some(label.to_string());
+        true
+    }
+
+    fn window_destroyed(&self, label: &str) -> bool {
+        let mut attempt = self.attempt();
+        if attempt.active_window.as_deref() == Some(label) {
+            attempt.active_window = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cancel the current attempt and report whether AppKit is waiting for a
+    /// reply to `applicationShouldTerminate:`.
+    fn cancel(&self) -> bool {
+        let mut attempt = self.attempt();
+        attempt.requested = false;
+        attempt.active_window = None;
+        if attempt.native_reply_pending && !attempt.native_reply_scheduled {
+            attempt.native_reply_scheduled = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn finish(&self) -> bool {
+        let mut attempt = self.attempt();
+        attempt.requested = false;
+        attempt.active_window = None;
+        if attempt.native_reply_pending && !attempt.native_reply_scheduled {
+            attempt.native_reply_scheduled = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn native_reply_sent(&self) {
+        let mut attempt = self.attempt();
+        attempt.native_reply_pending = false;
+        attempt.native_reply_scheduled = false;
+        if !attempt.requested {
+            *attempt = QuitAttempt::default();
+        }
+    }
+
+    fn abort(&self) {
+        *self.attempt() = QuitAttempt::default();
+    }
+}
+
+#[tauri::command]
+fn cancel_quit(app: tauri::AppHandle, state: tauri::State<'_, QuitState>) {
+    if state.cancel() {
+        #[cfg(target_os = "macos")]
+        macos_termination::reply(&app, false);
+    }
+}
+
+/// Start or join a quit attempt. Returns false when there are no windows or
+/// application state is unavailable, in which case AppKit may terminate now.
+fn request_guarded_quit(handle: &tauri::AppHandle, native: bool) -> bool {
+    let windows = handle.webview_windows();
+    if windows.is_empty() {
+        return false;
+    }
+    let Some(state) = handle.try_state::<QuitState>() else {
+        return false;
+    };
+
+    state.begin(native);
+    advance_guarded_quit(handle);
+    true
+}
+
+/// Close one window at a time so a multi-document quit never presents several
+/// independent export prompts or lets one cancellation race another window.
+fn advance_guarded_quit(handle: &tauri::AppHandle) {
+    let Some(state) = handle.try_state::<QuitState>() else {
+        return;
+    };
+    if !state.is_requested() {
+        return;
+    }
+
+    let mut windows = handle
+        .webview_windows()
+        .into_iter()
+        .map(|(label, window)| {
+            let focused = window.is_focused().unwrap_or(false);
+            (focused, label, window)
+        })
+        .collect::<Vec<_>>();
+    if windows.is_empty() {
+        let native_reply_pending = state.finish();
+        #[cfg(target_os = "macos")]
+        if native_reply_pending {
+            macos_termination::reply(handle, true);
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = native_reply_pending;
+        handle.exit(0);
+        return;
+    }
+
+    windows.sort_by(
+        |(left_focus, left_label, _), (right_focus, right_label, _)| {
+            right_focus
+                .cmp(left_focus)
+                .then_with(|| left_label.cmp(right_label))
+        },
+    );
+    let (_, label, window) = &windows[0];
+    if !state.activate(label) {
+        return;
+    }
+    let _ = window.set_focus();
+    if let Err(error) = window.close() {
+        eprintln!("could not request window close during quit: {error}");
+        if state.cancel() {
+            #[cfg(target_os = "macos")]
+            macos_termination::reply(handle, false);
+        }
+    }
+}
+
+/// Let the input event that dismissed one close sheet finish before presenting
+/// the next document's sheet. Without this turn boundary, a mouse-up or Return
+/// can activate the default button in the newly focused window.
+fn schedule_guarded_quit_advance(handle: &tauri::AppHandle) {
+    let queued_handle = handle.clone();
+    let spawned = std::thread::Builder::new()
+        .name("thought-quit-advance".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(QUIT_INPUT_SETTLE_MS));
+            let main_handle = queued_handle.clone();
+            if let Err(error) =
+                queued_handle.run_on_main_thread(move || advance_guarded_quit(&main_handle))
+            {
+                eprintln!("could not advance guarded quit on the main thread: {error}");
+                if queued_handle
+                    .try_state::<QuitState>()
+                    .is_some_and(|state| state.cancel())
+                {
+                    #[cfg(target_os = "macos")]
+                    macos_termination::reply(&queued_handle, false);
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        eprintln!("could not schedule the next guarded window close: {error}");
+        advance_guarded_quit(handle);
+    }
 }
 
 fn file_name(path: &std::path::Path) -> String {
@@ -416,24 +632,6 @@ fn ensure_daemon() -> Result<Daemon, String> {
     Err("thoughtd did not become reachable".into())
 }
 
-fn report_startup_error(error: &str) {
-    eprintln!("Proof of Thought could not start: {error}");
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "linux",
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    ))]
-    rfd::MessageDialog::new()
-        .set_title("Proof of Thought could not start")
-        .set_description(error)
-        .set_level(rfd::MessageLevel::Error)
-        .show();
-}
-
 /// Find `thoughtd` or `thought-mcp-stdio`.
 ///
 /// In a bundle they sit beside the app executable as Tauri sidecars. In
@@ -462,6 +660,24 @@ fn find_binary(name: &str) -> Option<std::path::PathBuf> {
         .map(|p| p.canonicalize().unwrap_or(p))
 }
 
+fn report_startup_error(error: &str) {
+    eprintln!("Proof of Thought could not start: {error}");
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    rfd::MessageDialog::new()
+        .set_title("Proof of Thought could not start")
+        .set_description(error)
+        .set_level(rfd::MessageLevel::Error)
+        .show();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let daemon = match ensure_daemon() {
@@ -471,24 +687,78 @@ pub fn run() {
             return;
         }
     };
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            #[cfg(target_os = "macos")]
+            macos_termination::install(app.handle().clone())?;
+            Ok(())
+        })
         .manage(daemon)
+        .manage(QuitState::default())
         .invoke_handler(tauri::generate_handler![
             connection,
             new_window,
             import_markdown,
-            export_markdown
+            export_markdown,
+            cancel_quit
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|handle, event| match event {
+        tauri::RunEvent::ExitRequested {
+            code: None, api, ..
+        } => {
+            if handle
+                .try_state::<QuitState>()
+                .is_some_and(|state| state.native_reply_pending())
+            {
+                // The last window may disappear before the queued AppKit reply
+                // runs. Keep Tauri's event loop alive until that reply resolves
+                // the outstanding NSTerminateLater decision.
+                api.prevent_exit();
+                if handle.webview_windows().is_empty()
+                    && let Some(state) = handle.try_state::<QuitState>()
+                    && state.finish()
+                {
+                    #[cfg(target_os = "macos")]
+                    macos_termination::reply(handle, true);
+                }
+                return;
+            }
+            let windows = handle.webview_windows();
+            if windows.is_empty() {
+                return;
+            }
+
+            // Tauri-managed exit requests do not emit per-window close
+            // requests by default. Turn them into those requests so every
+            // document gets the same export prompt and durable autosave
+            // barrier as Command-W.
+            api.prevent_exit();
+            request_guarded_quit(handle, false);
+        }
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Destroyed,
+            ..
+        } if handle
+            .try_state::<QuitState>()
+            .is_some_and(|state| state.window_destroyed(&label)) =>
+        {
+            schedule_guarded_quit_advance(handle);
+        }
+        _ => {}
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        atomic_write, cascade_axis, document_window_path, safe_suggested_name, serialize_document,
+        QuitState, atomic_write, cascade_axis, document_window_path, safe_suggested_name,
+        serialize_document,
     };
     use thought_schema::{Mark, Node};
 
@@ -547,6 +817,36 @@ mod tests {
         assert_eq!(cascade_axis(0, 1400, 0, 1200, 28), 0);
         assert_eq!(cascade_axis(1100, 500, 0, 1200, 28), 672);
         assert_eq!(cascade_axis(-300, 500, 0, 1200, 28), 28);
+    }
+
+    #[test]
+    fn quit_attempts_serialize_windows_and_preserve_native_reply_state() {
+        let state = QuitState::default();
+        state.begin(false);
+        assert!(state.activate("window-a"));
+        assert!(!state.activate("window-b"));
+
+        // A Dock or system request can join an application-menu attempt. The
+        // currently active close sheet stays in place and AppKit gets a reply
+        // only after that same attempt finishes or is cancelled.
+        state.begin(true);
+        assert!(!state.window_destroyed("window-b"));
+        assert!(!state.activate("window-b"));
+        assert!(state.window_destroyed("window-a"));
+        assert!(state.activate("window-b"));
+        assert!(state.finish());
+        assert!(!state.finish());
+        assert!(!state.is_requested());
+        assert!(state.native_reply_pending());
+        state.native_reply_sent();
+        assert!(!state.native_reply_pending());
+
+        state.begin(true);
+        assert!(state.cancel());
+        assert!(!state.cancel());
+        assert!(state.native_reply_pending());
+        state.native_reply_sent();
+        assert!(!state.cancel());
     }
 
     #[test]

@@ -802,6 +802,14 @@ theme must revisit the editor and app-icon relationship rather than tinting eith
 Changing the ground or mark also requires keeping the style tokens, canonical `assets/orbit/`
 sources, generated desktop and web assets, and `DESIGN.md` in sync.
 
+On macOS, Command-Q, Dock quit, logout, and Apple-event termination enter the same close
+guard as Command-W. The native bridge asks AppKit to wait, then closes one document window
+at a time so only one export prompt is active and any cancellation stops the whole attempt.
+
+**Cost:** the bridge subclasses Tao 0.35's application delegate at runtime and must be
+re-audited whenever Tauri or Tao changes its termination handling. Other platforms continue
+to use Tauri's ordinary exit request path.
+
 ## M2.6 — Agents made visible
 
 Agent carets ride the awareness protocol, labelled with the actor's display name and colored
