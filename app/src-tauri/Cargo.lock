@@ -4331,6 +4331,9 @@ dependencies = [
 name = "thought"
 version = "0.1.0"
 dependencies = [
+ "dispatch2",
+ "objc2",
+ "objc2-app-kit",
  "rfd",
  "serde",
  "serde_json",

@@ -919,6 +919,7 @@ async function installNativeCloseGuard(): Promise<void> {
       notify(`Could not close window: ${reason(error)}`, "error");
     } finally {
       if (!destroyed) {
+        await invoke("cancel_quit").catch(() => undefined);
         setCloseInteractionBlocked(false);
         if (target && open === target) {
           target.editor.setEditable(wasEditable);
