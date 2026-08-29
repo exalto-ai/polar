@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import markup from "../index.html?raw";
-import { installProChat, type ProChatController } from "./pro-chat";
+import {
+  installProChat,
+  type ProChatController,
+  type ProChatDocumentContext,
+} from "./pro-chat";
 import type {
   ProChatBridge,
   ProChatCapabilities,
@@ -45,6 +49,14 @@ function history(
   revision = 0,
 ): ProChatHistory {
   return { document_id: documentId, provider, revision, turns };
+}
+
+function documentContext(
+  id = "doc-1",
+  title = "Draft",
+  snapshot: () => unknown = () => ({ type: "doc", content: [] }),
+): ProChatDocumentContext {
+  return { id, title, snapshot };
 }
 
 function capabilities() {
@@ -132,6 +144,24 @@ afterEach(() => {
 });
 
 describe("Pro chat", () => {
+  it("keeps Send unavailable until the host publishes a hydrated document", async () => {
+    const chatBridge = bridge();
+    controller = installProChat(document, { bridge: chatBridge });
+    controller.setActive(true);
+
+    await vi.waitFor(() => expect(chatBridge.capabilities).toHaveBeenCalledTimes(1));
+    expect(document.querySelector<HTMLElement>("#pro-chat-composer")!.hidden).toBe(true);
+    expect(document.querySelector("#pro-chat-unavailable span")?.textContent).toContain(
+      "after the document finishes opening",
+    );
+    expect(chatBridge.history).not.toHaveBeenCalled();
+    expect(chatBridge.start).not.toHaveBeenCalled();
+
+    controller.setDocument(documentContext());
+    await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalledWith("doc-1", "openai"));
+    expect(document.querySelector<HTMLElement>("#pro-chat-composer")!.hidden).toBe(false);
+  });
+
   it("requires separate visible consent and streams safe text", async () => {
     let onEvent: ((event: ProChatEvent) => void) | null = null;
     const activity = vi.fn();
@@ -145,7 +175,7 @@ describe("Pro chat", () => {
       bridge: chatBridge,
       onActivityChange: activity,
     });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalledWith("doc-1", "openai"));
 
@@ -155,23 +185,31 @@ describe("Pro chat", () => {
     message.dispatchEvent(new Event("input", { bubbles: true }));
     expect(send.disabled).toBe(true);
     expect(document.querySelector("#pro-chat-sharing")?.textContent).toContain(
-      "To OpenAI: this message only",
+      "To OpenAI: this document’s title and contents",
     );
     enableComposer();
     expect(send.disabled).toBe(false);
+    expect(document.querySelector<HTMLElement>(".pro-chat-consent")!.hidden).toBe(true);
+    expect(document.querySelector<HTMLElement>("#pro-chat-sharing")!.hidden).toBe(true);
+    expect(document.querySelector<HTMLElement>("#pro-chat-billing-reminder")!.hidden).toBe(false);
+    expect(document.querySelector("#pro-chat-billing-reminder")?.textContent).toContain(
+      "Sends this document’s title and contents with each request",
+    );
     send.click();
 
     await vi.waitFor(() => expect(chatBridge.start).toHaveBeenCalledTimes(1));
     expect(chatBridge.start).toHaveBeenCalledWith(
       {
         document_id: "doc-1",
+        document_title: "Draft",
+        document: { type: "doc", content: [] },
         provider: "openai",
         expected_revision: 0,
         model: "gpt-current",
         thinking: "default",
         message: "Visible message",
         retry_turn_id: null,
-        disclosure_version: 1,
+        disclosure_version: 2,
       },
       expect.any(Function),
     );
@@ -216,7 +254,48 @@ describe("Pro chat", () => {
     expect(activity).toHaveBeenLastCalledWith(false);
   });
 
+  it("copies returned text and hands focus back to the editor", async () => {
+    const copyText = vi.fn().mockResolvedValue(undefined);
+    const onResponseCopied = vi.fn();
+    const onNotice = vi.fn();
+    const chatBridge = bridge({
+      history: vi.fn().mockResolvedValue(history("doc-1", "openai", [
+        turn("turn-1", {
+          assistant_text: "First line\n\nSecond line",
+          status: "completed",
+        }),
+      ], 1)),
+    });
+    controller = installProChat(document, {
+      bridge: chatBridge,
+      copyText,
+      onResponseCopied,
+      onNotice,
+    });
+    controller.setDocument(documentContext());
+    controller.setActive(true);
+
+    await vi.waitFor(() => expect(
+      document.querySelector<HTMLButtonElement>(".pro-chat-reply-actions button"),
+    ).not.toBeNull());
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>(
+      ".pro-chat-reply-actions button",
+    )];
+    const byText = (label: string) => buttons.find(({ textContent }) => textContent === label)!;
+    const copy = byText("Copy");
+    copy.click();
+    await vi.waitFor(() => expect(copyText).toHaveBeenCalledWith("First line\n\nSecond line"));
+    expect(copy.textContent).toBe("Copied");
+    expect(onNotice).toHaveBeenCalledWith(
+      "Copied. Press Command-V to paste in the editor.",
+    );
+    expect(onResponseCopied).toHaveBeenCalledOnce();
+    expect(buttons.map(({ textContent }) => textContent)).not.toContain("Insert at cursor");
+    expect(buttons.map(({ textContent }) => textContent)).not.toContain("Replace document");
+  });
+
   it("stops a stream and retries the same turn with its original settings", async () => {
+    let liveDocument: unknown = { type: "doc", content: [{ type: "paragraph" }] };
     const eventSinks: Array<(event: ProChatEvent) => void> = [];
     const start = vi.fn().mockImplementation(async (_request, callback) => {
       eventSinks.push(callback);
@@ -225,7 +304,7 @@ describe("Pro chat", () => {
     });
     const chatBridge = bridge({ start });
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext("doc-1", "Draft", () => liveDocument));
     controller.setActive(true);
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalled());
     enableComposer();
@@ -263,17 +342,26 @@ describe("Pro chat", () => {
       "API charges may still apply",
     );
     expect(document.querySelector("#pro-chat-sharing")?.textContent).toContain(
-      "To OpenAI: this message only",
+      "To OpenAI: this document’s title and contents",
     );
     expect(document.querySelector("#pro-chat-sharing")?.textContent).not.toContain(
       "completed earlier chat messages",
     );
 
     const model = document.querySelector<HTMLSelectElement>("#pro-chat-model")!;
-    model.value = "gpt-fast";
+    model.value = JSON.stringify(["openai", "gpt-fast"]);
     model.dispatchEvent(new Event("change", { bubbles: true }));
+    liveDocument = {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Changed" }] }],
+    };
     document.querySelector<HTMLButtonElement>(".pro-chat-turn-retry")!.click();
     await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    expect(start.mock.calls[0][0].document).toEqual({
+      type: "doc",
+      content: [{ type: "paragraph" }],
+    });
+    expect(start.mock.calls[1][0].document).toEqual(liveDocument);
     expect(start.mock.calls[1][0]).toMatchObject({
       message: null,
       retry_turn_id: "turn-1",
@@ -286,7 +374,7 @@ describe("Pro chat", () => {
   it("uses Enter to send without stealing Shift Enter or IME composition", async () => {
     const chatBridge = bridge();
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalled());
     enableComposer();
@@ -329,7 +417,7 @@ describe("Pro chat", () => {
       .mockResolvedValueOnce({ operation_id: "operation-2", turn_id: "turn-2" });
     const chatBridge = bridge({ history: historyRequest, start });
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
     await vi.waitFor(() => expect(historyRequest).toHaveBeenCalledTimes(1));
     enableComposer();
@@ -356,7 +444,7 @@ describe("Pro chat", () => {
   it("uses the native UTF-8 byte limit before enabling Send", async () => {
     const chatBridge = bridge();
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalled());
     const consent = document.querySelector<HTMLInputElement>("#pro-chat-consent")!;
@@ -392,7 +480,7 @@ describe("Pro chat", () => {
       ], 2)),
     });
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
 
     await vi.waitFor(() => expect(document.querySelector(".pro-chat-message.assistant p")?.textContent).toBe(
@@ -419,13 +507,13 @@ describe("Pro chat", () => {
           : history(documentId, "openai"))),
     });
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalled());
 
-    const provider = document.querySelector<HTMLSelectElement>("#pro-chat-provider")!;
-    provider.value = "anthropic";
-    provider.dispatchEvent(new Event("change", { bubbles: true }));
+    const model = document.querySelector<HTMLSelectElement>("#pro-chat-model")!;
+    model.value = JSON.stringify(["anthropic", "claude-current"]);
+    model.dispatchEvent(new Event("change", { bubbles: true }));
 
     await vi.waitFor(() => expect(document.querySelector(".pro-chat-message.assistant p")?.textContent).toContain(
       "provider declined this request",
@@ -446,7 +534,7 @@ describe("Pro chat", () => {
       bridge: chatBridge,
       onInitialAvailabilityResolved,
     });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
 
     await vi.waitFor(() => expect(capabilitiesRequest).toHaveBeenCalledTimes(1));
@@ -471,7 +559,7 @@ describe("Pro chat", () => {
       .mockReturnValueOnce(newer.promise);
     const chatBridge = bridge({ capabilities: capabilityRequest });
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
     await vi.waitFor(() => expect(capabilityRequest).toHaveBeenCalledTimes(1));
 
@@ -483,8 +571,8 @@ describe("Pro chat", () => {
       ),
     });
     await latestRefresh;
-    expect(document.querySelector<HTMLSelectElement>("#pro-chat-provider")!.value).toBe(
-      "anthropic",
+    expect(document.querySelector<HTMLSelectElement>("#pro-chat-model")!.value).toBe(
+      JSON.stringify(["anthropic", "claude-current"]),
     );
     expect(chatBridge.history).toHaveBeenCalledWith("doc-1", "anthropic");
 
@@ -496,8 +584,8 @@ describe("Pro chat", () => {
     await older.promise;
     await Promise.resolve();
 
-    expect(document.querySelector<HTMLSelectElement>("#pro-chat-provider")!.value).toBe(
-      "anthropic",
+    expect(document.querySelector<HTMLSelectElement>("#pro-chat-model")!.value).toBe(
+      JSON.stringify(["anthropic", "claude-current"]),
     );
     expect(chatBridge.history).not.toHaveBeenCalledWith("doc-1", "openai");
   });
@@ -510,10 +598,10 @@ describe("Pro chat", () => {
         documentId === "doc-1" ? first.promise : second.promise),
     });
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "First" });
+    controller.setDocument(documentContext("doc-1", "First"));
     controller.setActive(true);
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalledWith("doc-1", "openai"));
-    controller.setDocument({ id: "doc-2", title: "Second" });
+    controller.setDocument(documentContext("doc-2", "Second"));
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalledWith("doc-2", "openai"));
 
     second.resolve(history("doc-2", "openai", [
@@ -542,7 +630,7 @@ describe("Pro chat", () => {
       bridge: chatBridge,
       onActivityChange: activity,
     });
-    controller.setDocument({ id: "doc-1", title: "First" });
+    controller.setDocument(documentContext("doc-1", "First"));
     controller.setActive(true);
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalledWith("doc-1", "openai"));
     enableComposer();
@@ -556,7 +644,7 @@ describe("Pro chat", () => {
       revision: 1,
     });
 
-    controller.setDocument({ id: "doc-2", title: "Second" });
+    controller.setDocument(documentContext("doc-2", "Second"));
     await vi.waitFor(() => expect(chatBridge.stop).toHaveBeenCalledWith("operation-1"));
     expect(document.querySelector("#pro-chat-document")?.textContent).toContain("First");
     expect(document.querySelector<HTMLButtonElement>("#pro-chat-stop")!.hidden).toBe(false);
@@ -597,7 +685,7 @@ describe("Pro chat", () => {
       stop: vi.fn().mockRejectedValue(new Error("temporary stop failure")),
     });
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "First" });
+    controller.setDocument(documentContext("doc-1", "First"));
     controller.setActive(true);
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalledWith("doc-1", "openai"));
     enableComposer();
@@ -611,7 +699,7 @@ describe("Pro chat", () => {
       revision: 1,
     });
 
-    controller.setDocument({ id: "doc-2", title: "Second" });
+    controller.setDocument(documentContext("doc-2", "Second"));
 
     await vi.waitFor(() => expect(document.querySelector("#pro-chat-error")?.textContent).toContain(
       "temporary stop failure",
@@ -648,7 +736,7 @@ describe("Pro chat", () => {
       }),
     });
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalled());
     enableComposer();
@@ -685,14 +773,14 @@ describe("Pro chat", () => {
       clear: vi.fn().mockResolvedValue(history("doc-1", "openai", [], 9)),
     });
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
     await vi.waitFor(() => expect(document.querySelector("#pro-chat-messages")?.textContent).toContain("Answer"));
 
     document.querySelector<HTMLButtonElement>("#pro-chat-clear")!.click();
     const confirmation = document.querySelector<HTMLElement>("#pro-chat-clear-confirmation")!;
     expect(confirmation.hidden).toBe(false);
-    expect(confirmation.textContent).toContain("document, proof, and reviewer history stay intact");
+    expect(confirmation.textContent).toContain("document and reviewer history stay intact");
     document.querySelector<HTMLButtonElement>("#pro-chat-clear-confirm")!.click();
 
     await vi.waitFor(() => expect(chatBridge.clear).toHaveBeenCalledWith("doc-1", "openai", 8));
@@ -720,7 +808,7 @@ describe("Pro chat", () => {
       .mockResolvedValueOnce(history("doc-1", "openai", [], 10));
     const chatBridge = bridge({ history: historyRequest, clear });
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
     await vi.waitFor(() => expect(document.querySelector("#pro-chat-messages")?.textContent).toContain("First answer"));
 
@@ -760,14 +848,14 @@ describe("Pro chat", () => {
       clear: vi.fn().mockReturnValue(pendingClear.promise),
     });
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "First" });
+    controller.setDocument(documentContext("doc-1", "First"));
     controller.setActive(true);
     await vi.waitFor(() => expect(document.querySelector("#pro-chat-messages")?.textContent).toContain("Answer"));
     document.querySelector<HTMLButtonElement>("#pro-chat-clear")!.click();
     document.querySelector<HTMLButtonElement>("#pro-chat-clear-confirm")!.click();
     await vi.waitFor(() => expect(chatBridge.clear).toHaveBeenCalled());
 
-    controller.setDocument({ id: "doc-2", title: "Second" });
+    controller.setDocument(documentContext("doc-2", "Second"));
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalledWith("doc-2", "openai"));
     pendingClear.reject(new Error("old clear failed"));
     await Promise.resolve();
@@ -781,7 +869,7 @@ describe("Pro chat", () => {
   it("shows unsupported thinking levels without allowing them", async () => {
     const chatBridge = bridge();
     controller = installProChat(document, { bridge: chatBridge });
-    controller.setDocument({ id: "doc-1", title: "Draft" });
+    controller.setDocument(documentContext());
     controller.setActive(true);
     await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalled());
 
@@ -790,5 +878,37 @@ describe("Pro chat", () => {
     )];
     expect(choices.find(({ value }) => value === "medium")?.disabled).toBe(false);
     expect(choices.find(({ value }) => value === "max")?.disabled).toBe(true);
+    expect(document.querySelector("#pro-chat-provider")).toBeNull();
+    expect(document.querySelector("#pro-chat-selection-summary")?.textContent).toBe(
+      "GPT Current · Provider default",
+    );
+    expect([...document.querySelectorAll<HTMLOptGroupElement>(
+      "#pro-chat-model optgroup",
+    )].map(({ label }) => label)).toEqual(["OpenAI", "Anthropic"]);
+
+    const model = document.querySelector<HTMLSelectElement>("#pro-chat-model")!;
+    model.value = JSON.stringify(["anthropic", "claude-current"]);
+    model.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(chatBridge.history).toHaveBeenCalledWith(
+      "doc-1",
+      "anthropic",
+    ));
+    const thinking = document.querySelector<HTMLSelectElement>("#pro-chat-thinking")!;
+    thinking.value = "high";
+    thinking.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(document.querySelector("#pro-chat-selection-summary")?.textContent).toBe(
+      "Claude Current · High",
+    );
+
+    const controls = document.querySelector<HTMLDetailsElement>("#pro-chat-controls")!;
+    controls.open = true;
+    thinking.focus();
+    controls.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    }));
+    expect(controls.open).toBe(false);
+    expect(document.activeElement).toBe(controls.querySelector("summary"));
   });
 });

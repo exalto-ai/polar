@@ -107,8 +107,9 @@ entire provider request.
 
 Setup creates no AI request with document content, no mutation, no suggestion, no provider receipt,
 and no provenance event. It must never unlock a verified label. The stacked Pro chat flow requires
-separate provider-specific consent. It sends completed eligible chat plus the newly typed or pasted
-message, but adds no editor document, selection, or file automatically. Its additional transport,
+separate provider-specific consent. Each request sends a fresh bounded projection of the current
+editor document and title, completed eligible chat, and the newly typed or pasted message. It adds
+no editor selection, native save path, or external file automatically. Its additional transport,
 local transcript, cancellation, and claim limits are in
 [pro-chat-security.md](pro-chat-security.md). Future verification will require a
 provider-authenticated exchange to bind to the exact proposal, anchors, hashes, and accepted delta.

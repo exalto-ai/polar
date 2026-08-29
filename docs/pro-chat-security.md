@@ -5,9 +5,9 @@ open, updated 2026-08-27
 
 This Pro chat core pull request is stacked on PR #16, `codex/pro-provider-foundation`. The parent
 pull request owns native key entry, Keychain storage, catalog access checks, replacement, and local
-removal. This pull request adds a text-only chat surface that can use a configured OpenAI or
-Anthropic key. It does not add files, document context, document changes, provider trace
-verification, or publishing.
+removal. This pull request adds a chat surface that can use a configured OpenAI or Anthropic key
+with the current editor document as context. It does not add file attachments, direct document
+changes, provider trace verification, or publishing.
 
 ## Product boundary
 
@@ -21,9 +21,11 @@ This isolation prevents a provider switch or document switch from silently sendi
 conversation.
 
 Chat is not an editor command. A response appears only in the sidebar and cannot directly change
-the document. This pull request does not automatically include the editor document, a selection, or
-a file. Anything the person types or pastes into the chat composer is part of the chat message and
-is sent.
+the document. Every Send and Retry includes a fresh, bounded Markdown projection of the current
+editor document and its current title. The app does not add the internal document identifier or
+native save path. A selection and external files are not included. Literal paths, links, and other
+content written in the document remain part of its Markdown projection. Anything the person types
+or pastes into the chat composer is also sent.
 
 ## Consent and content sharing
 
@@ -31,18 +33,24 @@ Provider setup and provider chat are separate consent boundaries. Saving a key d
 chat request. The first Send to each configured provider in each window session requires a separate,
 provider-specific acknowledgement that:
 
-- the newly typed or pasted message and the eligible completed prior chat for that document and
-  provider are sent to the selected provider;
+- the current editor document, including its title, formatting, and links, the newly typed or
+  pasted message, and the eligible completed prior chat for that document and provider are sent to
+  the selected provider;
 - provider API usage charges can apply; and
-- no editor document, selection, or file is included automatically by this pull request.
+- no selection, native save path, or external file is included automatically.
 
 This acknowledgement is an in-memory interface gate for that window. Native code validates the
 current disclosure version but does not keep a process-wide consent record. Closing the window
-therefore clears its acknowledgements.
+therefore clears its acknowledgements. After acknowledgement, the composer keeps a concise reminder
+that every request sends the current document and can incur provider charges. That reminder remains
+visible when the person switches documents.
 
-The only conversation content in the native request is completed visible chat turns plus the newly
-typed or pasted message. The request also carries the selected model and thinking setting, required
-provider protocol fields, and bounded request metadata.
+The provider request contains completed visible chat turns, the newly typed or pasted message, and
+the current document snapshot and bounded metadata described above. Native code validates the live
+ProseMirror tree against the editor schema and projects it to Markdown before building the provider
+request. Invalid or oversized snapshots fail before provider I/O. The document is explicitly
+delimited as untrusted source material in a native system instruction, and the model is told that it
+can suggest changes but cannot claim to have applied them.
 Failed, stopped, interrupted, or incomplete assistant output can remain visible for inspection, but
 it is excluded from later provider context. Provider reasoning or thinking content is neither sent
 to the webview nor persisted in the local transcript. The thinking selector controls a provider
@@ -95,8 +103,11 @@ uses a revision check so a stale window cannot overwrite a newer conversation.
 A pending request is recorded before provider I/O. Restart recovery marks a request that was left
 pending as interrupted instead of presenting it as completed. The transcript records visible user
 and assistant text, turn status, timestamps, token counts when reported, bounded request IDs, and
-model metadata. It never stores the API credential read from secure storage or provider reasoning
-content. A person should never paste a secret into the chat composer.
+model metadata. The per-request document snapshot and title are not copied into dedicated transcript
+or provenance fields. An assistant can quote document content in its visible reply, and that reply
+is stored as ordinary visible chat. The transcript never stores the API credential read from secure
+storage or provider reasoning content. A person should never put a secret in the editor or chat
+composer if they do not want it sent to the selected provider.
 
 Clear deletes only the current document and provider chat. It does not delete or rewrite the
 document, immutable provenance, reviewer history, reviewer suggestions, another provider's chat,
@@ -115,14 +126,22 @@ Seal material. It cannot show `Verified`. Provider-authenticated trace capture a
 a provider exchange to an exact proposal, anchors, hashes, and accepted document delta remain the
 scope of the later Pro trace pull request.
 
+Copying a response creates no document mutation or provenance event. If the person later pastes it
+into the editor, Proof of Thought records the new wording as `Pasted`, without guessing who composed
+it before it reached the clipboard. Direct Apply or Insert controls remain deferred until provider
+output can enter the existing proposal Accept and Reject path and bind the provider response to the
+exact accepted delta.
+
 ## Required checks
 
 - OpenAI and Anthropic request shape, fixed hosts, authentication headers, redirect rejection, and
   HTTPS enforcement
 - `store: false` on every OpenAI Responses request and local replay for both providers
-- no automatic editor document, selection, or file inclusion, and no API credential read from
-  secure storage or hidden reasoning in webview messages, transcripts, errors, logs, document state,
-  or evidence artifacts
+- a fresh schema-valid, bounded current-document snapshot on every Send and Retry, with only the
+  title as metadata; the app adds no native save path or internal document identifier
+- no API credential read from secure storage or hidden reasoning in webview messages, transcripts,
+  errors, logs, document state, or evidence artifacts; request-only document snapshots are not
+  copied into dedicated transcript or provenance fields
 - stream parsing across arbitrary chunk boundaries, bounded buffers, visible-text-only output,
   malformed lifecycle responses, provider-specific terminal states, unknown events, and unexpected
   tool output

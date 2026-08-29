@@ -11,6 +11,7 @@ use std::{
     io::{Read, Write},
     sync::atomic::{AtomicU64, Ordering},
 };
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 use thoughtd::discovery::{self, Daemon};
 

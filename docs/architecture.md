@@ -460,14 +460,16 @@ output, classifies failures, and owns cancellation. Keys and authorization heade
 webview. Each document and provider has a separate local transcript and revision; no provider-side
 conversation identifier is reused.
 
-Before the first send to each provider in a window, the person acknowledges that the visible chat
-and new message leave the device and may incur charges. Setup consent does not cover sending
-content. Only completed visible turns are replayed as context. Partial, stopped, failed, or
-interrupted output may remain visible but is excluded from later requests.
+Before the first send to each provider in a window, the person acknowledges that the current
+document title and contents, including formatting and links, the visible chat, and the new message
+leave the device and may incur charges. Setup consent does not cover sending content. Native code
+validates and projects the live editor tree for each request. Only completed visible turns are
+replayed as chat context. Partial, stopped, failed, or interrupted output may remain visible but is
+excluded from later requests.
 
 The transcript is private app state, not a document or evidence record. Clearing it does not alter
-the CRDT, lineage, reviewers, or suggestions. This layer sends no files, selection, or document text
-and cannot claim provider-verified provenance.
+the CRDT, lineage, reviewers, or suggestions. This layer sends no selected ranges or files and
+cannot claim provider-verified provenance.
 
 **Cost:** the native layer owns provider-specific streaming state and a private transcript store.
 Stopping a request cannot prove the provider stopped processing immediately.

@@ -1,11 +1,10 @@
 import type { ReviewerBridge } from "./reviewer-bridge";
 import type { ProChatBridge } from "./pro-chat-bridge";
-import { installProChat } from "./pro-chat";
+import { installProChat, type ProChatDocumentContext } from "./pro-chat";
 import type { ProProviderBridge } from "./pro-provider-bridge";
 import { installProProvider, type ProProviderController } from "./pro-provider";
 import {
   installReviewerConnections,
-  type ReviewerDocumentContext,
 } from "./reviewer-connections";
 export {
   REVIEWER_CLIENTS as AI_CLIENTS,
@@ -19,6 +18,7 @@ type AiSupportOptions = {
   providerBridge?: ProProviderBridge | null;
   chatBridge?: ProChatBridge | null;
   openExternal?: (url: string) => Promise<void>;
+  onChatResponseCopied?: () => void;
   onNotice?: (message: string, kind?: "info" | "error") => void;
 };
 
@@ -26,7 +26,7 @@ export type AiSupportController = {
   isOpen(): boolean;
   setConnectionCommand(command: string): void;
   setReviewerBridge(bridge: ReviewerBridge | null): void;
-  setCurrentDocument(context: ReviewerDocumentContext | null): void;
+  setCurrentDocument(context: ProChatDocumentContext | null): void;
   open(): void;
   close(): void;
   destroy(): void;
@@ -58,6 +58,8 @@ export function installAiSupport(
         bridge: options.chatBridge,
         onOpenSettings: () => root.querySelector("#ai-pro-panel")?.scrollIntoView(),
         onBusyChange: (provider) => providers?.setChatBusy(provider),
+        copyText: options.copyText,
+        onResponseCopied: options.onChatResponseCopied,
         onNotice: options.onNotice,
       })
     : null;
