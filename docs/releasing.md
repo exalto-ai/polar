@@ -14,6 +14,9 @@ Pushing the tag starts the workflow, so do not also dispatch the same tag manual
 are serialized. A rerun may replace assets only while the GitHub release is still a draft; the
 workflow refuses to mutate a published release.
 
+The downloaded `ProofOfThought_<version>_<architecture>.dmg` name is a human-facing product
+artifact. Internal release scratch files and paths use the `thought` machine namespace.
+
 ## What ships inside the bundle
 
 The window is useless without the daemon, so `thoughtd` and `thought-mcp-stdio` are
