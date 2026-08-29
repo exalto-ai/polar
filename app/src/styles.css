@@ -379,6 +379,21 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   padding: 0 7px;
   font-size: 13px;
 }
+.format-button.is-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  padding: 0;
+}
+.format-button.is-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .format-button.is-bold { font-weight: 750; }
 .format-button.is-italic { font-family: Georgia, serif; font-style: italic; font-size: 15px; }
 .format-button:disabled { opacity: 0.34; }
@@ -618,6 +633,120 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 }
 .link-input[hidden] { display: none; }
 .link-input::placeholder { color: var(--ink-faint); }
+
+/* A linked word is editing surface, not a navigation shortcut. Clicking it
+   opens this explicit action card, modeled on familiar document editors. */
+.link-card {
+  position: fixed;
+  z-index: 26;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(420px, calc(100vw - 16px));
+  min-height: 72px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--raised) 96%, transparent);
+  color: var(--ink);
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--rule));
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(16px) saturate(125%);
+  -webkit-backdrop-filter: blur(16px) saturate(125%);
+}
+.link-card[hidden] { display: none; }
+.link-card button {
+  border: 0;
+  outline: none;
+  font-family: var(--sans);
+  cursor: default;
+}
+.link-card svg {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.link-card-open {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 7px 8px;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--ink-soft);
+  text-align: left;
+}
+.link-card-open:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.link-card-open:hover .link-card-title { text-decoration: underline; }
+.link-card-open.is-error .link-card-url { color: #d66b63; }
+.link-card-destination[data-feedback] .link-card-url { display: none; }
+.link-card-destination[data-feedback]::after {
+  content: attr(data-feedback);
+  color: #d66b63;
+}
+.link-card-open:focus-visible,
+.link-card-action:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+.link-card-destination {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.link-card-title,
+.link-card-url {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.link-card-title {
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 600;
+}
+.link-card-url { color: var(--ink-soft); font-size: 12px; }
+.link-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.link-card-action {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--ink-soft);
+}
+.link-card-action:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink); }
+.link-card-action.is-copied { color: #38b26a; }
+.link-card-action.is-error { color: #d66b63; }
+.link-card-action[data-feedback] {
+  width: auto;
+  padding-inline: 8px;
+  gap: 5px;
+}
+.link-card-action[data-feedback]::after {
+  content: attr(data-feedback);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+@media (max-width: 440px) {
+  .link-card { flex-wrap: wrap; }
+  .link-card-open { flex-basis: 100%; }
+  .link-card-actions { margin-left: auto; }
+  .link-card-action { width: 44px; height: 44px; }
+}
 
 /* ---------- switcher ---------- */
 .scrim {
