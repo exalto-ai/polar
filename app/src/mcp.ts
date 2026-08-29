@@ -5,38 +5,48 @@
  * The switcher searches through the daemon's `search` tool, the same one agents
  * use, so there is one search implementation rather than two that disagree.
  */
-/** The daemon restarted and no longer knows our session. */
-class StaleSession extends Error {}
+/** The daemon forgot, expired, or evicted our established session. */
+class StaleSession extends Error {
+  constructor(readonly sentSession: string) {
+    super("the MCP session is stale");
+  }
+}
 
 export class Mcp {
   private session: string | null = null;
+  private handshakePromise: Promise<string> | null = null;
   private id = 0;
 
   constructor(
     private readonly url: string,
     private readonly token: string,
+    private readonly fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
   ) {}
 
   /**
    * One call, re-establishing the session if the daemon has forgotten it.
    *
-   * A restarted daemon does not know our session id and answers 404 forever
-   * after. Without this the window keeps a dead session for its whole lifetime
-   * and every later call fails silently — the switcher simply stops listing
-   * anything.
-   */
+   * An idle or evicted session can disappear while the window remains open.
+   * The MCP transport can answer 404, while the editor's authorization layer
+   * answers 401 before the request reaches that transport. Without recovery
+   * the window keeps a dead session and every later call fails.
+  */
   private async rpc(method: string, params: unknown): Promise<any> {
+    const sentSession = await this.ensureSession();
     try {
-      return await this.send(method, params);
+      return (await this.send(method, params, sentSession)).result;
     } catch (error) {
       if (!(error instanceof StaleSession)) throw error;
-      this.session = null;
-      await this.handshake();
-      return this.send(method, params);
+      const replacementSession = await this.recoverSession(error.sentSession);
+      return (await this.send(method, params, replacementSession)).result;
     }
   }
 
-  private async send(method: string, params: unknown): Promise<any> {
+  private async send(
+    method: string,
+    params: unknown,
+    sentSession: string | null,
+  ): Promise<{ result: any; sessionId: string | null }> {
     const notification = method.startsWith("notifications/");
     const body: Record<string, unknown> = { jsonrpc: "2.0", method, params };
     if (!notification) body.id = ++this.id;
@@ -46,39 +56,78 @@ export class Mcp {
       Accept: "application/json, text/event-stream",
       Authorization: `Bearer ${this.token}`,
     };
-    if (this.session) headers["Mcp-Session-Id"] = this.session;
+    if (sentSession) headers["Mcp-Session-Id"] = sentSession;
 
-    const response = await fetch(this.url, {
+    const response = await this.fetcher(this.url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
     });
-    // 404 means the daemon has no such session — it restarted under us.
-    if (response.status === 404 && this.session) throw new StaleSession();
+    // A 404 comes from the MCP transport and a 401 comes from the editor's
+    // session binding. Either status means this established session may have
+    // disappeared after idle expiry, eviction, or a binding reset. Retry only
+    // when a session was sent, so an invalid bearer on initialize stays a hard
+    // authorization failure.
+    if ((response.status === 404 || response.status === 401) && sentSession) {
+      throw new StaleSession(sentSession);
+    }
+    if (!response.ok) throw new Error(`MCP request failed (${response.status})`);
     const sessionId = response.headers.get("mcp-session-id");
-    if (sessionId && !this.session) this.session = sessionId;
 
     const raw = await response.text();
     for (const line of raw.split("\n")) {
       if (!line.startsWith("data: ") || !line.slice(6).trim()) continue;
       const message = JSON.parse(line.slice(6));
       if (message.error) throw new Error(message.error.message ?? "mcp error");
-      if (message.result) return message.result;
+      if ("result" in message) return { result: message.result, sessionId };
     }
-    return null;
+    return { result: null, sessionId };
   }
 
   async connect() {
-    await this.handshake();
+    await this.ensureSession();
   }
 
-  private async handshake() {
-    await this.send("initialize", {
+  private async ensureSession(): Promise<string> {
+    if (this.handshakePromise !== null) return this.handshakePromise;
+    if (this.session !== null) return this.session;
+    const pending = this.handshake();
+    this.handshakePromise = pending;
+    try {
+      const establishedSession = await pending;
+      if (this.handshakePromise === pending) this.session = establishedSession;
+      return establishedSession;
+    } finally {
+      if (this.handshakePromise === pending) this.handshakePromise = null;
+    }
+  }
+
+  private async recoverSession(sentSession: string): Promise<string> {
+    // A second stale response arriving while the replacement initializes must
+    // join the whole handshake instead of retrying on a half-ready session.
+    if (this.handshakePromise !== null) {
+      return this.handshakePromise;
+    }
+    // Another request may already have replaced the exact session that failed.
+    // Never clear that newer session or start a competing handshake.
+    if (this.session !== null && this.session !== sentSession) return this.session;
+    if (this.session === sentSession) {
+      this.session = null;
+    }
+    return this.ensureSession();
+  }
+
+  private async handshake(): Promise<string> {
+    const initialized = await this.send("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
       clientInfo: { name: "thought", version: "0.1.0" },
-    });
-    await this.send("notifications/initialized", {});
+    }, null);
+    if (initialized.sessionId === null) {
+      throw new Error("MCP initialize response did not establish a session");
+    }
+    await this.send("notifications/initialized", {}, initialized.sessionId);
+    return initialized.sessionId;
   }
 
   private async call(name: string, args: unknown) {
