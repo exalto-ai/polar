@@ -8,11 +8,18 @@ it.
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-Or run the workflow manually from the Actions tab with a tag name.
+Or run the workflow manually from the Actions tab on `main` with a tag name.
 
-Pushing the tag starts the workflow, so do not also dispatch the same tag manually. Same-tag runs
-are serialized. A rerun may replace assets only while the GitHub release is still a draft; the
-workflow refuses to mutate a published release.
+Pushing the tag starts the workflow, so do not also dispatch the same tag manually. The secret-free
+preflight requires the tag commit to be contained in `origin/main`. Same-tag runs are serialized. A
+rerun may replace assets only while the GitHub release is still a draft; the workflow refuses to
+mutate a published release.
+
+Apple credentials must be environment secrets in a protected GitHub environment named `release`,
+not repository-wide Actions secrets. Require reviewer approval, prevent self-review, restrict the
+environment to protected `v*` tags and manual runs from `main`, and restrict creation or movement of
+`v*` tags to release maintainers. The approver must compare the displayed tag and commit with the
+intended release.
 
 The downloaded `ProofOfThought_<version>_<architecture>.dmg` name is a human-facing product
 artifact. Internal release scratch files and paths use the `thought` machine namespace.
@@ -37,7 +44,7 @@ Connect API key** rather than an Apple ID and app-specific password. Three
 values, no second factor, and nothing that breaks when someone changes their
 Apple ID password.
 
-| Secret | What it is |
+| `release` environment secret | What it is |
 | --- | --- |
 | `APPLE_CERTIFICATE` | Developer ID Application `.p12`, base64-encoded |
 | `APPLE_CERTIFICATE_PASSWORD` | The `.p12` export password |
@@ -59,13 +66,13 @@ clipboard, or shell history:
 
 ```bash
 op item get "Apple Developer ID - Exalto (3FGNZ9DY9Y)" --vault "Exalto - Apple Signing" \
-  --fields password --reveal | gh secret set APPLE_CERTIFICATE_PASSWORD
+  --fields password --reveal | gh secret set --env release APPLE_CERTIFICATE_PASSWORD
 ```
 
 ```bash
 op item get "App Store Connect API - LLM Notary Notarization (2RTKQ2H2FW)" \
   --vault "Exalto - LLM Notary" --fields credential --reveal \
-  | base64 | gh secret set APPLE_NOTARIZATION_KEY_BASE64
+  | base64 | gh secret set --env release APPLE_NOTARIZATION_KEY_BASE64
 ```
 
 The `credential` field holds the raw PEM, so it is base64-encoded on the way
@@ -81,8 +88,10 @@ something that is not a PEM, and the build fails eight minutes later with
 op item get "App Store Connect API - LLM Notary Notarization (2RTKQ2H2FW)" \
   --vault "Exalto - LLM Notary" --format json --reveal \
   | python3 -c "import json,sys; print(next(f['value'] for f in json.load(sys.stdin)['fields'] if f.get('label')=='credential'), end='')" \
-  | base64 | gh secret set APPLE_NOTARIZATION_KEY_BASE64
+  | base64 | gh secret set --env release APPLE_NOTARIZATION_KEY_BASE64
 ```
+
+Set the other names in the table with the same `gh secret set --env release NAME` form.
 
 ### Why the DMG is notarized twice
 
@@ -118,6 +127,10 @@ ls app/src-tauri/target/release/bundle/macos/'Proof of Thought.app'/Contents/Mac
 
 `thought`, `thoughtd`, and `thought-mcp-stdio` should all be present. `thought` is the
 window executable; the other two are its sidecars.
+
+The app also ships the reviewed repository notice at
+`Proof of Thought.app/Contents/Resources/THIRD_PARTY_NOTICES.md`. The release workflow requires the
+packaged copy to be byte-identical to the repository source.
 
 CI mounts the final DMG and checks that installed copy's version, executables, architectures,
 Developer ID team, hardened runtime, signatures, and stapled ticket before uploading it.
