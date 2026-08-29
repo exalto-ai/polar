@@ -9,6 +9,7 @@ import {
   type ProChatThinking,
   type ProChatTurn,
 } from "./pro-chat-bridge";
+import { writeClipboardText } from "./clipboard";
 
 export type ProChatDocumentContext = {
   id: string;
@@ -202,7 +203,7 @@ export function installProChat(
   const stop = required<HTMLButtonElement>(panel, "#pro-chat-stop");
   const live = required<HTMLElement>(panel, "#pro-chat-live");
   const bridge = options.bridge ?? null;
-  const copyText = options.copyText ?? ((text: string) => navigator.clipboard.writeText(text));
+  const copyText = options.copyText ?? writeClipboardText;
   const disposers: Array<() => void> = [];
   const consentedProviders = new Set<ProChatProvider>();
   const messageNodes = new Map<string, MessageNodes>();

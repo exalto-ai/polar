@@ -10,6 +10,7 @@
  */
 import type { Editor } from "@tiptap/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { writeClipboardText } from "./clipboard";
 import { ICONS, icon, type IconNode } from "./icons";
 import { accel } from "./keys";
 
@@ -56,26 +57,6 @@ function readableHref(href: string): string {
   if (!/^https?:\/\//i.test(href)) return href;
   const withoutScheme = href.replace(/^https?:\/\//i, "");
   return withoutScheme.length > 1 ? withoutScheme.replace(/\/$/, "") : withoutScheme;
-}
-
-async function copyText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  // Older WKWebView versions do not expose navigator.clipboard. Keep the copy
-  // action functional there without leaving a visible temporary control.
-  const proxy = document.createElement("textarea");
-  proxy.value = text;
-  proxy.setAttribute("readonly", "");
-  proxy.style.position = "fixed";
-  proxy.style.opacity = "0";
-  document.body.append(proxy);
-  proxy.select();
-  const copied = document.execCommand?.("copy") ?? false;
-  proxy.remove();
-  if (!copied) throw new Error("copy is unavailable");
 }
 
 async function openDestination(href: string): Promise<void> {
@@ -348,7 +329,7 @@ export function installLinkShortcut(editor: Editor, host: HTMLElement): LinkCont
   });
   copy.addEventListener("click", () => {
     if (!activeLink) return;
-    void copyText(activeLink.href)
+    void writeClipboardText(activeLink.href)
       .then(() => {
         copy.classList.add("is-copied");
         copy.dataset.feedback = "Copied";

@@ -3,6 +3,7 @@ import {
   reviewerSetupCommand,
   type ReviewerClient,
 } from "./reviewer-setup";
+import { writeClipboardText } from "./clipboard";
 
 export type ReviewerAccess = {
   document_scope: "current" | "all";
@@ -83,7 +84,7 @@ export function installReviewerConnections(
   const setupCommand = required<HTMLElement>(root, "#reviewer-setup-command");
   const copy = required<HTMLButtonElement>(root, "#reviewer-copy");
   const setupDone = required<HTMLButtonElement>(root, "#reviewer-setup-done");
-  const copyText = options.copyText ?? ((text: string) => navigator.clipboard.writeText(text));
+  const copyText = options.copyText ?? writeClipboardText;
   const confirmAction = options.confirmAction ?? ((message: string) => window.confirm(message));
   const disposers: Array<() => void> = [];
   let api = options.api ?? null;
