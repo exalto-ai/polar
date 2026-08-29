@@ -137,7 +137,6 @@ jobs:
           # how this broke the first time.
           if ! openssl pkey -in "$key_path" -noout 2>/dev/null; then
             echo "::error::The decoded notarization key is not a valid PEM."
-            echo "First bytes: $(head -c 30 "$key_path" | tr -d '\n')"
             echo "Re-export it unquoted; see docs/releasing.md."
             exit 1
           fi
