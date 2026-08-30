@@ -1083,6 +1083,42 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Persist CRDT metadata without manufacturing a text-lineage event.
+    ///
+    /// Suggestions live in the document CRDT, but proposing or rejecting one
+    /// does not change document wording. Keep the update and document timestamp
+    /// atomic while leaving FTS, block provenance, and lineage untouched.
+    pub fn commit_metadata_update(
+        &self,
+        doc_id: &str,
+        payload: &[u8],
+        actor_id: &str,
+        origin: Origin,
+        session_id: Option<&str>,
+    ) -> Result<i64, SqlError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let timestamp = now_ms();
+        transaction.execute(
+            "INSERT INTO updates (doc_id, payload, actor_id, origin, session_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                doc_id,
+                payload,
+                actor_id,
+                origin.as_str(),
+                session_id,
+                timestamp
+            ],
+        )?;
+        let sequence = transaction.last_insert_rowid();
+        transaction.execute(
+            "UPDATE documents SET updated_at = ?2 WHERE id = ?1",
+            params![doc_id, timestamp],
+        )?;
+        transaction.commit()?;
+        Ok(sequence)
+    }
+
     /// Newest snapshot plus every update after it — the cold-start path.
     pub fn restore(&self, doc_id: &str) -> Result<Restored, SqlError> {
         let snapshot: Option<(Vec<u8>, i64)> = self
