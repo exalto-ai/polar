@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/thought-schema", "crates/thought-markdown", "crates/thought-testkit", "crates/thought-core", "crates/thought-store", "crates/thought-provenance", "crates/thought-mcp", "crates/thoughtd"]
+members = ["crates/thought-schema", "crates/thought-markdown", "crates/thought-testkit", "crates/thought-core", "crates/thought-store", "crates/thought-provenance", "crates/thought-mcp", "crates/thought-credentials", "crates/thoughtd"]
 # Throwaway risk probes, deliberately outside the workspace: they pin their own
 # deps and must not gate the build.
 exclude = ["prototypes/yrs-check", "prototypes/editor-probe/src-tauri", "app/src-tauri"]
