@@ -16,6 +16,7 @@ use thoughtd::discovery::{self, Daemon};
 
 #[cfg(target_os = "macos")]
 mod macos_secure_input;
+mod pro_chat;
 mod pro_provider;
 mod provider_credentials;
 
@@ -508,6 +509,8 @@ pub fn run() {
             import_markdown,
             export_markdown,
             document_wording_revision,
+            pro_chat::provider_models,
+            pro_chat::send_provider_chat,
             pro_provider::provider_configurations,
             pro_provider::configure_provider_key,
             pro_provider::remove_provider_key

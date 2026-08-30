@@ -1,6 +1,7 @@
 //! Minimal built-in provider configuration.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::provider_credentials;
 
@@ -19,7 +20,7 @@ impl Provider {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Openai => "OpenAI",
             Self::Anthropic => "Anthropic",
@@ -52,6 +53,10 @@ fn configuration(provider: Provider) -> Result<ProviderConfiguration, String> {
         provider,
         configured: provider_credentials::contains(provider.id())?,
     })
+}
+
+pub(crate) fn credential(provider: Provider) -> Result<Zeroizing<Vec<u8>>, String> {
+    provider_credentials::get(provider.id())
 }
 
 #[tauri::command]
