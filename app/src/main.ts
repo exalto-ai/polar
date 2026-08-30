@@ -102,6 +102,7 @@ const activeAgents = new Map<string, { presence: AgentPresence; at: number }>();
 function noteAgent(presence: AgentPresence) {
   activeAgents.set(presence.actor_id, { presence, at: Date.now() });
   renderPeers();
+  if (!els.connections.hidden) void refreshConnectionActors();
   scheduleProvenance();
   // Re-render when this one lapses, so the chip disappears without a further
   // edit to trigger it.
@@ -163,7 +164,7 @@ function pointAt(peerId: number, pointed: boolean) {
 function renderPeers() {
   if (!open) return;
   renderPresence(open.awareness, open.doc.clientID);
-  if (!els.connections.hidden) void renderConnections();
+  if (!els.connections.hidden) renderConnectionPeers();
 }
 
 /**
@@ -396,7 +397,7 @@ function empty(text: string): HTMLLIElement {
   return item;
 }
 
-async function renderConnections() {
+function renderConnectionPeers() {
   if (!open) return;
   const { awareness, doc } = open;
 
@@ -413,11 +414,16 @@ async function renderConnections() {
     }),
   );
   if (peers.length === 0) els.peers.replaceChildren(empty("Not connected"));
+}
 
+async function refreshConnectionActors() {
+  if (!open) return;
+  const docId = openDocId;
   // Agents have *edited* — they come in over MCP, which carries no presence,
   // so this is history from the op log rather than who is attached right now.
   try {
-    const actors = await mcp.documentActors(openDocId);
+    const actors = await mcp.documentActors(docId);
+    if (!open || openDocId !== docId || els.connections.hidden) return;
     const agents = actors.filter((a) => a.kind === "agent");
     els.agents.replaceChildren(
       ...agents.map((a) =>
@@ -441,7 +447,10 @@ async function renderConnections() {
 function toggleConnections(force?: boolean) {
   const show = force ?? els.connections.hidden;
   els.connections.hidden = !show;
-  if (show) void renderConnections();
+  if (show) {
+    renderConnectionPeers();
+    void refreshConnectionActors();
+  }
 }
 
 document.getElementById("status")!.addEventListener("click", (e) => {
