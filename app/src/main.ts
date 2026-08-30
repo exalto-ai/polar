@@ -20,6 +20,7 @@ import { ACCEL_LABEL, accel, relabelShortcutHints } from "./keys";
 import { Mcp, type DocumentSummary } from "./mcp";
 import { colorFor, playfulName, seedFrom } from "./names";
 import { installProvenanceRails, type Rails } from "./provenance";
+import { tauriProChatBridge } from "./pro-chat-bridge";
 import { tauriProProviderBridge } from "./pro-provider-bridge";
 import { SyncProvider, type AgentPresence, type ProviderStatus } from "./provider";
 import { installSuggestionReview, type SuggestionReviewController } from "./suggestions";
@@ -91,6 +92,7 @@ function reason(error: unknown): string {
 
 const aiSupport = installAiSupport(document, {
   providerBridge: isTauri() ? tauriProProviderBridge() : null,
+  chatBridge: isTauri() ? tauriProChatBridge() : null,
   onNotice: notify,
 });
 
@@ -187,7 +189,11 @@ function refreshTitle(editor: Editor) {
   document.title = title;
   void getCurrentWindow?.()?.setTitle(title);
   if (open?.editor === editor && openDocId) {
-    aiSupport.setCurrentDocument({ id: openDocId, title });
+    aiSupport.setCurrentDocument({
+      id: openDocId,
+      title,
+      snapshot: () => editor.getJSON(),
+    });
   }
 }
 
@@ -352,7 +358,11 @@ async function openDocument(docId: string): Promise<boolean> {
   provider.connect();
   open = { doc, awareness, provider, editor, rails, suggestions };
   openDocId = docId;
-  aiSupport.setCurrentDocument({ id: docId, title: deriveTitle(editor) });
+  aiSupport.setCurrentDocument({
+    id: docId,
+    title: deriveTitle(editor),
+    snapshot: () => editor.getJSON(),
+  });
   currentSources.setDocument(docId);
 
   // Exposed in development so the editor can be driven directly. Synthetic

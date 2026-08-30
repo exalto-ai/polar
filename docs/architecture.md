@@ -488,6 +488,17 @@ Adding a key performs no provider request. The first chat request is the useful 
 **Cost:** setup cannot promise that a key, model, quota, or billing state will work later. The
 actual request reports that failure, without a separate catalog probe or validation ledger.
 
+### AD-23 — Built-in chat is ephemeral and cannot edit
+
+The window sends the current document projection and visible conversation to a selected built-in
+provider only after a clear sharing acknowledgement. Conversations live only in that window and
+are cleared when the document changes or the window closes. Provider responses are plain visible
+text; they do not enter the document or attribution log by themselves.
+
+**Cost:** there is no restart recovery, cross-window history, streaming, Stop, or Retry. A failed
+request may have reached the provider even when the window receives no answer. Reviewable document
+changes remain a separate suggestion operation rather than an implicit power of chat.
+
 ## 7. Explicit non-goals for MVP
 
 Folders and hierarchy · accounts and authentication · end-to-end encryption · mobile ·
