@@ -208,7 +208,7 @@ describe("reviewer connection manager", () => {
 
     document.querySelector<HTMLButtonElement>("#reviewer-add")!.click();
     expect(document.querySelector("#reviewer-add-form")?.textContent).toContain(
-      "Reviewer connections are read-only",
+      "Reviewers can read and propose changes",
     );
     const codex = document.querySelector<HTMLInputElement>(
       'input[name="reviewer-client"][value="codex"]',
