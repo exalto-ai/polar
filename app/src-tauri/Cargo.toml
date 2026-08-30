@@ -3,6 +3,7 @@ name = "thought"
 version = "0.1.0"
 description = "Proof of Thought desktop app"
 edition = "2024"
+publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

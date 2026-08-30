@@ -8,6 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "notices": "node scripts/generate-notices.mjs",
+    "notices:check": "node scripts/generate-notices.mjs --check",
     "schema": "tsx scripts/export-schema.ts",
     "schema:check": "tsx scripts/export-schema.ts --check",
     "test": "vitest run"

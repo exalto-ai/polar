@@ -140,6 +140,28 @@ The app also ships the reviewed repository notice at
 `Proof of Thought.app/Contents/Resources/THIRD_PARTY_NOTICES.md`. The release workflow requires the
 packaged copy to be byte-identical to the repository source.
 
+That file is generated from three small inputs: `cargo-about` reads the locked native-app graph,
+`npm query` lists the installed production webview packages, and `third_party/LUCIDE.md` records the
+icons copied into the source tree. The native app depends on the daemon, so its graph also covers
+both bundled sidecars. Vite is included separately because a small part of it is copied into the
+production bundle.
+
+Install `cargo-about` once, then regenerate after a dependency change:
+
+```bash
+cargo install --locked --version 0.9.2 --features cli cargo-about
+npm ci --prefix app
+cargo fetch --locked --manifest-path app/src-tauri/Cargo.toml
+cargo fetch --locked --target aarch64-apple-darwin --manifest-path app/src-tauri/Cargo.toml
+cargo fetch --locked --target x86_64-apple-darwin --manifest-path app/src-tauri/Cargo.toml
+npm run notices --prefix app
+npm run notices:check --prefix app
+```
+
+The path-filtered Notices workflow runs the same check when dependency or notice inputs change.
+The repository still needs an explicit first-party root `LICENSE` before a public release; the
+third-party generator deliberately does not make that product decision.
+
 CI mounts the final DMG and checks that installed copy's version, executables, architectures,
 signature, and stapled ticket before uploading it.
 
