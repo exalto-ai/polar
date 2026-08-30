@@ -43,6 +43,14 @@
           </div>
           <button class="icon-button" id="ai-sidebar-close" type="button" aria-label="Close AI support">×</button>
         </header>
+        <section class="current-sources" aria-labelledby="current-sources-title">
+          <span class="eyebrow">Current text</span>
+          <h3 id="current-sources-title">Recorded sources</h3>
+          <p id="current-source-status" aria-live="polite">Open a document to see its sources.</p>
+          <button class="text-button" id="current-source-retry" type="button" hidden>Try again</button>
+          <ul id="current-source-list" hidden></ul>
+          <p class="ai-sidebar-note" id="current-source-note" hidden>These labels describe how surviving text entered this document. They do not prove who composed pasted, imported, or tool-reported text.</p>
+        </section>
         <p class="ai-sidebar-note">Give each AI reviewer only the documents it needs.</p>
         <div class="reviewer-heading">
           <span class="eyebrow">Saved connections</span>

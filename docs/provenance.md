@@ -67,3 +67,9 @@ and recovery states, and imply verification that a local bearer token cannot pro
 
 Later evidence or trace features may refer to a source event. They do not need a second lineage
 ledger.
+
+## Current sources view
+
+The AI support sidebar reads `document_lineage` directly and groups sources already present in
+the response. It shows labels, assurance, and alignment. It does not expose percentages, build a
+separate consumer ledger, hash the document again, or replay event history in the browser.
