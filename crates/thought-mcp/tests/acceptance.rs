@@ -398,3 +398,86 @@ fn a_new_document_is_called_what_you_named_it() {
     assert_eq!(blank.blocks.len(), 1);
     assert_eq!(blank.title, "Untitled");
 }
+
+#[test]
+fn markdown_import_is_one_durable_attributed_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("thought.db");
+    let actor = agent();
+    let markdown = concat!(
+        "<!--thought:title-->\n",
+        "# <span style=\"font-size: 24px\">Imported plan</span>\n\n",
+        "A **portable** snapshot."
+    );
+
+    let doc_id = {
+        let ws = Workspace::open(&path).unwrap();
+        let created = ws
+            .create_document_from_markdown("Imported plan", markdown, &actor)
+            .unwrap();
+        assert_eq!(created.markdown, markdown);
+        assert_eq!(created.title, "Imported plan");
+        assert_eq!(created.blocks.len(), 2);
+        assert_eq!(
+            ws.attribution(&created.doc_id).unwrap().len(),
+            1,
+            "an import is one creation, not a seed followed by a replacement"
+        );
+        assert!(
+            ws.list_documents(50, false)
+                .unwrap()
+                .iter()
+                .any(|document| document.doc_id == created.doc_id
+                    && document.title == "Imported plan")
+        );
+        created.doc_id
+    };
+
+    let reopened = Workspace::open(&path).unwrap();
+    assert_eq!(reopened.read_document(&doc_id).unwrap().markdown, markdown);
+
+    let blank = reopened
+        .create_document_from_markdown("Empty file", "\u{feff}", &actor)
+        .unwrap();
+    assert_eq!(blank.title, "Untitled");
+    assert_eq!(blank.blocks.len(), 1);
+}
+
+#[test]
+fn a_peer_deletion_only_update_is_committed_and_survives_restart() {
+    use thought_core::Document;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("thought.db");
+    let actor = ActorRef::human("editor");
+
+    let doc_id = {
+        let ws = Workspace::open(&path).unwrap();
+        let created = ws.create_document("Keep the heading", &actor).unwrap();
+        let peer = Document::new();
+        peer.apply_update(&ws.sync_since(&created.doc_id, &[]).unwrap())
+            .unwrap();
+
+        let paragraph = peer.blocks()[1].block_id.clone();
+        let before = peer.state_vector();
+        peer.delete_block(&paragraph).unwrap();
+        assert_eq!(
+            peer.state_vector(),
+            before,
+            "a deletion does not advance a Yjs state vector"
+        );
+
+        let deletion = peer.diff_since(&before);
+        assert!(
+            ws.apply_peer_update(&created.doc_id, &deletion, &actor)
+                .unwrap()
+                .is_some(),
+            "the deletion must not be mistaken for an idempotent update"
+        );
+        assert_eq!(ws.read_document(&created.doc_id).unwrap().blocks.len(), 1);
+        created.doc_id
+    };
+
+    let reopened = Workspace::open(&path).unwrap();
+    assert_eq!(reopened.read_document(&doc_id).unwrap().blocks.len(), 1);
+}

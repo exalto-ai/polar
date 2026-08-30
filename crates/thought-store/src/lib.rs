@@ -103,6 +103,21 @@ pub struct DocumentRow {
     pub deleted: bool,
 }
 
+/// Everything that makes a newly created document visible and recoverable.
+/// Stored in one SQLite transaction so callers never observe a document row
+/// without its CRDT state, search entry, and initial attribution.
+pub struct InitialDocument<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub payload: &'a [u8],
+    pub actor_id: &'a str,
+    pub origin: Origin,
+    pub session_id: Option<&'a str>,
+    pub markdown: &'a str,
+    pub block_ids: &'a [String],
+    pub attributed_at: i64,
+}
+
 /// What a cold start needs: the newest snapshot, plus every update after it.
 #[derive(Debug, Default)]
 pub struct Restored {
@@ -167,6 +182,46 @@ impl Store {
             params![id, title, ts],
         )?;
         Ok(())
+    }
+
+    pub fn create_initial_document(&self, document: InitialDocument<'_>) -> Result<(), SqlError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let timestamp = now_ms();
+        transaction.execute(
+            "INSERT INTO documents (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+            params![document.id, document.title, timestamp],
+        )?;
+        transaction.execute(
+            "INSERT INTO updates (doc_id, payload, actor_id, origin, session_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                document.id,
+                document.payload,
+                document.actor_id,
+                document.origin.as_str(),
+                document.session_id,
+                timestamp
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO doc_fts (doc_id, title, body) VALUES (?1, ?2, ?3)",
+            params![document.id, document.title, document.markdown],
+        )?;
+        for block_id in document.block_ids {
+            transaction.execute(
+                "INSERT INTO block_provenance
+                     (doc_id, block_id, created_by, created_at, touched_by, touched_at, session_id)
+                 VALUES (?1, ?2, ?3, ?5, ?3, ?5, ?4)",
+                params![
+                    document.id,
+                    block_id,
+                    document.actor_id,
+                    document.session_id,
+                    document.attributed_at
+                ],
+            )?;
+        }
+        transaction.commit()
     }
 
     /// Append one update frame. Callers batch an agent turn into a single frame
