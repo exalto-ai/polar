@@ -6,7 +6,7 @@ use thought_core::{BlockError, Document, Position};
 use thought_markdown::{from_markdown, to_markdown_with_spans};
 use thought_provenance::{
     Alignment, Assurance, CurrentSourceSummary, Ingress, LineageError, LineageState,
-    LiveLineageSpan, SourceDescriptor, SourceId, TextLocation,
+    LiveLineageSpan, SemanticRange, SourceDescriptor, SourceId, TextLocation,
 };
 use thought_schema::{Node, Schema, normalize};
 use thought_store::{
@@ -14,7 +14,7 @@ use thought_store::{
     ProvenanceEventRow, Store,
 };
 
-use crate::lineage::{SnapshotError, block_snapshots};
+use crate::lineage::{ProseMirrorRange, SnapshotError, block_snapshots, semantic_ranges};
 use crate::mutation::MutationContext;
 
 /// The caller, as asserted by the MCP session. Not authenticated (AD-6) — this
@@ -785,7 +785,52 @@ impl Workspace {
             }
 
             inner
-                .commit_candidate(doc_id, candidate, actor, context)
+                .commit_candidate(doc_id, candidate, actor, context, None)
+                .map(Some)
+        })
+    }
+
+    /// Apply one complete local editor dispatch with its before/after ranges.
+    /// Invalid or incomplete ranges never reject the edit; they only lower its
+    /// alignment from exact to inferred.
+    pub fn apply_editor_update(
+        &self,
+        doc_id: &str,
+        update: &[u8],
+        ranges: &[ProseMirrorRange],
+    ) -> Result<Option<String>, WorkspaceError> {
+        self.with(|inner| {
+            let actor = ActorRef::editor();
+            inner.register(&actor)?;
+            let (current_state, before_tree) = {
+                let current = inner.doc(doc_id)?;
+                (current.encode_state(), normalize(&current.read()))
+            };
+            let candidate = Document::new();
+            candidate.apply_update(&current_state).map_err(|error| {
+                WorkspaceError::NotFound(format!("could not clone document state: {error}"))
+            })?;
+            candidate
+                .apply_update(update)
+                .map_err(|error| WorkspaceError::NotFound(format!("bad update: {error}")))?;
+            if candidate.encode_state() == current_state {
+                return Ok(None);
+            }
+
+            let after_tree = normalize(&candidate.read());
+            let exact = if ranges.is_empty() {
+                None
+            } else {
+                semantic_ranges(&before_tree, &after_tree, ranges).ok()
+            };
+            inner
+                .commit_candidate(
+                    doc_id,
+                    candidate,
+                    &actor,
+                    &MutationContext::entered(),
+                    exact.as_deref(),
+                )
                 .map(Some)
         })
     }
@@ -1052,7 +1097,7 @@ impl Inner {
             WorkspaceError::NotFound(format!("could not clone document state: {error}"))
         })?;
         let value = operation(&candidate)?;
-        let version = self.commit_candidate(doc_id, candidate, actor, context)?;
+        let version = self.commit_candidate(doc_id, candidate, actor, context, None)?;
         Ok((value, version))
     }
 
@@ -1062,18 +1107,31 @@ impl Inner {
         candidate: Document,
         actor: &ActorRef,
         context: &MutationContext,
+        exact_ranges: Option<&[SemanticRange]>,
     ) -> Result<String, WorkspaceError> {
         let current = self.docs.get(doc_id).expect("document is loaded");
         let delta = candidate.diff_since(&current.state_vector());
         let tree = normalize(&candidate.read());
         let snapshots = block_snapshots(&candidate, &tree)?;
         let event_id = self.store.next_update_seq()?;
-        let source = context.source(SourceId(event_id as u64));
-        let lineage = self
+        let previous_lineage = self
             .lineages
             .get(doc_id)
-            .expect("document hydration installs lineage")
-            .reconcile(snapshots, source.clone())?;
+            .expect("document hydration installs lineage");
+        let mut source = context.source(SourceId(event_id as u64));
+        let lineage = if let Some(ranges) = exact_ranges {
+            source.alignment = Alignment::Exact;
+            match previous_lineage.reconcile_exact(snapshots.clone(), source.clone(), ranges) {
+                Ok(lineage) => lineage,
+                Err(LineageError::InvalidRange | LineageError::RangeMismatch) => {
+                    source.alignment = Alignment::Inferred;
+                    previous_lineage.reconcile(snapshots, source.clone())?
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            previous_lineage.reconcile(snapshots, source.clone())?
+        };
         let spans = spans_to_store(lineage.spans())?;
         let current_prints = Self::fingerprints(&candidate);
         let previous_prints = self.prints.get(doc_id).expect("document is loaded");

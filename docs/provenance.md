@@ -16,6 +16,17 @@ These are separate claims. An MCP caller may report its name and model, but the 
 not observe who is behind the connection. Its assurance is therefore `reported`. Content made
 before lineage existed is `legacy_unknown`, not reconstructed and presented as certain.
 
+The bundled editor captures one ProseMirror dispatch, its before/after ranges, and the Yjs update
+that dispatch emitted as one frame. Frames remain separate in a FIFO until SQLite acknowledges
+them. There is no batch protocol or retry id: if an acknowledgement is lost, resending the same
+Yjs update is a no-op and can be acknowledged safely. The editor stays read-only until its first
+sync frame is applied, so a range never describes an unhydrated placeholder document.
+
+This is a product trust boundary, not authentication of a human. The same loopback bearer guards
+MCP and editor access to the user's private writing. It does not make self-asserted MCP identity
+observed, and adding another bearer would not protect against a hostile process running as the
+same OS user.
+
 ## Storage
 
 SQLite has two authoritative tables:

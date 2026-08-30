@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { decode, encode, Tag } from "./protocol";
+import { decode, encode, encodeEditorMutation, Tag } from "./protocol";
 
 type Fixture = {
   frames: {
@@ -33,7 +33,39 @@ const TAG_BY_KIND: Record<string, number> = {
   error: Tag.Error,
   presence: Tag.Presence,
   ack: Tag.Ack,
+  editor_mutation: Tag.EditorMutation,
 };
+
+describe("editor mutations", () => {
+  it("encodes ordered before and after positions ahead of the update", () => {
+    const encoded = encodeEditorMutation(
+      "doc-1",
+      [{ beforeFrom: 2, beforeTo: 5, afterFrom: 2, afterTo: 4 }],
+      new Uint8Array([9, 8, 7]),
+    );
+    const frame = decode(encoded)!;
+    expect(frame.tag).toBe(Tag.EditorMutation);
+    expect([...frame.body]).toEqual([
+      1,
+      0, 0, 0, 2,
+      0, 0, 0, 5,
+      0, 0, 0, 2,
+      0, 0, 0, 4,
+      9, 8, 7,
+    ]);
+  });
+
+  it("rejects invalid metadata before allocating a wire frame", () => {
+    expect(() =>
+      encodeEditorMutation(
+        "doc-1",
+        [{ beforeFrom: 5, beforeTo: 2, afterFrom: 0, afterTo: 0 }],
+        new Uint8Array([1]),
+      ),
+    ).toThrow(RangeError);
+    expect(() => encodeEditorMutation("doc-1", [], new Uint8Array())).toThrow(RangeError);
+  });
+});
 
 describe("wire format agrees with the daemon", () => {
   it("has frames to check", () => {

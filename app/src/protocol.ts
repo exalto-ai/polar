@@ -24,9 +24,20 @@ export const Tag = {
    * every keystroke.
    */
   Ack: 0x08,
+  /** One complete local editor dispatch with ProseMirror before/after ranges. */
+  EditorMutation: 0x09,
 } as const;
 
 export type Frame = { tag: number; docId: string; body: Uint8Array };
+
+export const MAX_EDITOR_RANGES = 64;
+
+export type EditorRange = {
+  beforeFrom: number;
+  beforeTo: number;
+  afterFrom: number;
+  afterTo: number;
+};
 
 export function encode(tag: number, docId: string, body: Uint8Array): Uint8Array {
   const id = new TextEncoder().encode(docId);
@@ -49,4 +60,38 @@ export function decode(bytes: Uint8Array): Frame | null {
     docId: new TextDecoder().decode(bytes.subarray(5, 5 + idLength)),
     body: bytes.subarray(5 + idLength),
   };
+}
+
+export function encodeEditorMutation(
+  docId: string,
+  ranges: readonly EditorRange[],
+  update: Uint8Array,
+): Uint8Array {
+  if (ranges.length > MAX_EDITOR_RANGES) {
+    throw new RangeError(`an editor mutation may have at most ${MAX_EDITOR_RANGES} ranges`);
+  }
+  if (update.length === 0) throw new RangeError("an editor mutation needs an update");
+
+  const body = new Uint8Array(1 + ranges.length * 16 + update.length);
+  const view = new DataView(body.buffer);
+  body[0] = ranges.length;
+  let offset = 1;
+  for (const range of ranges) {
+    const values = [range.beforeFrom, range.beforeTo, range.afterFrom, range.afterTo];
+    if (
+      values.some(
+        (value) => !Number.isInteger(value) || value < 0 || value > 0xffff_ffff,
+      ) ||
+      range.beforeFrom > range.beforeTo ||
+      range.afterFrom > range.afterTo
+    ) {
+      throw new RangeError("editor ranges must contain ordered u32 positions");
+    }
+    for (const value of values) {
+      view.setUint32(offset, value, false);
+      offset += 4;
+    }
+  }
+  body.set(update, offset);
+  return encode(Tag.EditorMutation, docId, body);
 }
