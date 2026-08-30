@@ -1,6 +1,6 @@
 //! The one native boundary for built-in provider keys.
 
-use zeroize::Zeroize as _;
+use zeroize::{Zeroize as _, Zeroizing};
 
 const MAX_KEY_BYTES: usize = 4096;
 #[cfg(target_os = "macos")]
@@ -27,6 +27,21 @@ pub fn contains(provider: &str) -> Result<bool, String> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn contains(_: &str) -> Result<bool, String> {
+    Err("Provider keys are available only in the macOS app.".into())
+}
+
+#[cfg(target_os = "macos")]
+pub fn get(provider: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+    let key = security_framework::passwords::get_generic_password(SERVICE, provider)
+        .map_err(|_| "The provider key is missing or unavailable in Keychain.".to_string())?;
+    if !valid(&key) {
+        return Err("The saved provider key is invalid. Replace it in AI support.".into());
+    }
+    Ok(Zeroizing::new(key))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn get(_: &str) -> Result<Zeroizing<Vec<u8>>, String> {
     Err("Provider keys are available only in the macOS app.".into())
 }
 
