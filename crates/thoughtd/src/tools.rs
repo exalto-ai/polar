@@ -9,7 +9,7 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, tool, tool_router};
 use std::sync::Arc;
 use thought_core::Position;
-use thought_mcp::{ActorRef, TextEdit, Workspace};
+use thought_mcp::{ActorRef, MutationContext, TextEdit, Workspace};
 
 #[derive(Clone)]
 pub struct Thought {
@@ -39,12 +39,9 @@ pub struct Caller {
     /// Groups one agent turn so it can be reverted as a unit.
     #[serde(default)]
     pub session: Option<String>,
-    /// `"human"` or `"agent"`, defaulting to agent because almost every caller
-    /// is one.
-    ///
-    /// The window is the exception: it creates and trashes documents through
-    /// these same tools, and calling that an agent made a document the user
-    /// just made look like an agent's work in the provenance rails.
+    /// The bundled window still creates and trashes documents through MCP.
+    /// Its human actor is a compatibility bridge until those lifecycle calls
+    /// move to the editor API; lineage assurance remains reported either way.
     #[serde(default)]
     pub kind: Option<String>,
 }
@@ -56,6 +53,10 @@ impl Caller {
         } else {
             ActorRef::agent(&self.agent, self.model.as_deref(), self.session.as_deref())
         }
+    }
+
+    fn context(&self) -> MutationContext {
+        MutationContext::mcp(self.agent.clone())
     }
 }
 
@@ -219,6 +220,17 @@ impl Thought {
         Ok(Json(serde_json::json!({ "blocks": blocks })))
     }
 
+    #[tool(
+        description = "Current text lineage, grouped by source, with UTF-16 spans for each block."
+    )]
+    fn document_lineage(
+        &self,
+        Parameters(p): Parameters<DocParams>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let lineage = self.workspace.document_lineage(&p.doc_id).map_err(failed)?;
+        Ok(Json(serde_json::to_value(lineage).map_err(failed)?))
+    }
+
     #[tool(description = "Full-text search across documents.")]
     fn search(
         &self,
@@ -237,11 +249,14 @@ impl Thought {
         Parameters(p): Parameters<CreateParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
         let actor = p.caller.actor();
+        let context = p.caller.context();
         let view = match p.initial_markdown {
             Some(markdown) => self
                 .workspace
-                .create_document_from_markdown(&p.title, &markdown, &actor),
-            None => self.workspace.create_document(&p.title, &actor),
+                .create_document_from_markdown_with_context(&p.title, &markdown, &actor, &context),
+            None => self
+                .workspace
+                .create_document_with_context(&p.title, &actor, &context),
         }
         .map_err(failed)?;
         Ok(Json(serde_json::to_value(view).map_err(failed)?))
@@ -254,12 +269,13 @@ impl Thought {
     ) -> Result<Json<serde_json::Value>, ErrorData> {
         let out = self
             .workspace
-            .replace_block(
+            .replace_block_with_context(
                 &p.doc_id,
                 &p.block_id,
                 &p.markdown,
                 p.version.as_deref(),
                 &p.caller.actor(),
+                &p.caller.context(),
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
@@ -277,12 +293,13 @@ impl Thought {
         };
         let out = self
             .workspace
-            .insert_blocks(
+            .insert_blocks_with_context(
                 &p.doc_id,
                 &position,
                 &p.markdown,
                 p.version.as_deref(),
                 &p.caller.actor(),
+                &p.caller.context(),
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
@@ -299,7 +316,7 @@ impl Thought {
     ) -> Result<Json<serde_json::Value>, ErrorData> {
         let out = self
             .workspace
-            .replace_text(
+            .replace_text_with_context(
                 &p.doc_id,
                 &p.block_id,
                 &TextEdit {
@@ -309,6 +326,7 @@ impl Thought {
                 },
                 p.version.as_deref(),
                 &p.caller.actor(),
+                &p.caller.context(),
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
@@ -324,7 +342,12 @@ impl Thought {
     ) -> Result<Json<serde_json::Value>, ErrorData> {
         let out = self
             .workspace
-            .set_document_deleted(&p.doc_id, p.deleted, &p.caller.actor())
+            .set_document_deleted_with_context(
+                &p.doc_id,
+                p.deleted,
+                &p.caller.actor(),
+                &p.caller.context(),
+            )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
     }
@@ -336,11 +359,12 @@ impl Thought {
     ) -> Result<Json<serde_json::Value>, ErrorData> {
         let out = self
             .workspace
-            .delete_block(
+            .delete_block_with_context(
                 &p.doc_id,
                 &p.block_id,
                 p.version.as_deref(),
                 &p.caller.actor(),
+                &p.caller.context(),
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))

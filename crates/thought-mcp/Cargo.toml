@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 thought-core = { workspace = true }
 thought-markdown = { workspace = true }
+thought-provenance = { workspace = true }
 thought-schema = { workspace = true }
 thought-store = { workspace = true }
 serde = { workspace = true }

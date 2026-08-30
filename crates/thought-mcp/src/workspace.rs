@@ -1,11 +1,21 @@
 use base64::Engine;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use thought_core::{BlockError, Document, Position};
 use thought_markdown::{from_markdown, to_markdown_with_spans};
+use thought_provenance::{
+    Alignment, Assurance, CurrentSourceSummary, Ingress, LineageError, LineageState,
+    LiveLineageSpan, SourceDescriptor, SourceId, TextLocation,
+};
 use thought_schema::{Node, Schema, normalize};
-use thought_store::{Actor, InitialDocument, Origin, Store};
+use thought_store::{
+    Actor, InitialDocument, LineageSpanRow, LineageUpdate, Origin, ProvenanceEventInput,
+    ProvenanceEventRow, Store,
+};
+
+use crate::lineage::{SnapshotError, block_snapshots};
+use crate::mutation::MutationContext;
 
 /// The caller, as asserted by the MCP session. Not authenticated (AD-6) — this
 /// is identity so that attribution and per-run revert have something to key on.
@@ -115,6 +125,13 @@ pub struct ActorSummary {
     pub edits: i64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DocumentLineage {
+    pub doc_id: String,
+    pub summary: CurrentSourceSummary,
+    pub spans: Vec<LiveLineageSpan>,
+}
+
 /// Who wrote one block. The rails in the window, and the answer to "where did
 /// this paragraph come from" for an agent that asks.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -151,6 +168,8 @@ pub enum WorkspaceError {
     InvalidMarkdown(Vec<String>),
     NotFound(String),
     Storage(thought_store::SqlError),
+    Snapshot(SnapshotError),
+    Lineage(LineageError),
 }
 
 impl std::fmt::Display for WorkspaceError {
@@ -167,6 +186,8 @@ impl std::fmt::Display for WorkspaceError {
             }
             WorkspaceError::NotFound(what) => write!(f, "{what}"),
             WorkspaceError::Storage(e) => write!(f, "storage: {e}"),
+            WorkspaceError::Snapshot(e) => write!(f, "snapshot: {e}"),
+            WorkspaceError::Lineage(e) => write!(f, "lineage: {e}"),
         }
     }
 }
@@ -182,6 +203,18 @@ impl From<thought_store::SqlError> for WorkspaceError {
 impl From<BlockError> for WorkspaceError {
     fn from(e: BlockError) -> Self {
         WorkspaceError::Block(e)
+    }
+}
+
+impl From<SnapshotError> for WorkspaceError {
+    fn from(error: SnapshotError) -> Self {
+        Self::Snapshot(error)
+    }
+}
+
+impl From<LineageError> for WorkspaceError {
+    fn from(error: LineageError) -> Self {
+        Self::Lineage(error)
     }
 }
 
@@ -205,6 +238,7 @@ struct Inner {
     /// rather than re-deriving it means a commit hashes the tree it has already
     /// built for reindexing, instead of serialising the document a second time.
     prints: HashMap<String, HashMap<String, u64>>,
+    lineages: HashMap<String, LineageState>,
     /// Deltas committed under the current lock, drained and delivered to the
     /// observer once it is released — user code must not run under our mutex.
     pending: Vec<(String, Vec<u8>, ActorRef)>,
@@ -229,6 +263,7 @@ impl Workspace {
                 store: Store::open(path)?,
                 docs: HashMap::new(),
                 prints: HashMap::new(),
+                lineages: HashMap::new(),
                 pending: Vec::new(),
             }),
             observer: Mutex::new(None),
@@ -241,6 +276,7 @@ impl Workspace {
                 store: Store::open_in_memory()?,
                 docs: HashMap::new(),
                 prints: HashMap::new(),
+                lineages: HashMap::new(),
                 pending: Vec::new(),
             }),
             observer: Mutex::new(None),
@@ -284,6 +320,15 @@ impl Workspace {
         title: &str,
         actor: &ActorRef,
     ) -> Result<DocumentView, WorkspaceError> {
+        self.create_document_with_context(title, actor, &default_context(actor))
+    }
+
+    pub fn create_document_with_context(
+        &self,
+        title: &str,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<DocumentView, WorkspaceError> {
         // Seed the title as a heading rather than storing metadata that the
         // first read would immediately discard. Always leave a paragraph after
         // it so there is somewhere to start typing.
@@ -295,7 +340,7 @@ impl Workspace {
             );
         }
         blocks.push(Node::element("paragraph", vec![]));
-        self.create_document_tree(Node::element("doc", blocks), actor)
+        self.create_document_tree(Node::element("doc", blocks), actor, context)
     }
 
     /// Import a Markdown snapshot as one new collaborative document.
@@ -310,6 +355,21 @@ impl Workspace {
         markdown: &str,
         actor: &ActorRef,
     ) -> Result<DocumentView, WorkspaceError> {
+        self.create_document_from_markdown_with_context(
+            _title,
+            markdown,
+            actor,
+            &MutationContext::imported(),
+        )
+    }
+
+    pub fn create_document_from_markdown_with_context(
+        &self,
+        _title: &str,
+        markdown: &str,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<DocumentView, WorkspaceError> {
         let mut tree = normalize(&from_markdown(markdown.trim_start_matches('\u{feff}')));
         // ProseMirror requires at least one block. An empty Markdown file maps
         // to the same truly blank document as File > New.
@@ -321,13 +381,14 @@ impl Workspace {
                 errs.iter().map(ToString::to_string).collect(),
             ));
         }
-        self.create_document_tree(tree, actor)
+        self.create_document_tree(tree, actor, context)
     }
 
     fn create_document_tree(
         &self,
         tree: Node,
         actor: &ActorRef,
+        context: &MutationContext,
     ) -> Result<DocumentView, WorkspaceError> {
         let tree = normalize(&tree);
         if let Err(errs) = Schema::v0().validate(&tree) {
@@ -350,21 +411,34 @@ impl Workspace {
                 .map(|block| block.block_id)
                 .collect::<Vec<_>>();
             let attributed_at = now_ms();
-            inner.store.create_initial_document(InitialDocument {
-                id: &doc_id,
-                title: &title,
-                payload: &state,
-                actor_id: &actor.id,
-                origin: actor.origin(),
-                session_id: actor.session_id.as_deref(),
-                markdown: &markdown,
-                block_ids: &block_ids,
-                attributed_at,
-            })?;
+            let event_id = inner.store.next_update_seq()?;
+            let snapshots = block_snapshots(&doc, &tree)?;
+            let mut source = context.source(SourceId(event_id as u64));
+            source.alignment = Alignment::Exact;
+            let lineage = LineageState::seed(snapshots, source.clone())?;
+            let spans = spans_to_store(lineage.spans())?;
+            let event = event_input(event_id, actor, &source, "edit", attributed_at);
+            inner.store.create_initial_document_with_lineage(
+                InitialDocument {
+                    id: &doc_id,
+                    title: &title,
+                    payload: &state,
+                    actor_id: &actor.id,
+                    origin: actor.origin(),
+                    session_id: actor.session_id.as_deref(),
+                    markdown: &markdown,
+                    block_ids: &block_ids,
+                    attributed_at,
+                },
+                event_id,
+                event,
+                &spans,
+            )?;
 
             let prints = Inner::fingerprints(&doc);
             inner.docs.insert(doc_id.clone(), doc);
             inner.prints.insert(doc_id.clone(), prints);
+            inner.lineages.insert(doc_id.clone(), lineage);
             Ok(doc_id)
         })?;
         self.read_document(&doc_id)
@@ -447,6 +521,25 @@ impl Workspace {
         version: Option<&str>,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
+        self.replace_block_with_context(
+            doc_id,
+            block_id,
+            markdown,
+            version,
+            actor,
+            &default_context(actor),
+        )
+    }
+
+    pub fn replace_block_with_context(
+        &self,
+        doc_id: &str,
+        block_id: &str,
+        markdown: &str,
+        version: Option<&str>,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<EditOutcome, WorkspaceError> {
         let nodes = parse_blocks(markdown)?;
         let Some(first) = nodes.first() else {
             return Err(WorkspaceError::InvalidMarkdown(vec![
@@ -454,18 +547,14 @@ impl Workspace {
             ]));
         };
         self.with(|inner| {
-            inner.register(actor)?;
-            let doc = inner.doc(doc_id)?;
-            let before = doc.state_vector();
-            let warnings = staleness(doc, version);
-
-            let block = doc.replace_block(block_id, first)?;
-            // Extra blocks in the payload follow the one replaced rather than
-            // being silently dropped.
-            if nodes.len() > 1 {
-                doc.insert_blocks(&Position::After(block.block_id.clone()), &nodes[1..])?;
-            }
-            let version = inner.commit(doc_id, &before, actor)?;
+            let ((block, warnings), version) = inner.mutate(doc_id, actor, context, |doc| {
+                let warnings = staleness(doc, version);
+                let block = doc.replace_block(block_id, first)?;
+                if nodes.len() > 1 {
+                    doc.insert_blocks(&Position::After(block.block_id.clone()), &nodes[1..])?;
+                }
+                Ok((block, warnings))
+            })?;
             Ok(EditOutcome {
                 doc_id: doc_id.into(),
                 block_id: Some(block.block_id),
@@ -483,14 +572,32 @@ impl Workspace {
         version: Option<&str>,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
+        self.insert_blocks_with_context(
+            doc_id,
+            after,
+            markdown,
+            version,
+            actor,
+            &default_context(actor),
+        )
+    }
+
+    pub fn insert_blocks_with_context(
+        &self,
+        doc_id: &str,
+        after: &Position,
+        markdown: &str,
+        version: Option<&str>,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<EditOutcome, WorkspaceError> {
         let nodes = parse_blocks(markdown)?;
         self.with(|inner| {
-            inner.register(actor)?;
-            let doc = inner.doc(doc_id)?;
-            let before = doc.state_vector();
-            let warnings = staleness(doc, version);
-            let created = doc.insert_blocks(after, &nodes)?;
-            let version = inner.commit(doc_id, &before, actor)?;
+            let ((created, warnings), version) = inner.mutate(doc_id, actor, context, |doc| {
+                let warnings = staleness(doc, version);
+                let created = doc.insert_blocks(after, &nodes)?;
+                Ok((created, warnings))
+            })?;
             Ok(EditOutcome {
                 doc_id: doc_id.into(),
                 block_id: created.first().map(|b| b.block_id.clone()),
@@ -507,13 +614,29 @@ impl Workspace {
         version: Option<&str>,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
+        self.delete_block_with_context(
+            doc_id,
+            block_id,
+            version,
+            actor,
+            &MutationContext::command(),
+        )
+    }
+
+    pub fn delete_block_with_context(
+        &self,
+        doc_id: &str,
+        block_id: &str,
+        version: Option<&str>,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<EditOutcome, WorkspaceError> {
         self.with(|inner| {
-            inner.register(actor)?;
-            let doc = inner.doc(doc_id)?;
-            let before = doc.state_vector();
-            let warnings = staleness(doc, version);
-            doc.delete_block(block_id)?;
-            let version = inner.commit(doc_id, &before, actor)?;
+            let (warnings, version) = inner.mutate(doc_id, actor, context, |doc| {
+                let warnings = staleness(doc, version);
+                doc.delete_block(block_id)?;
+                Ok(warnings)
+            })?;
             Ok(EditOutcome {
                 doc_id: doc_id.into(),
                 block_id: None,
@@ -536,6 +659,25 @@ impl Workspace {
         edit: &TextEdit<'_>,
         version: Option<&str>,
         actor: &ActorRef,
+    ) -> Result<EditOutcome, WorkspaceError> {
+        self.replace_text_with_context(
+            doc_id,
+            block_id,
+            edit,
+            version,
+            actor,
+            &default_context(actor),
+        )
+    }
+
+    pub fn replace_text_with_context(
+        &self,
+        doc_id: &str,
+        block_id: &str,
+        edit: &TextEdit<'_>,
+        version: Option<&str>,
+        actor: &ActorRef,
+        context: &MutationContext,
     ) -> Result<EditOutcome, WorkspaceError> {
         let TextEdit {
             find,
@@ -587,7 +729,7 @@ impl Workspace {
             None => current.replace(find, replace),
         };
 
-        self.replace_block(doc_id, block_id, &updated, version, actor)
+        self.replace_block_with_context(doc_id, block_id, &updated, version, actor, context)
     }
 
     /// Everything this replica has that the holder of `state_vector` lacks.
@@ -608,6 +750,16 @@ impl Workspace {
         update: &[u8],
         actor: &ActorRef,
     ) -> Result<Option<String>, WorkspaceError> {
+        self.apply_peer_update_with_context(doc_id, update, actor, &MutationContext::unknown())
+    }
+
+    pub fn apply_peer_update_with_context(
+        &self,
+        doc_id: &str,
+        update: &[u8],
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<Option<String>, WorkspaceError> {
         self.with(|inner| {
             inner.register(actor)?;
 
@@ -621,7 +773,6 @@ impl Workspace {
             candidate.apply_update(&current_state).map_err(|e| {
                 WorkspaceError::NotFound(format!("could not clone document state: {e}"))
             })?;
-            let before = candidate.state_vector();
             candidate
                 .apply_update(update)
                 .map_err(|e| WorkspaceError::NotFound(format!("bad update: {e}")))?;
@@ -633,29 +784,9 @@ impl Workspace {
                 return Ok(None);
             }
 
-            let original = inner
-                .docs
-                .insert(doc_id.to_string(), candidate)
-                .expect("document was loaded above");
-            let original_prints = inner.prints.get(doc_id).cloned();
-            let pending_before = inner.pending.len();
-
-            match inner.commit(doc_id, &before, actor) {
-                Ok(version) => Ok(Some(version)),
-                Err(error) => {
-                    inner.docs.insert(doc_id.to_string(), original);
-                    match original_prints {
-                        Some(prints) => {
-                            inner.prints.insert(doc_id.to_string(), prints);
-                        }
-                        None => {
-                            inner.prints.remove(doc_id);
-                        }
-                    }
-                    inner.pending.truncate(pending_before);
-                    Err(error)
-                }
-            }
+            inner
+                .commit_candidate(doc_id, candidate, actor, context)
+                .map(Some)
         })
     }
 
@@ -670,14 +801,21 @@ impl Workspace {
         deleted: bool,
         actor: &ActorRef,
     ) -> Result<EditOutcome, WorkspaceError> {
+        self.set_document_deleted_with_context(doc_id, deleted, actor, &MutationContext::command())
+    }
+
+    pub fn set_document_deleted_with_context(
+        &self,
+        doc_id: &str,
+        deleted: bool,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<EditOutcome, WorkspaceError> {
         self.with(|inner| {
-            inner.register(actor)?;
-            let doc = inner.doc(doc_id)?;
-            let before = doc.state_vector();
-            doc.set_deleted_at(deleted.then(now_ms));
-            let at = doc.deleted_at();
-            let version = inner.commit(doc_id, &before, actor)?;
-            inner.store.cache_deleted_at(doc_id, at)?;
+            let (_, version) = inner.mutate(doc_id, actor, context, |doc| {
+                doc.set_deleted_at(deleted.then(now_ms));
+                Ok(())
+            })?;
             Ok(EditOutcome {
                 doc_id: doc_id.into(),
                 block_id: None,
@@ -706,6 +844,21 @@ impl Workspace {
                     edits: a.edits,
                 })
                 .collect())
+        })
+    }
+
+    pub fn document_lineage(&self, doc_id: &str) -> Result<DocumentLineage, WorkspaceError> {
+        self.with(|inner| {
+            inner.doc(doc_id)?;
+            let lineage = inner
+                .lineages
+                .get(doc_id)
+                .expect("document hydration installs lineage");
+            Ok(DocumentLineage {
+                doc_id: doc_id.to_string(),
+                summary: lineage.current_source_summary()?,
+                spans: lineage.spans().to_vec(),
+            })
         })
     }
 
@@ -790,18 +943,53 @@ impl Inner {
                     WorkspaceError::InvalidMarkdown(vec![format!("corrupt update: {e}")])
                 })?;
             }
+            let tree = normalize(&doc.read());
+            let snapshots = block_snapshots(&doc, &tree)?;
+            let events = self.store.provenance_events(doc_id)?;
+            let lineage = if events.is_empty() {
+                let event_id = self
+                    .store
+                    .latest_update_seq(doc_id)?
+                    .ok_or_else(|| WorkspaceError::NoSuchDocument(doc_id.to_string()))?;
+                let context = MutationContext::legacy_unknown();
+                let source = context.source(SourceId(event_id as u64));
+                let lineage = LineageState::seed(snapshots, source.clone())?;
+                let spans = spans_to_store(lineage.spans())?;
+                let at = now_ms();
+                let event = ProvenanceEventInput {
+                    event_id,
+                    actor_id: None,
+                    action: "edit",
+                    group_key: context.group_key(),
+                    source_label: context.source_label(),
+                    ingress: context.ingress().as_str(),
+                    assurance: context.assurance().as_str(),
+                    alignment: context.alignment().as_str(),
+                    session_id: None,
+                    created_at: at,
+                };
+                self.store
+                    .seed_legacy_lineage(doc_id, event_id, event, &spans)?;
+                lineage
+            } else {
+                let sources = events
+                    .into_iter()
+                    .map(source_from_row)
+                    .collect::<Result<BTreeMap<_, _>, _>>()?;
+                let spans = self
+                    .store
+                    .lineage_spans(doc_id)?
+                    .into_iter()
+                    .map(span_from_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+                LineageState::from_parts(snapshots, spans, sources)?
+            };
+            let prints = Self::fingerprints(&doc);
             self.docs.insert(doc_id.to_string(), doc);
-
-            // Seed the diff baseline from the document as it stands, so the
-            // next commit compares against reality rather than an empty map
-            // and re-attributes every block to whoever typed next.
-            let prints = Self::fingerprints(self.docs.get(doc_id).expect("just inserted"));
             self.prints.insert(doc_id.to_string(), prints);
-
-            // Documents written before this table existed have a full log and
-            // no attribution. Replay pays that off once.
+            self.lineages.insert(doc_id.to_string(), lineage);
             if !self.store.has_provenance(doc_id)? {
-                self.backfill(doc_id)?;
+                self.backfill_block_provenance(doc_id)?;
             }
         }
         Ok(self.docs.get(doc_id).expect("just inserted"))
@@ -824,117 +1012,211 @@ impl Inner {
             .collect()
     }
 
-    /// Attribute whatever this commit changed to the actor that wrote it.
-    ///
-    /// A block is *created* the first time its id appears and *touched* when
-    /// its fingerprint moves. Blocks that did not change are left alone, so a
-    /// one-word edit does not re-attribute the whole document to whoever made
-    /// it.
-    fn attribute(&mut self, doc_id: &str, actor: &ActorRef, at: i64) -> Result<(), WorkspaceError> {
-        let doc = self.docs.get(doc_id).expect("document is loaded");
-        let current = Self::fingerprints(doc);
-        let previous = self.prints.get(doc_id);
-
-        for (block_id, print) in &current {
-            let unchanged = previous.and_then(|p| p.get(block_id)) == Some(print);
-            if unchanged {
-                continue;
-            }
-            self.store
-                .touch_block(doc_id, block_id, &actor.id, actor.session_id.as_deref(), at)?;
-        }
-
-        if previous.is_some_and(|p| p.keys().any(|id| !current.contains_key(id))) {
-            let keep: HashSet<String> = current.keys().cloned().collect();
-            self.store.forget_blocks(doc_id, &keep)?;
-        }
-        self.prints.insert(doc_id.to_string(), current);
-        Ok(())
-    }
-
-    /// Attribute a document that has never been attributed, by replaying its
-    /// log one update at a time.
-    ///
-    /// Deliberately replays the *log* rather than starting from a snapshot:
-    /// snapshots compact history away and the log never does (AD-13), so the
-    /// log is the only thing that can say who wrote what. Runs once per
-    /// document — every commit after this one attributes itself incrementally.
-    fn backfill(&mut self, doc_id: &str) -> Result<(), WorkspaceError> {
-        let log = self.store.log(doc_id)?;
+    fn backfill_block_provenance(&mut self, doc_id: &str) -> Result<(), WorkspaceError> {
         let replay = Document::new();
-        let mut previous: HashMap<String, u64> = HashMap::new();
-
-        for entry in &log {
-            // A corrupt frame stops the backfill rather than failing the read:
-            // partial attribution is worth more than none, and the document
-            // itself hydrates from the same bytes through its own path.
+        let mut previous = HashMap::new();
+        for entry in self.store.log(doc_id)? {
             if replay.apply_update(&entry.payload).is_err() {
                 break;
             }
             let current = Self::fingerprints(&replay);
-            for (block_id, print) in &current {
-                if previous.get(block_id) == Some(print) {
-                    continue;
+            for (block_id, fingerprint) in &current {
+                if previous.get(block_id) != Some(fingerprint) {
+                    self.store.touch_block(
+                        doc_id,
+                        block_id,
+                        &entry.actor_id,
+                        entry.session_id.as_deref(),
+                        entry.created_at,
+                    )?;
                 }
-                self.store.touch_block(
-                    doc_id,
-                    block_id,
-                    &entry.actor_id,
-                    entry.session_id.as_deref(),
-                    entry.created_at,
-                )?;
             }
             previous = current;
         }
-
-        // Blocks that existed partway through the log but not at the end.
-        let keep: HashSet<String> = previous.keys().cloned().collect();
-        self.store.forget_blocks(doc_id, &keep)?;
+        self.store
+            .forget_blocks(doc_id, &previous.keys().cloned().collect::<HashSet<_>>())?;
         Ok(())
     }
 
-    /// Persist everything written since `before`, then keep derived state in
-    /// step.
-    fn commit(
+    fn mutate<T>(
         &mut self,
         doc_id: &str,
-        before: &[u8],
         actor: &ActorRef,
+        context: &MutationContext,
+        operation: impl FnOnce(&Document) -> Result<T, WorkspaceError>,
+    ) -> Result<(T, String), WorkspaceError> {
+        self.register(actor)?;
+        let state = self.doc(doc_id)?.encode_state();
+        let candidate = Document::new();
+        candidate.apply_update(&state).map_err(|error| {
+            WorkspaceError::NotFound(format!("could not clone document state: {error}"))
+        })?;
+        let value = operation(&candidate)?;
+        let version = self.commit_candidate(doc_id, candidate, actor, context)?;
+        Ok((value, version))
+    }
+
+    fn commit_candidate(
+        &mut self,
+        doc_id: &str,
+        candidate: Document,
+        actor: &ActorRef,
+        context: &MutationContext,
     ) -> Result<String, WorkspaceError> {
-        let doc = self.docs.get(doc_id).expect("document is loaded");
-        let delta = doc.diff_since(before);
-        let tree = normalize(&doc.read());
-        let state = doc.encode_state();
-        let state_vector = doc.state_vector();
-
-        let seq = self.store.append_update(
-            doc_id,
-            &delta,
-            &actor.id,
-            actor.origin(),
-            actor.session_id.as_deref(),
-        )?;
-        self.pending
-            .push((doc_id.to_string(), delta.clone(), actor.clone()));
-
-        // Before reindexing, while the actor is still in hand: which blocks
-        // this commit changed, and who to credit for them.
-        self.attribute(doc_id, actor, now_ms())?;
-
+        let current = self.docs.get(doc_id).expect("document is loaded");
+        let delta = candidate.diff_since(&current.state_vector());
+        let tree = normalize(&candidate.read());
+        let snapshots = block_snapshots(&candidate, &tree)?;
+        let event_id = self.store.next_update_seq()?;
+        let source = context.source(SourceId(event_id as u64));
+        let lineage = self
+            .lineages
+            .get(doc_id)
+            .expect("document hydration installs lineage")
+            .reconcile(snapshots, source.clone())?;
+        let spans = spans_to_store(lineage.spans())?;
+        let current_prints = Self::fingerprints(&candidate);
+        let previous_prints = self.prints.get(doc_id).expect("document is loaded");
+        let touched_blocks = current_prints
+            .iter()
+            .filter(|(block_id, print)| previous_prints.get(*block_id) != Some(*print))
+            .map(|(block_id, _)| block_id.clone())
+            .collect::<Vec<_>>();
+        let current_blocks = current_prints.keys().cloned().collect::<Vec<_>>();
+        let at = now_ms();
+        let action = if current.deleted_at() == candidate.deleted_at() {
+            "edit"
+        } else if candidate.deleted_at().is_some() {
+            "trash"
+        } else {
+            "restore"
+        };
+        let event = event_input(event_id, actor, &source, action, at);
         let (markdown, _) = to_markdown_with_spans(&tree);
-        // Reindexed on every mutation, not on snapshot as M1.4 first said.
-        // Serializing a document and writing two rows is cheap; agents reading
-        // a stale index is not, and search is how they avoid reading every
-        // document.
-        self.store
-            .reindex(doc_id, &derive_title(&tree), &markdown)?;
+        let title = derive_title(&tree);
+        self.store.commit_lineage_update(LineageUpdate {
+            doc_id,
+            expected_seq: event_id,
+            payload: &delta,
+            actor_id: &actor.id,
+            origin: actor.origin(),
+            session_id: actor.session_id.as_deref(),
+            title: &title,
+            markdown: &markdown,
+            deleted_at: candidate.deleted_at(),
+            touched_blocks: &touched_blocks,
+            current_blocks: &current_blocks,
+            event,
+            spans: &spans,
+        })?;
 
+        let state = candidate.encode_state();
+        let state_vector = candidate.state_vector();
+        self.docs.insert(doc_id.to_string(), candidate);
+        self.prints.insert(doc_id.to_string(), current_prints);
+        self.lineages.insert(doc_id.to_string(), lineage);
+        self.pending
+            .push((doc_id.to_string(), delta, actor.clone()));
         if self.store.updates_since_snapshot(doc_id)? >= SNAPSHOT_EVERY {
-            self.store
-                .write_snapshot(doc_id, seq, &state, &state_vector)?;
+            let _ = self
+                .store
+                .write_snapshot(doc_id, event_id, &state, &state_vector);
         }
         Ok(encode_version(&state_vector))
     }
+}
+
+fn default_context(actor: &ActorRef) -> MutationContext {
+    if actor.kind == "agent" {
+        MutationContext::mcp(actor.display_name.clone())
+    } else {
+        MutationContext::entered()
+    }
+}
+
+fn event_input<'a>(
+    event_id: i64,
+    actor: &'a ActorRef,
+    source: &'a SourceDescriptor,
+    action: &'a str,
+    created_at: i64,
+) -> ProvenanceEventInput<'a> {
+    ProvenanceEventInput {
+        event_id,
+        actor_id: Some(&actor.id),
+        action,
+        group_key: &source.group_key,
+        source_label: &source.label,
+        ingress: source.ingress.as_str(),
+        assurance: source.assurance.as_str(),
+        alignment: source.alignment.as_str(),
+        session_id: actor.session_id.as_deref(),
+        created_at,
+    }
+}
+
+fn spans_to_store(spans: &[LiveLineageSpan]) -> Result<Vec<LineageSpanRow>, WorkspaceError> {
+    spans
+        .iter()
+        .map(|span| {
+            Ok(LineageSpanRow {
+                block_id: span.location.block_id.clone(),
+                node_path: serde_json::to_string(&span.location.path).map_err(|error| {
+                    WorkspaceError::NotFound(format!("could not encode lineage path: {error}"))
+                })?,
+                start_utf16: i64::from(span.location.from_utf16),
+                end_utf16: i64::from(span.location.to_utf16),
+                source_event_id: i64::try_from(span.source_id.0).map_err(|_| {
+                    WorkspaceError::NotFound("lineage source id exceeds SQLite range".into())
+                })?,
+            })
+        })
+        .collect()
+}
+
+fn span_from_row(row: LineageSpanRow) -> Result<LiveLineageSpan, WorkspaceError> {
+    Ok(LiveLineageSpan {
+        location: TextLocation {
+            block_id: row.block_id,
+            path: serde_json::from_str(&row.node_path).map_err(|error| {
+                WorkspaceError::NotFound(format!("invalid stored lineage path: {error}"))
+            })?,
+            from_utf16: u32::try_from(row.start_utf16)
+                .map_err(|_| WorkspaceError::NotFound("invalid stored lineage start".into()))?,
+            to_utf16: u32::try_from(row.end_utf16)
+                .map_err(|_| WorkspaceError::NotFound("invalid stored lineage end".into()))?,
+        },
+        source_id: SourceId(
+            u64::try_from(row.source_event_id)
+                .map_err(|_| WorkspaceError::NotFound("invalid stored lineage source".into()))?,
+        ),
+    })
+}
+
+fn source_from_row(
+    row: ProvenanceEventRow,
+) -> Result<(SourceId, SourceDescriptor), WorkspaceError> {
+    let id = SourceId(
+        u64::try_from(row.event_id)
+            .map_err(|_| WorkspaceError::NotFound("invalid provenance event id".into()))?,
+    );
+    let ingress = Ingress::parse(&row.ingress)
+        .ok_or_else(|| WorkspaceError::NotFound("invalid provenance ingress".into()))?;
+    let assurance = Assurance::parse(&row.assurance)
+        .ok_or_else(|| WorkspaceError::NotFound("invalid provenance assurance".into()))?;
+    let alignment = Alignment::parse(&row.alignment)
+        .ok_or_else(|| WorkspaceError::NotFound("invalid provenance alignment".into()))?;
+    Ok((
+        id,
+        SourceDescriptor::new(
+            id,
+            row.group_key,
+            row.source_label,
+            ingress,
+            assurance,
+            alignment,
+        ),
+    ))
 }
 
 fn parse_blocks(markdown: &str) -> Result<Vec<Node>, WorkspaceError> {
