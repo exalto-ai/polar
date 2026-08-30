@@ -10,6 +10,7 @@ import type { Editor } from "@tiptap/core";
 import { installAiSupport } from "./ai-support";
 import { createEditor } from "./editor";
 import { EditorApi } from "./editor-api";
+import { installCurrentSources } from "./current-sources";
 import {
   exportMarkdownDocument,
   importMarkdownDocument,
@@ -86,6 +87,7 @@ function reason(error: unknown): string {
 }
 
 const aiSupport = installAiSupport(document, { onNotice: notify });
+const currentSources = installCurrentSources(document, (docId) => mcp.documentLineage(docId));
 
 /**
  * Agents that have written recently.
@@ -308,6 +310,7 @@ async function openDocument(docId: string): Promise<boolean> {
   open = { doc, awareness, provider, editor, rails };
   openDocId = docId;
   aiSupport.setCurrentDocument({ id: docId, title: deriveTitle(editor) });
+  currentSources.setDocument(docId);
 
   // Exposed in development so the editor can be driven directly. Synthetic
   // key events do not reach ProseMirror's input handling reliably, which makes
@@ -318,6 +321,7 @@ async function openDocument(docId: string): Promise<boolean> {
 
   editor.on("update", () => refreshTitle(editor));
   editor.on("update", scheduleProvenance);
+  editor.on("update", currentSources.scheduleRefresh);
   awareness.on("change", renderPeers);
   refreshTitle(editor);
   activeAgents.clear();
