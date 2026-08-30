@@ -1,16 +1,18 @@
 import { writeClipboardText } from "./clipboard";
 import type { ProProviderBridge } from "./pro-provider-bridge";
+import type { ProChatBridge } from "./pro-chat-bridge";
+import { installProChat, type ProChatDocument } from "./pro-chat";
 import { installProProvider } from "./pro-provider";
 import {
   installReviewerConnections,
   type ReviewerApi,
-  type ReviewerDocumentContext,
 } from "./reviewer-connections";
 
 type AiSupportOptions = {
   copyText?: (text: string) => Promise<void>;
   reviewerApi?: ReviewerApi | null;
   providerBridge?: ProProviderBridge | null;
+  chatBridge?: ProChatBridge | null;
   onNotice?: (message: string, kind?: "info" | "error") => void;
 };
 
@@ -18,7 +20,7 @@ export type AiSupportController = {
   isOpen(): boolean;
   setConnectionCommand(command: string): void;
   setReviewerApi(api: ReviewerApi | null): void;
-  setCurrentDocument(context: ReviewerDocumentContext | null): void;
+  setCurrentDocument(context: ProChatDocument | null): void;
   open(): void;
   close(): void;
   destroy(): void;
@@ -48,6 +50,9 @@ export function installAiSupport(
     copyText,
     onNotice: options.onNotice,
   });
+  const chat = root.querySelector("#pro-chat")
+    ? installProChat(root, { bridge: options.chatBridge })
+    : null;
   const providers = root.querySelector("#provider-settings")
     ? installProProvider(root, {
         bridge: options.providerBridge,
@@ -77,6 +82,7 @@ export function installAiSupport(
     const open = !sidebar.hidden;
     toggle.setAttribute("aria-expanded", String(open));
     reviewers.setOpen(open);
+    chat?.setActive(open);
     providers?.setActive(open);
   }
 
@@ -108,12 +114,16 @@ export function installAiSupport(
     isOpen: () => !sidebar.hidden,
     setConnectionCommand: reviewers.setExecutable,
     setReviewerApi: reviewers.setApi,
-    setCurrentDocument: reviewers.setDocument,
+    setCurrentDocument(context) {
+      reviewers.setDocument(context);
+      chat?.setDocument(context);
+    },
     open,
     close,
     destroy() {
       for (const dispose of disposers.splice(0)) dispose();
       reviewers.destroy();
+      chat?.destroy();
       providers?.destroy();
     },
   };

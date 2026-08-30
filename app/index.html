@@ -43,6 +43,37 @@
           </div>
           <button class="icon-button" id="ai-sidebar-close" type="button" aria-label="Close AI support">×</button>
         </header>
+        <section class="pro-chat" id="pro-chat" aria-labelledby="pro-chat-title">
+          <div class="pro-chat-heading">
+            <div>
+              <span class="eyebrow">Built-in chat</span>
+              <h3 id="pro-chat-title">Ask about this document</h3>
+            </div>
+            <button class="text-button" id="pro-chat-new" type="button" hidden>New chat</button>
+          </div>
+          <p class="ai-sidebar-note" id="pro-chat-document">Open a document to start a chat.</p>
+          <div class="pro-chat-selectors">
+            <label>Provider
+              <select id="pro-chat-provider">
+                <option value="">Choose…</option>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+              </select>
+            </label>
+            <label>Model
+              <select id="pro-chat-model" disabled></select>
+            </label>
+          </div>
+          <p class="reviewer-error" id="pro-chat-error" role="alert" hidden></p>
+          <button class="text-button" id="pro-chat-retry" type="button" hidden>Try again</button>
+          <p class="ai-sidebar-note" id="pro-chat-empty">Choose a provider to begin. This chat is kept only in this window.</p>
+          <ol class="pro-chat-messages" id="pro-chat-messages" aria-live="polite" hidden></ol>
+          <form id="pro-chat-form">
+            <label class="pro-chat-consent"><input id="pro-chat-consent" type="checkbox" /> Share the current document and this chat with the selected provider.</label>
+            <textarea id="pro-chat-input" maxlength="16384" rows="3" placeholder="Ask about the current document…"></textarea>
+            <button class="ghost" id="pro-chat-send" type="submit" disabled>Send</button>
+          </form>
+        </section>
         <section class="current-sources" aria-labelledby="current-sources-title">
           <span class="eyebrow">Current text</span>
           <h3 id="current-sources-title">Recorded sources</h3>
