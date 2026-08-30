@@ -646,7 +646,7 @@ list_documents(query?, limit?)   -> [{doc_id, title, updated_at, word_count}]
 read_document(doc_id)            -> {markdown, version, blocks:[{block_id,type,line_start,line_end}]}
 search(query, limit?)            -> [{doc_id, block_id, title, snippet}]
 
-create_document(title?)          -> {doc_id, version}
+create_document(title?, initial_markdown?) -> {doc_id, version}
 replace_block(doc_id, block_id, markdown, version)
 insert_blocks(doc_id, after, markdown, version)   # after = block_id | "start" | "end"
 delete_block(doc_id, block_id, version)
@@ -760,14 +760,30 @@ adjacency is why both belong to the same milestone.
 
 ## M2.5 — The window
 
-Single window, no sidebar. ⌘K opens a switcher backed by the daemon's FTS index — the same
-`search` the agents use, so there is one search implementation rather than two.
+Document-scoped windows, no sidebar. ⌘K opens a switcher backed by the daemon's FTS index,
+the same `search` the agents use, so there is one search implementation rather than two.
 
 System sans throughout, sized and spaced for long-form writing. The editor and window use
 the fixed deep-blue `#0c1622` ground shared with the app icon. A compact, centered toolbar
-provides local zoom plus persistent block style, font size, bold, italic, and link commands.
-Markdown input rules give Bear's typing feel (`## ` → heading) without markdown storage
-(AD-3).
+provides New, Import Markdown, Export Markdown, local zoom, persistent block style, font
+size, bold, italic, and link commands. Clicking linked text opens an action card with
+explicit open, copy, edit, and remove commands instead of navigating immediately. ⌘N
+creates a blank document in its own window, visibly cascaded from and leaving the current
+editor connected. The Connections action follows the same separate-document behavior. A
+window can still open an existing document through the switcher. ⌘W closes the window;
+export remains an explicit action rather than an exit prompt.
+
+The database and CRDT remain authoritative. Import reads a Markdown snapshot into one new
+document, atomically creating its initial CRDT state. Export projects the current editor
+tree through Rust's canonical Markdown serializer, so it cannot race a WebSocket update or
+drift from the agent-facing format. Every export chooses a destination and writes a one-time
+copy; it never establishes a mirrored file or an external source of truth. Paths are
+selected and used only inside native Rust commands. Markdown input rules give Bear's typing
+feel (`## ` → heading) without markdown storage (AD-3).
+
+**Cost:** every import creates a new document and every export asks for a destination.
+Closing does not offer export because the CRDT store is authoritative and a Markdown copy
+must not be mistaken for a mirrored working file.
 
 **Cost:** the editor deliberately does not follow the system light or dark appearance. A future
 theme must revisit the editor and app-icon relationship rather than tinting either independently.

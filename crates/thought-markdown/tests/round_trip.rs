@@ -175,6 +175,28 @@ fn title_and_h1_remain_distinct_in_the_projection() {
 }
 
 #[test]
+fn link_destinations_and_titles_escape_without_changing_the_mark() {
+    let link = Mark::new("link")
+        .with_attr(
+            "href",
+            "https://example.com/a path_(v1)?q=<quoted>\\tail&literal=&copy;".into(),
+        )
+        .with_attr(
+            "title",
+            "Say \"hello\" from \\ here & keep &copy; literal".into(),
+        );
+    let document = Node::element(
+        "doc",
+        vec![Node::element(
+            "paragraph",
+            vec![Node::text("Open it", vec![link])],
+        )],
+    );
+
+    assert_eq!(round_trip(&document), normalize(&document));
+}
+
+#[test]
 fn font_size_parser_rejects_unsafe_css_and_respects_span_nesting() {
     for markdown in [
         "<span style=\"font-size: 7px\">plain</span>",

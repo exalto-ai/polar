@@ -88,6 +88,10 @@ pub struct DocParams {
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct CreateParams {
     pub title: String,
+    /// Optional Markdown used only while constructing a brand-new document.
+    /// Existing documents still require block-addressed edits.
+    #[serde(default)]
+    pub initial_markdown: Option<String>,
     #[serde(flatten)]
     pub caller: Caller,
 }
@@ -224,15 +228,22 @@ impl Thought {
         Ok(Json(serde_json::json!({ "hits": hits })))
     }
 
-    #[tool(description = "Create an empty document.")]
+    #[tool(
+        description = "Create a document. Pass `initial_markdown` only when importing a new \
+                       Markdown snapshot; edits to an existing document must remain block-addressed."
+    )]
     fn create_document(
         &self,
         Parameters(p): Parameters<CreateParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
-        let view = self
-            .workspace
-            .create_document(&p.title, &p.caller.actor())
-            .map_err(failed)?;
+        let actor = p.caller.actor();
+        let view = match p.initial_markdown {
+            Some(markdown) => self
+                .workspace
+                .create_document_from_markdown(&p.title, &markdown, &actor),
+            None => self.workspace.create_document(&p.title, &actor),
+        }
+        .map_err(failed)?;
         Ok(Json(serde_json::to_value(view).map_err(failed)?))
     }
 

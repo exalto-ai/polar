@@ -7,6 +7,7 @@ import {
   installToolbar,
   safeZoom,
   type BlockStyle,
+  type ToolbarOptions,
 } from "./toolbar";
 
 const editors: Editor[] = [];
@@ -39,6 +40,16 @@ function makeEditor(content: string | Record<string, unknown> = "<p>Hello</p>") 
 
 function selectText(editor: Editor) {
   editor.commands.setTextSelection({ from: 1, to: 6 });
+}
+
+function toolbarOptions(overrides: Partial<ToolbarOptions> = {}): ToolbarOptions {
+  return {
+    openLink: vi.fn(() => true),
+    newDocument: vi.fn(),
+    importMarkdown: vi.fn(),
+    exportMarkdown: vi.fn(),
+    ...overrides,
+  };
 }
 
 afterEach(() => {
@@ -106,13 +117,13 @@ describe("installed toolbar", () => {
     const editor = new Editor({ element: editorElement, extensions, content: "<p>Hello</p>" });
     editors.push(editor);
 
-    const cleanup = installToolbar(editor, editorElement, vi.fn());
-    const toolbar = shell.querySelector<HTMLElement>('[role="toolbar"]');
+    const cleanup = installToolbar(editor, editorElement, toolbarOptions());
+    const toolbar = shell.querySelector<HTMLElement>('[role="group"]');
 
     expect(toolbar).not.toBeNull();
     expect(shell.children[0]).toBe(toolbar);
     expect(shell.children[1]).toBe(editorElement);
-    expect(toolbar?.getAttribute("aria-label")).toBe("Text formatting");
+    expect(toolbar?.getAttribute("aria-label")).toBe("Editor tools");
 
     cleanup();
     expect(shell.querySelector('[role="toolbar"]')).toBeNull();
@@ -121,7 +132,7 @@ describe("installed toolbar", () => {
   it("restores and changes editor zoom", () => {
     window.localStorage.setItem("thought.zoom", "125");
     const { editor, element } = makeEditor();
-    const cleanup = installToolbar(editor, element, vi.fn());
+    const cleanup = installToolbar(editor, element, toolbarOptions());
     const zoom = document.querySelector<HTMLSelectElement>('[aria-label="Editor zoom"]')!;
 
     expect(zoom.value).toBe("125");
@@ -138,7 +149,7 @@ describe("installed toolbar", () => {
   it("applies block style and persistent font size from its selectors", () => {
     const { editor, element } = makeEditor();
     selectText(editor);
-    const cleanup = installToolbar(editor, element, vi.fn());
+    const cleanup = installToolbar(editor, element, toolbarOptions());
     const block = document.querySelector<HTMLSelectElement>('[aria-label="Text style"]')!;
     const size = document.querySelector<HTMLSelectElement>('[aria-label="Font size"]')!;
 
@@ -162,7 +173,7 @@ describe("installed toolbar", () => {
         '<h1><span style="font-size: 24px">Second</span></h1>',
     );
     editor.commands.selectAll();
-    const cleanup = installToolbar(editor, element, vi.fn());
+    const cleanup = installToolbar(editor, element, toolbarOptions());
     const block = document.querySelector<HTMLSelectElement>('[aria-label="Text style"]')!;
     const size = document.querySelector<HTMLSelectElement>('[aria-label="Font size"]')!;
 
@@ -195,7 +206,7 @@ describe("installed toolbar", () => {
   it("ignores unsupported collaborative font-size attributes without parsing selectors", () => {
     const { editor, element } = makeEditor();
     selectText(editor);
-    const cleanup = installToolbar(editor, element, vi.fn());
+    const cleanup = installToolbar(editor, element, toolbarOptions());
     const size = document.querySelector<HTMLSelectElement>('[aria-label="Font size"]')!;
     const untrusted = editor.schema.marks.fontSize.create({ size: '18px"]' });
 
@@ -209,7 +220,7 @@ describe("installed toolbar", () => {
   it("toggles bold and italic without losing the editor selection", () => {
     const { editor, element } = makeEditor();
     selectText(editor);
-    const cleanup = installToolbar(editor, element, vi.fn());
+    const cleanup = installToolbar(editor, element, toolbarOptions());
     const bold = document.querySelector<HTMLButtonElement>('[aria-label="Bold"]')!;
     const italic = document.querySelector<HTMLButtonElement>('[aria-label="Italic"]')!;
 
@@ -228,7 +239,7 @@ describe("installed toolbar", () => {
     const openLink = vi.fn(() => true);
     const { editor, element } = makeEditor();
     selectText(editor);
-    const cleanup = installToolbar(editor, element, openLink);
+    const cleanup = installToolbar(editor, element, toolbarOptions({ openLink }));
     const link = document.querySelector<HTMLButtonElement>(
       '[aria-label="Add or edit link"]',
     )!;
@@ -238,4 +249,20 @@ describe("installed toolbar", () => {
     expect(openLink).toHaveBeenCalledOnce();
     cleanup();
   });
+
+  it("routes new, import, and export file commands from icon buttons", () => {
+    const actions = toolbarOptions();
+    const { editor, element } = makeEditor();
+    const cleanup = installToolbar(editor, element, actions);
+
+    document.querySelector<HTMLButtonElement>('[aria-label="New document"]')!.click();
+    document.querySelector<HTMLButtonElement>('[aria-label="Import Markdown file"]')!.click();
+    document.querySelector<HTMLButtonElement>('[aria-label="Export Markdown copy"]')!.click();
+
+    expect(actions.newDocument).toHaveBeenCalledOnce();
+    expect(actions.importMarkdown).toHaveBeenCalledOnce();
+    expect(actions.exportMarkdown).toHaveBeenCalledOnce();
+    cleanup();
+  });
+
 });
