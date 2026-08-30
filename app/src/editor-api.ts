@@ -4,6 +4,7 @@ import type {
   ReviewerConnection,
   ReviewerInput,
 } from "./reviewer-connections";
+import type { SuggestionDecisionOutcome, SuggestionList } from "./suggestions";
 
 export class EditorApi implements ReviewerApi {
   private readonly baseUrl: string;
@@ -27,6 +28,33 @@ export class EditorApi implements ReviewerApi {
     return this.request("POST", `/editor/documents/${encodeURIComponent(docId)}/deletion`, {
       deleted,
     });
+  }
+
+  listSuggestions(docId: string): Promise<SuggestionList> {
+    return this.request(
+      "GET",
+      `/editor/documents/${encodeURIComponent(docId)}/suggestions`,
+    );
+  }
+
+  acceptSuggestion(
+    docId: string,
+    suggestionId: string,
+  ): Promise<SuggestionDecisionOutcome> {
+    return this.request(
+      "POST",
+      `/editor/documents/${encodeURIComponent(docId)}/suggestions/${encodeURIComponent(suggestionId)}/accept`,
+    );
+  }
+
+  rejectSuggestion(
+    docId: string,
+    suggestionId: string,
+  ): Promise<SuggestionDecisionOutcome> {
+    return this.request(
+      "POST",
+      `/editor/documents/${encodeURIComponent(docId)}/suggestions/${encodeURIComponent(suggestionId)}/reject`,
+    );
   }
 
   async listReviewerConnections(): Promise<ReviewerConnection[]> {
