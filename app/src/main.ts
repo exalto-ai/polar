@@ -211,6 +211,12 @@ function refreshTitle(editor: Editor) {
         if (!open.provider.isHydrated) throw new Error("This document is still opening.");
         return editor.getJSON();
       },
+      selectedText: () => {
+        if (open?.editor !== editor) throw new Error("This document is no longer open.");
+        const { from, to, empty } = editor.state.selection;
+        if (empty) return null;
+        return editor.state.doc.textBetween(from, to, "\n").trim() || null;
+      },
       suggestionPosition: () => {
         if (open?.editor !== editor) throw new Error("This document is no longer open.");
         return suggestionPositionAtSelection(editor, open.doc);

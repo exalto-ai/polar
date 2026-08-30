@@ -143,15 +143,19 @@
           </div>
 
           <form class="pro-chat-composer" id="pro-chat-composer">
+            <div class="pro-chat-focus-controls">
+              <button class="text-button" id="pro-chat-use-selection" type="button">Focus on selection</button>
+              <span class="pro-chat-focus-chip" id="pro-chat-focus-chip" hidden><span id="pro-chat-focus-preview"></span><button id="pro-chat-remove-selection" type="button" aria-label="Remove selected-text focus">×</button></span>
+            </div>
             <label class="sr-only" for="pro-chat-message">Message the selected AI provider</label>
             <textarea id="pro-chat-message" rows="3" maxlength="16384" placeholder="Write a message…" aria-describedby="pro-chat-sharing pro-chat-consent-copy pro-chat-message-issue" disabled></textarea>
             <p class="pro-chat-message-issue" id="pro-chat-message-issue" role="status" hidden></p>
             <p class="pro-chat-sharing" id="pro-chat-sharing">Your current document, including its title, formatting, and links, and this visible chat will be sent with your message.</p>
             <label class="pro-chat-consent" for="pro-chat-consent">
               <input id="pro-chat-consent" type="checkbox" disabled />
-              <span id="pro-chat-consent-copy">I agree to send this document’s title and contents, including formatting and links, and visible chat to my provider. API charges may apply.</span>
+              <span id="pro-chat-consent-copy">I agree to send this document’s title and contents, including formatting and links, any selection I explicitly add, and visible chat to my provider. API charges may apply.</span>
             </label>
-            <p class="pro-chat-billing-reminder" id="pro-chat-billing-reminder" hidden>Sends this document’s title and contents with each request. Uses your API key. Provider charges may apply.</p>
+            <p class="pro-chat-billing-reminder" id="pro-chat-billing-reminder" hidden>Sends this document’s title and contents with each request, plus any focus shown above. Uses your API key. Provider charges may apply.</p>
             <div class="pro-chat-composer-actions">
               <span class="pro-chat-shortcut">Enter to send · Shift Enter for a new line</span>
               <button class="primary-button compact" id="pro-chat-send" type="submit" disabled>Send</button>

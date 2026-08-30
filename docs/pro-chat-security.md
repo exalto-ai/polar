@@ -3,7 +3,7 @@
 **Status:** implementation complete on `codex/pro-chat-core`; packaged WKWebView acceptance remains
 open, updated 2026-08-27
 
-This Pro chat core pull request is stacked on PR #16, `codex/pro-provider-foundation`. The parent
+The Pro chat core is stacked on PR #16, `codex/pro-provider-foundation`. The parent
 pull request owns native key entry, Keychain storage, catalog access checks, replacement, and local
 removal. This pull request adds a chat surface that can use a configured OpenAI or Anthropic key
 with the current editor document as context. It does not add file attachments, direct document
@@ -23,7 +23,8 @@ conversation.
 Chat is not an editor command. A response appears only in the sidebar and cannot directly change
 the document. Every Send and Retry includes a fresh, bounded Markdown projection of the current
 editor document and its current title. The app does not add the internal document identifier or
-native save path. A selection and external files are not included. Literal paths, links, and other
+native save path. A selection is included only after the person explicitly captures it as visible
+plain-text focus; external files are not included. Literal paths, links, and other
 content written in the document remain part of its Markdown projection. Anything the person types
 or pastes into the chat composer is also sent.
 
@@ -138,7 +139,8 @@ exact accepted delta.
   HTTPS enforcement
 - `store: false` on every OpenAI Responses request and local replay for both providers
 - a fresh schema-valid, bounded current-document snapshot on every Send and Retry, with only the
-  title as metadata; the app adds no native save path or internal document identifier
+  title and any explicit plain-text focus as metadata; the app adds no native save path or internal
+  document identifier
 - no API credential read from secure storage or hidden reasoning in webview messages, transcripts,
   errors, logs, document state, or evidence artifacts; request-only document snapshots are not
   copied into dedicated transcript or provenance fields

@@ -91,5 +91,6 @@ provider exchange to the exact accepted change before presenting it as provider-
 
 Built-in chat is separate by document and provider. After explicit per-provider consent, each
 request sends the current document title and contents, including formatting and links, completed
-visible chat turns, and the new message. It sends no selected ranges or files. Its local transcript
+visible chat turns, and the new message. A person may explicitly add a plain-text snapshot of the
+current selection as focus; editor ranges and files are not sent. Its local transcript
 is not lineage or verified evidence, and clearing it does not rewrite document or reviewer history.

@@ -455,6 +455,22 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .pro-chat-error { color: var(--ink-soft); font-size: 10.5px; line-height: 1.45; }
 .pro-chat-error .text-button { display: block; margin-top: 5px; }
 .pro-chat-composer { flex: 0 0 auto; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--rule); }
+.pro-chat-focus-controls { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
+.pro-chat-focus-controls > .text-button { font-size: 10px; }
+.pro-chat-focus-chip {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+.pro-chat-focus-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pro-chat-focus-chip > button { padding: 0; border: 0; background: transparent; color: var(--ink-faint); }
+.pro-chat-turn-focus { display: block; margin-top: 5px; color: var(--ink-faint); font-size: 9px; }
 .pro-chat-composer textarea {
   width: 100%;
   min-height: 64px;
