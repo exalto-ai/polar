@@ -1,8 +1,12 @@
 use base64::Engine;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use thought_core::{BlockError, Document, Position};
+use thought_core::{
+    BlockError, Document, Position, SuggestionBlockPosition, SuggestionDecision, SuggestionPatch,
+    SuggestionProposer, SuggestionRecord, SuggestionRecordError, SuggestionState,
+};
 use thought_markdown::{from_markdown, to_markdown_with_spans};
 use thought_provenance::{
     Alignment, Assurance, CurrentSourceSummary, Ingress, LineageError, LineageState,
@@ -16,6 +20,10 @@ use thought_store::{
 
 use crate::lineage::{ProseMirrorRange, SnapshotError, block_snapshots, semantic_ranges};
 use crate::mutation::MutationContext;
+use crate::suggestions::{
+    DecisionOutcome, MAX_SUGGESTION_EXPLANATION_BYTES, MAX_SUGGESTION_REQUEST_ID_BYTES,
+    SuggestedChange, SuggestionError, SuggestionList, SuggestionOutcome,
+};
 
 /// The caller, as asserted by the MCP session. Not authenticated (AD-6) — this
 /// is identity so that attribution and per-run revert have something to key on.
@@ -101,6 +109,9 @@ pub struct DocumentView {
     pub title: String,
     pub markdown: String,
     pub version: String,
+    /// Stable across suggestion metadata updates; changes only when wording or
+    /// structure changes.
+    pub content_revision: String,
     pub blocks: Vec<BlockSpan>,
 }
 
@@ -185,6 +196,7 @@ pub enum WorkspaceError {
     Storage(thought_store::SqlError),
     Snapshot(SnapshotError),
     Lineage(LineageError),
+    Suggestion(SuggestionError),
 }
 
 impl std::fmt::Display for WorkspaceError {
@@ -203,6 +215,7 @@ impl std::fmt::Display for WorkspaceError {
             WorkspaceError::Storage(e) => write!(f, "storage: {e}"),
             WorkspaceError::Snapshot(e) => write!(f, "snapshot: {e}"),
             WorkspaceError::Lineage(e) => write!(f, "lineage: {e}"),
+            WorkspaceError::Suggestion(e) => write!(f, "{e}"),
         }
     }
 }
@@ -233,6 +246,17 @@ impl From<LineageError> for WorkspaceError {
     }
 }
 
+impl From<SuggestionError> for WorkspaceError {
+    fn from(error: SuggestionError) -> Self {
+        Self::Suggestion(error)
+    }
+}
+
+impl From<SuggestionRecordError> for WorkspaceError {
+    fn from(error: SuggestionRecordError) -> Self {
+        Self::Suggestion(SuggestionError::CorruptStored(error.to_string()))
+    }
+}
 /// Compact updates into a snapshot after this many, per AD-13.
 const SNAPSHOT_EVERY: i64 = 200;
 
@@ -469,6 +493,7 @@ impl Workspace {
             let tree = normalize(&doc.read());
             let refs = doc.blocks();
             let version = encode_version(&doc.state_vector());
+            let content_revision = content_revision(doc);
             let (markdown, spans) = to_markdown_with_spans(&tree);
             let blocks = refs
                 .iter()
@@ -485,7 +510,185 @@ impl Workspace {
                 title: derive_title(&tree),
                 markdown,
                 version,
+                content_revision,
                 blocks,
+            })
+        })
+    }
+
+    /// Record one normalized reviewer proposal in the document CRDT.
+    ///
+    /// `request_id` is the retry key. Reusing it for the same reviewer and
+    /// document returns the first proposal instead of creating another one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_suggestion(
+        &self,
+        doc_id: &str,
+        request_id: &str,
+        base_content_revision: &str,
+        change: &SuggestedChange,
+        explanation: Option<&str>,
+        reported_model: Option<&str>,
+        connection_id: &str,
+        actor: &ActorRef,
+        context: &MutationContext,
+    ) -> Result<SuggestionOutcome, WorkspaceError> {
+        validate_suggestion_request(request_id, explanation)?;
+        let suggestion_id = format!("{connection_id}:{request_id}");
+        self.with(|inner| {
+            let current = inner.doc(doc_id)?;
+            let actual_revision = content_revision(current);
+            if let Some(existing) = current.suggestion(&suggestion_id)? {
+                return Ok(SuggestionOutcome {
+                    suggestion: suggestion_for_revision(existing, &actual_revision),
+                    content_revision: actual_revision,
+                    replayed: true,
+                });
+            }
+            if base_content_revision != actual_revision {
+                return Err(SuggestionError::BaseRevisionMismatch {
+                    expected: base_content_revision.to_string(),
+                    actual: actual_revision,
+                }
+                .into());
+            }
+            let patch = normalize_suggested_change(current, change)?;
+            let suggestion = SuggestionRecord {
+                version: 1,
+                suggestion_id,
+                document_id: doc_id.to_string(),
+                request_id: request_id.to_string(),
+                proposer: SuggestionProposer {
+                    actor_id: actor.id.clone(),
+                    connection_id: connection_id.to_string(),
+                    label: actor.display_name.clone(),
+                    source_label: context.source_label().to_string(),
+                    reported_model: reported_model.map(str::to_string),
+                    session_id: actor.session_id.clone(),
+                },
+                base_content_revision: actual_revision.clone(),
+                patch,
+                explanation: explanation.map(str::to_string),
+                state: SuggestionState::Pending,
+                decision: None,
+                created_at: now_ms(),
+            };
+            let stored = suggestion.clone();
+            inner.mutate_metadata(doc_id, actor, |candidate| {
+                candidate.put_suggestion(&stored)?;
+                Ok(())
+            })?;
+            Ok(SuggestionOutcome {
+                suggestion,
+                content_revision: actual_revision,
+                replayed: false,
+            })
+        })
+    }
+
+    pub fn list_suggestions(&self, doc_id: &str) -> Result<SuggestionList, WorkspaceError> {
+        self.with(|inner| {
+            let doc = inner.doc(doc_id)?;
+            let revision = content_revision(doc);
+            let suggestions = doc
+                .suggestions()?
+                .into_iter()
+                .map(|suggestion| {
+                    if suggestion.document_id != doc_id {
+                        return Err(SuggestionError::CorruptStored(format!(
+                            "suggestion `{}` belongs to `{}`",
+                            suggestion.suggestion_id, suggestion.document_id
+                        ))
+                        .into());
+                    }
+                    Ok(suggestion_for_revision(suggestion, &revision))
+                })
+                .collect::<Result<Vec<_>, WorkspaceError>>()?;
+            Ok(SuggestionList {
+                content_revision: revision,
+                suggestions,
+            })
+        })
+    }
+
+    pub fn accept_suggestion(
+        &self,
+        doc_id: &str,
+        suggestion_id: &str,
+        decided_by: &ActorRef,
+    ) -> Result<DecisionOutcome, WorkspaceError> {
+        self.with(|inner| {
+            let current = inner.doc(doc_id)?;
+            let suggestion = current
+                .suggestion(suggestion_id)?
+                .ok_or_else(|| SuggestionError::NotFound(suggestion_id.to_string()))?;
+            validate_pending_suggestion(&suggestion, doc_id)?;
+            let current_revision = content_revision(current);
+            if suggestion.base_content_revision != current_revision {
+                return Err(SuggestionError::BaseRevisionMismatch {
+                    expected: suggestion.base_content_revision,
+                    actual: current_revision,
+                }
+                .into());
+            }
+
+            let proposer = ActorRef::reviewer(
+                &suggestion.proposer.connection_id,
+                &suggestion.proposer.label,
+                suggestion.proposer.reported_model.as_deref(),
+                suggestion.proposer.session_id.as_deref(),
+            );
+            let context = MutationContext::suggestion(
+                format!("Suggestion from {}", suggestion.proposer.label),
+                &suggestion.proposer.connection_id,
+            );
+            let mut accepted = suggestion;
+            let patch = accepted.patch.clone();
+            let decision = SuggestionDecision {
+                actor_id: decided_by.id.clone(),
+                actor_label: decided_by.display_name.clone(),
+                decided_at: now_ms(),
+            };
+            let (accepted, _) = inner.mutate(doc_id, &proposer, &context, |candidate| {
+                apply_suggestion_patch(candidate, &patch)?;
+                accepted.state = SuggestionState::Accepted;
+                accepted.decision = Some(decision);
+                candidate.put_suggestion(&accepted)?;
+                Ok(accepted)
+            })?;
+            Ok(DecisionOutcome {
+                content_revision: content_revision(inner.doc(doc_id)?),
+                suggestion: accepted,
+            })
+        })
+    }
+
+    pub fn reject_suggestion(
+        &self,
+        doc_id: &str,
+        suggestion_id: &str,
+        decided_by: &ActorRef,
+    ) -> Result<DecisionOutcome, WorkspaceError> {
+        self.with(|inner| {
+            let mut suggestion = inner
+                .doc(doc_id)?
+                .suggestion(suggestion_id)?
+                .ok_or_else(|| SuggestionError::NotFound(suggestion_id.to_string()))?;
+            validate_pending_suggestion(&suggestion, doc_id)?;
+            suggestion.state = SuggestionState::Rejected;
+            suggestion.decision = Some(SuggestionDecision {
+                actor_id: decided_by.id.clone(),
+                actor_label: decided_by.display_name.clone(),
+                decided_at: now_ms(),
+            });
+            let stored = suggestion.clone();
+            inner.mutate_metadata(doc_id, decided_by, |candidate| {
+                candidate.put_suggestion(&stored)?;
+                Ok(())
+            })?;
+            Ok(DecisionOutcome {
+                content_revision: content_revision(inner.doc(doc_id)?),
+                suggestion,
             })
         })
     }
@@ -1164,6 +1367,61 @@ impl Inner {
         Ok((value, version))
     }
 
+    fn mutate_metadata<T>(
+        &mut self,
+        doc_id: &str,
+        actor: &ActorRef,
+        operation: impl FnOnce(&Document) -> Result<T, WorkspaceError>,
+    ) -> Result<(T, String), WorkspaceError> {
+        self.register(actor)?;
+        let state = self.doc(doc_id)?.encode_state();
+        let candidate = Document::new();
+        candidate.apply_update(&state).map_err(|error| {
+            WorkspaceError::NotFound(format!("could not clone document state: {error}"))
+        })?;
+        let value = operation(&candidate)?;
+        if candidate.encode_state() == state {
+            return Ok((value, encode_version(&candidate.state_vector())));
+        }
+        let version = self.commit_metadata_candidate(doc_id, candidate, actor)?;
+        Ok((value, version))
+    }
+
+    fn commit_metadata_candidate(
+        &mut self,
+        doc_id: &str,
+        candidate: Document,
+        actor: &ActorRef,
+    ) -> Result<String, WorkspaceError> {
+        let current = self.docs.get(doc_id).expect("document is loaded");
+        if normalize(&candidate.read()) != normalize(&current.read())
+            || candidate.deleted_at() != current.deleted_at()
+        {
+            return Err(WorkspaceError::NotFound(
+                "metadata update attempted to change document content".into(),
+            ));
+        }
+        let delta = candidate.diff_since(&current.state_vector());
+        let sequence = self.store.commit_metadata_update(
+            doc_id,
+            &delta,
+            &actor.id,
+            actor.origin(),
+            actor.session_id.as_deref(),
+        )?;
+        let state = candidate.encode_state();
+        let state_vector = candidate.state_vector();
+        self.docs.insert(doc_id.to_string(), candidate);
+        self.pending
+            .push((doc_id.to_string(), delta, actor.clone()));
+        if self.store.updates_since_snapshot(doc_id)? >= SNAPSHOT_EVERY {
+            let _ = self
+                .store
+                .write_snapshot(doc_id, sequence, &state, &state_vector);
+        }
+        Ok(encode_version(&state_vector))
+    }
+
     fn commit_candidate(
         &mut self,
         doc_id: &str,
@@ -1348,6 +1606,205 @@ fn parse_blocks(markdown: &str) -> Result<Vec<Node>, WorkspaceError> {
         ));
     }
     Ok(parsed.content)
+}
+
+fn validate_suggestion_request(
+    request_id: &str,
+    explanation: Option<&str>,
+) -> Result<(), SuggestionError> {
+    if request_id.is_empty()
+        || request_id.len() > MAX_SUGGESTION_REQUEST_ID_BYTES
+        || !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(SuggestionError::InvalidInput(format!(
+            "request_id must contain 1..={MAX_SUGGESTION_REQUEST_ID_BYTES} ASCII letters, digits, '.', '_' or '-'"
+        )));
+    }
+    if explanation.is_some_and(|value| value.len() > MAX_SUGGESTION_EXPLANATION_BYTES) {
+        return Err(SuggestionError::InvalidInput(format!(
+            "explanation exceeds {MAX_SUGGESTION_EXPLANATION_BYTES} UTF-8 bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_suggested_change(
+    doc: &Document,
+    change: &SuggestedChange,
+) -> Result<SuggestionPatch, WorkspaceError> {
+    match change {
+        SuggestedChange::ReplaceBlock { block_id, markdown } => {
+            ensure_block(doc, block_id)?;
+            Ok(SuggestionPatch::ReplaceBlock {
+                block_id: block_id.clone(),
+                nodes: non_empty_blocks(markdown)?,
+            })
+        }
+        SuggestedChange::InsertBlocks { after, markdown } => {
+            let after = match after.as_deref() {
+                None | Some("end") => SuggestionBlockPosition::End,
+                Some("start") => SuggestionBlockPosition::Start,
+                Some(block_id) => {
+                    ensure_block(doc, block_id)?;
+                    SuggestionBlockPosition::Block {
+                        block_id: block_id.to_string(),
+                    }
+                }
+            };
+            Ok(SuggestionPatch::InsertBlocks {
+                after,
+                nodes: non_empty_blocks(markdown)?,
+            })
+        }
+        SuggestedChange::ReplaceText {
+            block_id,
+            find,
+            replace,
+            occurrence,
+        } => {
+            if find.is_empty() {
+                return Err(
+                    SuggestionError::InvalidInput("`find` must not be empty".into()).into(),
+                );
+            }
+            let current = block_markdown(doc, block_id)?;
+            let updated = replace_occurrence(&current, find, replace, *occurrence)?;
+            Ok(SuggestionPatch::ReplaceText {
+                block_id: block_id.clone(),
+                nodes: non_empty_blocks(&updated)?,
+            })
+        }
+        SuggestedChange::DeleteBlock { block_id } => {
+            ensure_block(doc, block_id)?;
+            Ok(SuggestionPatch::DeleteBlock {
+                block_id: block_id.clone(),
+            })
+        }
+    }
+}
+
+fn non_empty_blocks(markdown: &str) -> Result<Vec<Node>, WorkspaceError> {
+    let nodes = parse_blocks(markdown)?;
+    if nodes.is_empty() {
+        return Err(SuggestionError::InvalidInput("change produced no blocks".into()).into());
+    }
+    Ok(nodes)
+}
+
+fn ensure_block(doc: &Document, block_id: &str) -> Result<(), WorkspaceError> {
+    doc.block(block_id)
+        .map(|_| ())
+        .ok_or_else(|| BlockError::NoSuchBlock(block_id.to_string()).into())
+}
+
+fn block_markdown(doc: &Document, block_id: &str) -> Result<String, WorkspaceError> {
+    let node = doc
+        .block(block_id)
+        .ok_or_else(|| BlockError::NoSuchBlock(block_id.to_string()))?;
+    Ok(to_markdown_with_spans(&Node::element("doc", vec![normalize(&node)])).0)
+}
+
+fn replace_occurrence(
+    current: &str,
+    find: &str,
+    replace: &str,
+    occurrence: Option<usize>,
+) -> Result<String, WorkspaceError> {
+    let hits = current.matches(find).count();
+    if hits == 0 {
+        return Err(WorkspaceError::NotFound(format!(
+            "`{find}` does not appear in the target block"
+        )));
+    }
+    let Some(target) = occurrence else {
+        return Ok(current.replace(find, replace));
+    };
+    if target == 0 || target > hits {
+        return Err(WorkspaceError::NotFound(format!(
+            "occurrence {target} of `{find}`; the block has {hits}"
+        )));
+    }
+    let mut output = String::with_capacity(current.len());
+    let mut rest = current;
+    for index in 1..=target {
+        let at = rest.find(find).expect("counted above");
+        output.push_str(&rest[..at]);
+        output.push_str(if index == target { replace } else { find });
+        rest = &rest[at + find.len()..];
+    }
+    output.push_str(rest);
+    Ok(output)
+}
+
+fn apply_suggestion_patch(doc: &Document, patch: &SuggestionPatch) -> Result<(), WorkspaceError> {
+    match patch {
+        SuggestionPatch::ReplaceBlock { block_id, nodes }
+        | SuggestionPatch::ReplaceText { block_id, nodes } => {
+            let Some(first) = nodes.first() else {
+                return Err(
+                    SuggestionError::CorruptStored("replacement has no blocks".into()).into(),
+                );
+            };
+            let replaced = doc.replace_block(block_id, first)?;
+            if nodes.len() > 1 {
+                doc.insert_blocks(&Position::After(replaced.block_id), &nodes[1..])?;
+            }
+        }
+        SuggestionPatch::InsertBlocks { after, nodes } => {
+            let position = match after {
+                SuggestionBlockPosition::Start => Position::Start,
+                SuggestionBlockPosition::End => Position::End,
+                SuggestionBlockPosition::Block { block_id } => Position::After(block_id.clone()),
+            };
+            doc.insert_blocks(&position, nodes)?;
+        }
+        SuggestionPatch::DeleteBlock { block_id } => doc.delete_block(block_id)?,
+    }
+    Ok(())
+}
+
+fn validate_pending_suggestion(
+    suggestion: &SuggestionRecord,
+    doc_id: &str,
+) -> Result<(), WorkspaceError> {
+    if suggestion.document_id != doc_id {
+        return Err(SuggestionError::CorruptStored(format!(
+            "suggestion `{}` belongs to `{}`",
+            suggestion.suggestion_id, suggestion.document_id
+        ))
+        .into());
+    }
+    if suggestion.state != SuggestionState::Pending {
+        return Err(SuggestionError::AlreadyDecided(suggestion.suggestion_id.clone()).into());
+    }
+    Ok(())
+}
+
+fn suggestion_for_revision(mut suggestion: SuggestionRecord, revision: &str) -> SuggestionRecord {
+    if suggestion.state == SuggestionState::Pending && suggestion.base_content_revision != revision
+    {
+        suggestion.state = SuggestionState::Stale;
+    }
+    suggestion
+}
+
+fn content_revision(doc: &Document) -> String {
+    let tree = normalize(&doc.read());
+    let encoded = serde_json::to_vec(&tree).expect("document nodes always encode as JSON");
+    let mut digest = Sha256::new();
+    digest.update(b"thought/content/v1\0");
+    digest.update((encoded.len() as u64).to_be_bytes());
+    digest.update(encoded);
+    // A patch addresses stable block ids, so replacing a block with identical
+    // text is still a base change. Hash ids in document order as well as the
+    // normalized tree.
+    for block in doc.blocks() {
+        digest.update((block.block_id.len() as u64).to_be_bytes());
+        digest.update(block.block_id.as_bytes());
+    }
+    base64::engine::general_purpose::STANDARD.encode(digest.finalize())
 }
 
 /// A stale `version` **warns and proceeds**.

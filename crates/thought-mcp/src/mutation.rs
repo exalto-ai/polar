@@ -76,6 +76,16 @@ impl MutationContext {
         }
     }
 
+    pub fn suggestion(label: impl Into<String>, connection_id: &str) -> Self {
+        Self {
+            ingress: Ingress::Suggestion,
+            assurance: Assurance::Reported,
+            alignment: Alignment::Inferred,
+            group_key: format!("suggestion:connection:{connection_id}"),
+            source_label: label.into(),
+        }
+    }
+
     fn local(ingress: Ingress, group_key: &str, label: &str, alignment: Alignment) -> Self {
         Self {
             ingress,
