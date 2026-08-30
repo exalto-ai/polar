@@ -39,7 +39,7 @@
         <header class="ai-sidebar-header">
           <div>
             <span class="eyebrow">AI support</span>
-            <h2 id="ai-support-title">Reviewers</h2>
+            <h2 id="ai-support-title">Connections</h2>
           </div>
           <button class="icon-button" id="ai-sidebar-close" type="button" aria-label="Close AI support">×</button>
         </header>
@@ -50,6 +50,28 @@
           <button class="text-button" id="current-source-retry" type="button" hidden>Try again</button>
           <ul id="current-source-list" hidden></ul>
           <p class="ai-sidebar-note" id="current-source-note" hidden>These labels describe how surviving text entered this document. They do not prove who composed pasted, imported, or tool-reported text.</p>
+        </section>
+        <section class="provider-settings" id="provider-settings" aria-labelledby="provider-settings-title">
+          <span class="eyebrow">Built-in chat</span>
+          <h3 id="provider-settings-title">Provider keys</h3>
+          <p class="ai-sidebar-note">Keys stay in your Mac login Keychain. Adding one sends no document text.</p>
+          <p class="reviewer-error" id="provider-error" role="alert" hidden></p>
+          <ul class="provider-list">
+            <li data-provider="openai">
+              <div><strong>OpenAI</strong><span data-provider-status>No key</span></div>
+              <div class="reviewer-actions">
+                <button class="ghost" type="button" data-provider-configure>Add key</button>
+                <button type="button" data-provider-remove hidden>Remove</button>
+              </div>
+            </li>
+            <li data-provider="anthropic">
+              <div><strong>Anthropic</strong><span data-provider-status>No key</span></div>
+              <div class="reviewer-actions">
+                <button class="ghost" type="button" data-provider-configure>Add key</button>
+                <button type="button" data-provider-remove hidden>Remove</button>
+              </div>
+            </li>
+          </ul>
         </section>
         <p class="ai-sidebar-note">Give each AI reviewer only the documents it needs.</p>
         <div class="reviewer-heading">

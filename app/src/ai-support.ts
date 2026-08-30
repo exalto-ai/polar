@@ -1,4 +1,6 @@
 import { writeClipboardText } from "./clipboard";
+import type { ProProviderBridge } from "./pro-provider-bridge";
+import { installProProvider } from "./pro-provider";
 import {
   installReviewerConnections,
   type ReviewerApi,
@@ -8,6 +10,7 @@ import {
 type AiSupportOptions = {
   copyText?: (text: string) => Promise<void>;
   reviewerApi?: ReviewerApi | null;
+  providerBridge?: ProProviderBridge | null;
   onNotice?: (message: string, kind?: "info" | "error") => void;
 };
 
@@ -45,6 +48,12 @@ export function installAiSupport(
     copyText,
     onNotice: options.onNotice,
   });
+  const providers = root.querySelector("#provider-settings")
+    ? installProProvider(root, {
+        bridge: options.providerBridge,
+        onNotice: options.onNotice,
+      })
+    : null;
   function listen<K extends keyof DocumentEventMap>(
     target: Document,
     event: K,
@@ -68,6 +77,7 @@ export function installAiSupport(
     const open = !sidebar.hidden;
     toggle.setAttribute("aria-expanded", String(open));
     reviewers.setOpen(open);
+    providers?.setActive(open);
   }
 
   function open() {
@@ -104,6 +114,7 @@ export function installAiSupport(
     destroy() {
       for (const dispose of disposers.splice(0)) dispose();
       reviewers.destroy();
+      providers?.destroy();
     },
   };
 }
