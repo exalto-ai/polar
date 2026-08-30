@@ -426,8 +426,8 @@ surface boundary, not a second authentication system: the existing bearer protec
 
 There is deliberately no receipt ledger, hash chain, replay engine, cached lineage state, or
 format/structure delta model. Those would duplicate the CRDT and imply verification the local
-daemon cannot provide. Evidence and verified traces may refer to source events later without
-changing this storage model.
+daemon cannot provide. Provider and model labels remain Reported unless a separate protocol can
+bind stronger evidence to the exact accepted change.
 
 `document_lineage` includes a SHA-256 revision of the normalized Markdown projection represented
 by the response. The native window computes the same revision from its visible editor tree and
@@ -447,8 +447,8 @@ the login Keychain. The webview never receives key text. Redirects are rejected,
 are bounded, and raw provider errors do not cross into the interface.
 
 The check establishes only that the key could list models at that moment. It creates no document
-mutation, attribution, verified trace, or publication. Sending document content remains a separate
-action owned by the feature that needs it.
+mutation, attribution, verified provider claim, or publication. Sending document content remains a
+separate action owned by the feature that needs it.
 
 **Cost:** setup requires macOS-specific code and signed-build Keychain testing. Provider status is
 deliberately less detailed than raw API errors.
@@ -468,8 +468,8 @@ replayed as chat context. Partial, stopped, failed, or interrupted output may re
 excluded from later requests.
 
 The transcript is private app state, not a document or evidence record. Clearing it does not alter
-the CRDT, lineage, reviewers, or suggestions. This layer sends no selected ranges or files and
-cannot claim provider-verified provenance.
+the CRDT, lineage, reviewers, or suggestions. The core sends no selected ranges or files and cannot
+claim provider-verified provenance. AD-26 adds only explicit, bounded plain-text selection focus.
 
 **Cost:** the native layer owns provider-specific streaming state and a private transcript store.
 Stopping a request cannot prove the provider stopped processing immediately.

@@ -4,7 +4,7 @@
 updated 2026-08-27
 
 This contract covers API-key setup only. It does not activate built-in chat, file transfer, model
-selection, thinking controls, provider traces, verified provenance, or Seal publication.
+selection, thinking controls, verified provider claims, or Seal publication.
 
 ## Product boundary
 
@@ -111,8 +111,8 @@ separate provider-specific consent. Each request sends a fresh bounded projectio
 editor document and title, completed eligible chat, and the newly typed or pasted message. It adds
 no editor selection, native save path, or external file automatically. Its additional transport,
 local transcript, cancellation, and claim limits are in
-[pro-chat-security.md](pro-chat-security.md). Future verification will require a
-provider-authenticated exchange to bind to the exact proposal, anchors, hashes, and accepted delta.
+[pro-chat-security.md](pro-chat-security.md). Provider and model labels remain Reported. The current
+stack deliberately adds no second evidence store or provider-verification protocol.
 
 Anthropic recommends App Attest for distributed macOS apps that call its API directly. This
 consumer BYOK path intentionally uses a person's static API key, so the app must keep the native

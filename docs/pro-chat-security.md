@@ -6,8 +6,9 @@ open, updated 2026-08-27
 The Pro chat core is stacked on PR #16, `codex/pro-provider-foundation`. The parent
 pull request owns native key entry, Keychain storage, catalog access checks, replacement, and local
 removal. This pull request adds a chat surface that can use a configured OpenAI or Anthropic key
-with the current editor document as context. It does not add file attachments, direct document
-changes, provider trace verification, or publishing.
+with the current editor document as context. Later stack layers add an explicit plain-text selection
+focus and let a person turn a completed reply into a reviewable suggestion. They add no file
+attachments, direct document writes, verified provider claims, or publishing.
 
 ## Product boundary
 
@@ -122,16 +123,15 @@ access, so a provider can still reject the model or settings when Send is used. 
 is the person's selection. A provider-reported model, when available in the response, is stored and
 displayed separately. Neither value is silently promoted into a verified claim.
 
-A Pro chat turn creates no document mutation, suggestion, provenance event, provider receipt, or
-Seal material. It cannot show `Verified`. Provider-authenticated trace capture and the binding from
-a provider exchange to an exact proposal, anchors, hashes, and accepted document delta remain the
-scope of the later Pro trace pull request.
+A Pro chat turn alone creates no document mutation, suggestion, provenance event, provider receipt,
+or Seal material. It cannot show `Verified`. **Suggest in document** reloads a completed reply from
+the private transcript and creates a pending block insertion through the existing suggestion path.
+The wording changes only after a person accepts it. Provider and model labels remain Reported.
 
 Copying a response creates no document mutation or provenance event. If the person later pastes it
 into the editor, Proof of Thought records the new wording as `Pasted`, without guessing who composed
-it before it reached the clipboard. Direct Apply or Insert controls remain deferred until provider
-output can enter the existing proposal Accept and Reject path and bind the provider response to the
-exact accepted delta.
+it before it reached the clipboard. The suggestion action is the only built-in route from a chat
+reply to document wording; there is no direct Apply or Insert control.
 
 ## Required checks
 

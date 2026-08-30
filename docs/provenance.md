@@ -66,8 +66,8 @@ There is no receipt table, hash chain, event replay engine, persisted lineage ca
 format and structure delta language. Those mechanisms duplicate existing history, add migration
 and recovery states, and imply verification that a local bearer token cannot provide.
 
-Later evidence or trace features may refer to a source event. They do not need a second lineage
-ledger.
+A stronger provider claim would need evidence that binds the provider exchange to the exact accepted
+change. The current system does not make that claim and does not add a second lineage ledger.
 
 ## Current sources view
 
@@ -84,8 +84,8 @@ origin.
 ## Provider setup
 
 Built-in provider keys are entered and stored by native macOS code. A model-catalog check does not
-change the document and creates no lineage or verified evidence. Later features must bind any
-provider exchange to the exact accepted change before presenting it as provider-verified.
+change the document and creates no lineage or verified evidence. Provider and model labels on chat
+suggestions are Reported.
 
 ## Built-in chat
 
