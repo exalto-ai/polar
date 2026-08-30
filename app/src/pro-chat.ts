@@ -12,6 +12,7 @@ const PROVIDER_NAMES: Record<ProProvider, string> = {
   openai: "OpenAI",
   anthropic: "Anthropic",
 };
+const MAX_FOCUS_BYTES = 32 * 1024;
 
 export type ProChatDocument = {
   id: string;
@@ -19,6 +20,7 @@ export type ProChatDocument = {
   snapshot(): unknown;
   suggestionPosition(): SuggestionPosition;
   waitUntilSaved(): Promise<boolean>;
+  selectedText(): string | null;
 };
 
 type Options = {
@@ -74,6 +76,10 @@ export function installProChat(
   const input = required<HTMLTextAreaElement>(panel, "#pro-chat-input");
   const send = required<HTMLButtonElement>(panel, "#pro-chat-send");
   const newChat = required<HTMLButtonElement>(panel, "#pro-chat-new");
+  const captureFocus = required<HTMLButtonElement>(panel, "#pro-chat-focus-capture");
+  const focus = required<HTMLElement>(panel, "#pro-chat-focus");
+  const focusLabel = required<HTMLElement>(panel, "#pro-chat-focus-text");
+  const removeFocus = required<HTMLButtonElement>(panel, "#pro-chat-focus-remove");
   const bridge = options.bridge ?? null;
   const createRequestId = options.createRequestId ?? (() => crypto.randomUUID());
   const disposers: Array<() => void> = [];
@@ -81,6 +87,7 @@ export function installProChat(
   let messages: LocalMessage[] = [];
   let pendingText: string | null = null;
   let suggesting: LocalMessage | null = null;
+  let focusText: string | null = null;
   let active = false;
   let loadingModels = false;
   let destroyed = false;
@@ -151,6 +158,14 @@ export function installProChat(
     documentLabel.textContent = currentDocument
       ? `Current document: ${currentDocument.title}`
       : "Open a document to start a chat.";
+    focus.hidden = focusText === null;
+    focusLabel.textContent = focusText === null
+      ? ""
+      : focusText.length > 180
+        ? `${focusText.slice(0, 177)}…`
+        : focusText;
+    captureFocus.disabled = currentDocument === null || pendingText !== null ||
+      suggesting !== null;
     modelSelect.disabled = selectedProvider === null || loadingModels;
     retry.disabled = loadingModels || selectedProvider === null || bridge === null;
     input.disabled = currentDocument === null || pendingText !== null || suggesting !== null ||
@@ -171,6 +186,7 @@ export function installProChat(
     messages = [];
     pendingText = null;
     suggesting = null;
+    focusText = null;
     input.value = "";
     setError(null);
     renderMessages();
@@ -245,6 +261,7 @@ export function installProChat(
         model,
         messages: previous,
         message,
+        focus_text: focusText,
         disclosure_version: 1,
       });
       if (destroyed || generation !== requestGeneration || currentDocument?.id !== document.id) {
@@ -261,6 +278,7 @@ export function installProChat(
           response,
         },
       );
+      focusText = null;
     } catch (cause) {
       if (!destroyed && generation === requestGeneration) setError(oneLine(cause));
     } finally {
@@ -270,6 +288,21 @@ export function installProChat(
         renderControls();
       }
     }
+  }
+
+  function captureSelection(): void {
+    const selected = (currentDocument?.selectedText() ?? "").trim();
+    if (!selected) {
+      setError("Select some document text first.");
+      return;
+    }
+    if (new TextEncoder().encode(selected).byteLength > MAX_FOCUS_BYTES) {
+      setError("The selected text is too large to use as chat focus.");
+      return;
+    }
+    focusText = selected;
+    setError(null);
+    renderControls();
   }
 
   async function suggestMessage(message: LocalMessage): Promise<void> {
@@ -329,6 +362,11 @@ export function installProChat(
   listen(retry, "click", () => void loadModels());
   listen(notice, "change", renderControls);
   listen(input, "input", renderControls);
+  listen(captureFocus, "click", captureSelection);
+  listen(removeFocus, "click", () => {
+    focusText = null;
+    renderControls();
+  });
   listen(form, "submit", (event) => {
     event.preventDefault();
     void submit();

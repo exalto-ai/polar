@@ -69,6 +69,13 @@
           <p class="ai-sidebar-note" id="pro-chat-empty">Choose a provider to begin. This chat is kept only in this window.</p>
           <ol class="pro-chat-messages" id="pro-chat-messages" aria-live="polite" hidden></ol>
           <form id="pro-chat-form">
+            <div class="pro-chat-focus-actions">
+              <button class="text-button" id="pro-chat-focus-capture" type="button">Focus on selection</button>
+              <div class="pro-chat-focus" id="pro-chat-focus" hidden>
+                <span id="pro-chat-focus-text"></span>
+                <button class="text-button" id="pro-chat-focus-remove" type="button">Remove</button>
+              </div>
+            </div>
             <label class="pro-chat-consent"><input id="pro-chat-consent" type="checkbox" /> Share the current document and this chat with the selected provider.</label>
             <textarea id="pro-chat-input" maxlength="16384" rows="3" placeholder="Ask about the current document…"></textarea>
             <button class="ghost" id="pro-chat-send" type="submit" disabled>Send</button>

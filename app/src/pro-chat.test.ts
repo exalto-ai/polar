@@ -15,6 +15,8 @@ function markup(): string {
       <p id="pro-chat-empty"></p>
       <ol id="pro-chat-messages" hidden></ol>
       <form id="pro-chat-form">
+        <button id="pro-chat-focus-capture" type="button"></button>
+        <div id="pro-chat-focus" hidden><span id="pro-chat-focus-text"></span><button id="pro-chat-focus-remove" type="button"></button></div>
         <input id="pro-chat-consent" type="checkbox" />
         <textarea id="pro-chat-input"></textarea>
         <button id="pro-chat-send" type="submit"></button>
@@ -67,6 +69,7 @@ describe("built-in chat", () => {
       snapshot: () => ({ type: "doc", content: [] }),
       suggestionPosition: () => ({ kind: "end" }),
       waitUntilSaved: async () => true,
+      selectedText: () => "Selected line",
     });
 
     const provider = document.querySelector<HTMLSelectElement>("#pro-chat-provider")!;
@@ -90,6 +93,8 @@ describe("built-in chat", () => {
     consent.checked = true;
     consent.dispatchEvent(new Event("change"));
     expect(send.disabled).toBe(false);
+    document.querySelector<HTMLButtonElement>("#pro-chat-focus-capture")!.click();
+    expect(document.querySelector("#pro-chat-focus")?.textContent).toContain("Selected line");
 
     document.querySelector<HTMLFormElement>("#pro-chat-form")!
       .dispatchEvent(new Event("submit", { cancelable: true }));
@@ -98,6 +103,7 @@ describe("built-in chat", () => {
       document_title: "Draft",
       document: { type: "doc", content: [] },
       message: "Improve the ending",
+      focus_text: "Selected line",
       disclosure_version: 1,
     });
     expect(sent).not.toHaveProperty("document_id");
@@ -141,6 +147,7 @@ describe("built-in chat", () => {
       snapshot: () => ({}),
       suggestionPosition: () => ({ kind: "end" }),
       waitUntilSaved: async () => true,
+      selectedText: () => null,
     });
     const provider = document.querySelector<HTMLSelectElement>("#pro-chat-provider")!;
     provider.value = "openai";
@@ -171,6 +178,7 @@ describe("built-in chat", () => {
       snapshot: () => ({}),
       suggestionPosition: () => ({ kind: "end" }),
       waitUntilSaved: async () => true,
+      selectedText: () => null,
     });
     expect(document.querySelector("#pro-chat-messages")?.textContent).toBe("");
     expect(document.querySelector("#pro-chat-document")?.textContent).toContain("Two");

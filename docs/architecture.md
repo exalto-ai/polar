@@ -511,6 +511,16 @@ than keeping a second native transcript. A modified window could alter a pending
 cannot bypass the local person’s review. Stronger provenance would require a signed provider
 response or a private transcript lifecycle, neither of which the MVP has a present need for.
 
+### AD-25 — Extra chat context is selected plain text, not files
+
+A person may snapshot the current editor selection as visible plain-text focus for one chat
+request. The app still sends the current document, labels the selection separately, bounds it, and
+clears it after a successful response. It is context, not a durable range or provenance claim.
+
+**Cost:** the selection may be stale by Send time and loses rich formatting. Supporting files would
+require type-specific parsing, path and permission handling, staging, retention, and provider
+upload lifecycles; none is justified by this focused use case.
+
 ## 7. Explicit non-goals for MVP
 
 Folders and hierarchy · accounts and authentication · end-to-end encryption · mobile ·
