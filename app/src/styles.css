@@ -31,6 +31,18 @@
   --chrome-height: 44px;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -398,6 +410,41 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   margin: 0 2px;
   flex: 0 0 auto;
   background: var(--rule);
+}
+.save-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 61px;
+  padding: 0 6px 0 4px;
+  color: var(--ink-faint);
+  font: 500 11px/1 var(--sans);
+  cursor: default;
+}
+.save-status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+.save-status[data-state="saved"] { color: #6fbd8a; }
+.save-status[data-state="connecting"] { color: var(--ink-faint); }
+.save-status[data-state="saving"] { color: #d7a13a; }
+.save-status[data-state="offline"],
+.save-status[data-state="error"] { color: #d66b63; }
+.save-status[data-state="saving"]::before { animation: save-pulse 900ms ease-in-out infinite; }
+@keyframes save-pulse {
+  50% { opacity: 0.35; transform: scale(0.78); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .save-status[data-state="saving"]::before { animation: none; }
+}
+@media (max-width: 600px) {
+  .format-toolbar { gap: 1px; padding-inline: 3px; }
+  .format-divider { margin-inline: 0; }
+  .save-status { gap: 3px; padding-inline: 2px; font-size: 10px; }
 }
 
 .tiptap a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }

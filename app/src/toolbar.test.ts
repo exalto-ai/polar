@@ -48,6 +48,10 @@ function toolbarOptions(overrides: Partial<ToolbarOptions> = {}): ToolbarOptions
     newDocument: vi.fn(),
     importMarkdown: vi.fn(),
     exportMarkdown: vi.fn(),
+    subscribeSaveStatus: (listener) => {
+      listener("saved");
+      return vi.fn();
+    },
     ...overrides,
   };
 }
@@ -265,4 +269,39 @@ describe("installed toolbar", () => {
     cleanup();
   });
 
+  it("shows live autosave state and unsubscribes on cleanup", () => {
+    let publish:
+      | ((status: "connecting" | "saved" | "saving" | "offline" | "error") => void)
+      | undefined;
+    const unsubscribe = vi.fn();
+    const { editor, element } = makeEditor();
+    const cleanup = installToolbar(
+      editor,
+      element,
+      toolbarOptions({
+        subscribeSaveStatus: (listener) => {
+          publish = listener;
+          listener("saving");
+          return unsubscribe;
+        },
+      }),
+    );
+    const status = document.querySelector<HTMLElement>(".save-status")!;
+    const alert = document.querySelector<HTMLElement>('[role="status"]')!;
+
+    expect(status.textContent).toBe("Saving…");
+    expect(status.dataset.state).toBe("saving");
+    expect(alert.textContent).toBe("");
+    publish?.("saved");
+    expect(status.textContent).toBe("Autosaved");
+    expect(status.title).toContain("autosaved");
+    expect(status.hasAttribute("aria-live")).toBe(false);
+    publish?.("offline");
+    expect(alert.textContent).toContain("reconnecting");
+    publish?.("saving");
+    expect(alert.textContent).toBe("");
+
+    cleanup();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
 });
