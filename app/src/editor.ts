@@ -68,6 +68,7 @@ export function createEditor(
   provider: SyncProvider,
   user: Actor,
   actions: EditorActions,
+  shouldAutoFocus: () => boolean = () => true,
 ): Editor {
   const editor = new Editor({
     element,
@@ -88,7 +89,7 @@ export function createEditor(
 
   const unsubscribeHydration = provider.subscribeHydration((hydrated) => {
     editor.setEditable(hydrated, false);
-    if (hydrated) editor.commands.focus("end");
+    if (hydrated && shouldAutoFocus()) editor.commands.focus("end");
   });
 
   const destroySlashMenu = installSlashMenu(editor, host);

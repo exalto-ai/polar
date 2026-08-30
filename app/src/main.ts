@@ -7,6 +7,7 @@ import { getCurrentWindow as tauriWindow } from "@tauri-apps/api/window";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { Editor } from "@tiptap/core";
+import { installAiSupport } from "./ai-support";
 import { createEditor } from "./editor";
 import { EditorDocuments } from "./editor-api";
 import {
@@ -37,7 +38,6 @@ const els = {
   connections: document.getElementById("connections")!,
   peers: document.getElementById("peers")!,
   agents: document.getElementById("agents")!,
-  stdioCommand: document.getElementById("stdio-command")!,
   toast: document.getElementById("toast")!,
   switcher: document.querySelector(".switcher") as HTMLElement,
   hint: document.getElementById("switcher-hint")!,
@@ -84,6 +84,8 @@ function reason(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
   return text.length > 160 ? `${text.slice(0, 157)}…` : text;
 }
+
+const aiSupport = installAiSupport(document, { onNotice: notify });
 
 /**
  * Agents that have written recently.
@@ -291,6 +293,7 @@ async function openDocument(docId: string): Promise<boolean> {
         await exportMarkdownFile();
       },
     },
+    () => !aiSupport.isOpen(),
   );
   awareness.setLocalStateField("user", user);
 
@@ -445,13 +448,6 @@ document.getElementById("new-window")!.addEventListener("click", () => {
   toggleConnections(false);
   void createNewDocument();
 });
-document.getElementById("copy-command")!.addEventListener("click", async (e) => {
-  await navigator.clipboard.writeText(connection.stdio_command);
-  const button = e.currentTarget as HTMLButtonElement;
-  button.textContent = "Copied";
-  setTimeout(() => (button.textContent = "Copy"), 1200);
-});
-
 // ---------------------------------------------------------------- switcher
 
 let results: DocumentSummary[] = [];
@@ -749,7 +745,7 @@ async function boot() {
   connection = await loadConnection();
   mcp = new Mcp(connection.mcp_url, connection.token);
   editorDocuments = new EditorDocuments(connection.mcp_url, connection.token);
-  els.stdioCommand.textContent = connection.stdio_command;
+  aiSupport.setConnectionCommand(connection.stdio_command);
   await mcp.connect();
 
   const documents = await mcp.listDocuments();
