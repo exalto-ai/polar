@@ -5,16 +5,6 @@
  * The switcher searches through the daemon's `search` tool, the same one agents
  * use, so there is one search implementation rather than two that disagree.
  */
-/**
- * The window, when it calls a tool that writes.
- *
- * `kind: "human"` matters: creating a document goes through the agent tool
- * surface, but a document the user just made is not an agent's work, and
- * attributing it to one would put an agent's rail beside their first paragraph.
- * This resolves to the same actor the window's typing writes as.
- */
-const WINDOW = { agent: "editor", model: null, session: null, kind: "human" } as const;
-
 /** The daemon restarted and no longer knows our session. */
 class StaleSession extends Error {}
 
@@ -118,17 +108,6 @@ export class Mcp {
       .blocks as BlockAttribution[];
   }
 
-  async setDocumentDeleted(docId: string, deleted: boolean) {
-    return await this.call("set_document_deleted", { doc_id: docId, deleted, ...WINDOW });
-  }
-
-  async createDocument(title: string, initialMarkdown?: string): Promise<DocumentView> {
-    return await this.call("create_document", {
-      title,
-      ...(initialMarkdown === undefined ? {} : { initial_markdown: initialMarkdown }),
-      ...WINDOW,
-    });
-  }
 }
 
 export type Actor = {
