@@ -1,18 +1,16 @@
-//! Bridges a stdio MCP client to the running daemon (AD-10).
-//!
-//! MCP clients overwhelmingly speak stdio and spawn their server as a child.
-//! Doing that literally would give every client its own `thoughtd`, and several
-//! processes writing one SQLite store is a corruption bug waiting to happen. So
-//! the real server is HTTP on loopback and this shim is what clients spawn: it
-//! finds the daemon, safely starts a replacement for stale discovery, and
-//! proxies.
+//! Bridges one configured reviewer from stdio to the loopback daemon.
 
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use thoughtd::connections::{CredentialFiles, valid_connection_id};
 use thoughtd::discovery::{self, Daemon};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let connection_id = connection_id()?;
+    let credential = CredentialFiles::platform()
+        .read(&connection_id)
+        .map_err(|error| format!("could not load reviewer `{connection_id}`: {error}"))?;
     let daemon = connect()?;
 
     let stdin = std::io::stdin();
@@ -24,33 +22,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if line.trim().is_empty() {
             continue;
         }
-
-        // A notification has no `id` and expects no reply. Writing one anyway
-        // desynchronises the client.
-        let is_notification = serde_json::from_str::<serde_json::Value>(&line)
-            .map(|v| v.get("id").is_none())
+        let notification = serde_json::from_str::<serde_json::Value>(&line)
+            .map(|value| value.get("id").is_none())
             .unwrap_or(false);
-
-        match forward(&daemon, &line, &mut session) {
-            Ok(Some(response)) if !is_notification => {
+        match forward(&daemon, &credential, &line, &mut session) {
+            Ok(Some(response)) if !notification => {
                 writeln!(stdout, "{response}")?;
                 stdout.flush()?;
             }
             Ok(_) => {}
-            Err(e) => {
-                // Report transport failure as JSON-RPC rather than dying: a
-                // client that loses its server mid-session has no way to tell
-                // what happened.
+            Err(error) => {
                 let id = serde_json::from_str::<serde_json::Value>(&line)
                     .ok()
-                    .and_then(|v| v.get("id").cloned())
+                    .and_then(|value| value.get("id").cloned())
                     .unwrap_or(serde_json::Value::Null);
-                let error = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": { "code": -32603, "message": format!("thought daemon unreachable: {e}") }
-                });
-                writeln!(stdout, "{error}")?;
+                writeln!(
+                    stdout,
+                    "{}",
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32603,
+                            "message": format!("thought reviewer unavailable: {error}")
+                        }
+                    })
+                )?;
                 stdout.flush()?;
             }
         }
@@ -58,10 +55,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Reuse the published instance when its identity and bearer both work.
-/// Otherwise start a candidate. The daemon's lifetime locks, not PID guesses
-/// or discovery-file presence, decide whether that child may own the home and
-/// store and atomically replace stale discovery.
+fn connection_id() -> Result<String, Box<dyn std::error::Error>> {
+    let mut arguments = std::env::args().skip(1);
+    match (arguments.next(), arguments.next(), arguments.next()) {
+        (Some(flag), Some(id), None) if flag == "--connection" && valid_connection_id(&id) => {
+            Ok(id)
+        }
+        _ => Err("expected --connection <id>; copy setup again from Proof of Thought".into()),
+    }
+}
+
 fn connect() -> Result<Daemon, Box<dyn std::error::Error>> {
     if let Some(daemon) = discovery::read() {
         if discovery::authenticated_reachable(&daemon) {
@@ -69,29 +72,23 @@ fn connect() -> Result<Daemon, Box<dyn std::error::Error>> {
         }
     } else if discovery::discovery_path().exists() {
         return Err(format!(
-            "the thought daemon discovery record uses an incompatible or invalid format; quit any older Proof of Thought or thoughtd process, then remove {}",
+            "the daemon discovery record is invalid; quit Proof of Thought, then remove {}",
             discovery::discovery_path().display()
         )
         .into());
     }
-
     spawn()
 }
 
 fn spawn() -> Result<Daemon, Box<dyn std::error::Error>> {
-    // The daemon sits beside this binary; both ship together.
-    let exe = std::env::current_exe()?;
-    let thoughtd = exe.with_file_name("thoughtd");
-
+    let thoughtd = std::env::current_exe()?.with_file_name("thoughtd");
     Command::new(&thoughtd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("could not start {}: {e}", thoughtd.display()))?;
+        .map_err(|error| format!("could not start {}: {error}", thoughtd.display()))?;
 
-    // Poll for a daemon that both published itself and answers, rather than
-    // sleeping a guessed interval.
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Some(daemon) = discovery::read()
@@ -101,23 +98,19 @@ fn spawn() -> Result<Daemon, Box<dyn std::error::Error>> {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    Err("daemon did not become reachable within 10s; another process may own the workspace".into())
+    Err("daemon did not become reachable within 10 seconds".into())
 }
 
-/// One JSON-RPC message across, one response back.
-///
-/// Retries once on a *transport* failure. The shim idles between messages —
-/// often for minutes while a person thinks — and an idle keep-alive connection
-/// gets closed by the server; the pooled socket then fails on write with
-/// ECONNRESET. Retrying an HTTP error status would be wrong, but a connection
-/// that died while idle has not delivered anything to retry.
 fn forward(
     daemon: &Daemon,
+    credential: &str,
     body: &str,
     session: &mut Option<String>,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    match send_once(daemon, body, session) {
-        Err(e) if is_transport_failure(&e) => Ok(send_once(daemon, body, session)?),
+    match send_once(daemon, credential, body, session) {
+        Err(error) if is_transport_failure(&error) => {
+            Ok(send_once(daemon, credential, body, session)?)
+        }
         other => Ok(other?),
     }
 }
@@ -128,11 +121,12 @@ fn is_transport_failure(error: &ureq::Error) -> bool {
 
 fn send_once(
     daemon: &Daemon,
+    credential: &str,
     body: &str,
     session: &mut Option<String>,
 ) -> Result<Option<String>, ureq::Error> {
     let mut request = ureq::post(&daemon.url)
-        .header("Authorization", &format!("Bearer {}", daemon.token))
+        .header("Authorization", &format!("Bearer {credential}"))
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream");
     if let Some(id) = session.as_ref() {
@@ -148,14 +142,9 @@ fn send_once(
     }
 
     let raw = response.body_mut().read_to_string()?;
-    // The streamable-HTTP transport answers as SSE; stdio clients expect one
-    // JSON object per line, so unwrap the framing.
-    for line in raw.lines() {
-        if let Some(payload) = line.strip_prefix("data: ")
-            && !payload.trim().is_empty()
-        {
-            return Ok(Some(payload.to_string()));
-        }
-    }
-    Ok(None)
+    Ok(raw.lines().find_map(|line| {
+        line.strip_prefix("data: ")
+            .filter(|payload| !payload.trim().is_empty())
+            .map(str::to_string)
+    }))
 }

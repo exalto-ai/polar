@@ -8,7 +8,27 @@ mod harness;
 use harness::Daemon;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use thought_mcp::{ReviewerAccess, ReviewerClient, Workspace};
+use thoughtd::connections::{ConnectionRegistry, CredentialFiles};
 use thoughtd::discovery::{self, Daemon as PublishedDaemon};
+
+fn configure_reviewer(home: &std::path::Path) -> String {
+    let workspace = Arc::new(Workspace::open(home.join("thought.db")).unwrap());
+    let registry = ConnectionRegistry::new(
+        workspace,
+        CredentialFiles::new(home.join("reviewer-credentials")),
+    );
+    registry
+        .create(
+            ReviewerClient::Codex,
+            "Transport reviewer".into(),
+            ReviewerAccess::all(),
+            10,
+        )
+        .unwrap()
+        .id
+}
 
 #[test]
 fn an_agent_drives_the_daemon_over_mcp() {
@@ -142,6 +162,7 @@ fn discovery_probe_verifies_the_published_bearer_token() {
 #[test]
 fn the_stdio_shim_refuses_to_replace_a_daemon_that_rejects_its_token() {
     let daemon = Daemon::start();
+    let connection_id = daemon.create_reviewer();
     let published = daemon.home.path().join("daemon.json");
     let mut wrong: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&published).expect("discovery is readable"))
@@ -150,6 +171,7 @@ fn the_stdio_shim_refuses_to_replace_a_daemon_that_rejects_its_token() {
     std::fs::write(&published, serde_json::to_vec_pretty(&wrong).unwrap()).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
+        .args(["--connection", &connection_id])
         .env("THOUGHT_HOME", daemon.home.path())
         .stdin(Stdio::null())
         .output()
@@ -160,7 +182,7 @@ fn the_stdio_shim_refuses_to_replace_a_daemon_that_rejects_its_token() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("incompatible or invalid format"),
+        stderr.contains("discovery record is invalid"),
         "the failure must explain how to resolve invalid discovery: {stderr}"
     );
 
@@ -179,12 +201,14 @@ fn the_stdio_shim_refuses_to_replace_a_daemon_that_rejects_its_token() {
 #[test]
 fn the_stdio_shim_replaces_stale_current_discovery() {
     let mut daemon = Daemon::start();
+    let connection_id = daemon.create_reviewer();
     let published = daemon.home.path().join("daemon.json");
     let old_instance = daemon.instance_id.clone();
     daemon.stop_abruptly();
     assert!(published.exists(), "abrupt exit must leave stale discovery");
 
     let output = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
+        .args(["--connection", &connection_id])
         .env("THOUGHT_HOME", daemon.home.path())
         .stdin(Stdio::null())
         .output()
@@ -213,12 +237,14 @@ fn the_stdio_shim_replaces_stale_current_discovery() {
 #[test]
 fn the_stdio_shim_starts_a_daemon_and_proxies_to_it() {
     let home = tempfile::tempdir().expect("temp dir");
+    let connection_id = configure_reviewer(home.path());
     assert!(
         !home.path().join("daemon.json").exists(),
         "test must begin with no daemon published"
     );
 
     let mut shim = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
+        .args(["--connection", &connection_id])
         .env("THOUGHT_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

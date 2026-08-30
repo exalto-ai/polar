@@ -66,6 +66,16 @@ impl MutationContext {
         }
     }
 
+    pub fn mcp_connection(label: impl Into<String>, connection_id: &str) -> Self {
+        Self {
+            ingress: Ingress::Mcp,
+            assurance: Assurance::Reported,
+            alignment: Alignment::Inferred,
+            group_key: format!("mcp:connection:{connection_id}"),
+            source_label: label.into(),
+        }
+    }
+
     fn local(ingress: Ingress, group_key: &str, label: &str, alignment: Alignment) -> Self {
         Self {
             ingress,

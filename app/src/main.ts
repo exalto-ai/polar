@@ -9,7 +9,7 @@ import { Awareness } from "y-protocols/awareness";
 import type { Editor } from "@tiptap/core";
 import { installAiSupport } from "./ai-support";
 import { createEditor } from "./editor";
-import { EditorDocuments } from "./editor-api";
+import { EditorApi } from "./editor-api";
 import {
   exportMarkdownDocument,
   importMarkdownDocument,
@@ -47,7 +47,7 @@ const els = {
 
 let connection: Connection;
 let mcp: Mcp;
-let editorDocuments: EditorDocuments;
+let editorApi: EditorApi;
 let open: {
   doc: Y.Doc;
   awareness: Awareness;
@@ -146,6 +146,9 @@ function refreshTitle(editor: Editor) {
   const title = deriveTitle(editor);
   document.title = title;
   void getCurrentWindow?.()?.setTitle(title);
+  if (open?.editor === editor && openDocId) {
+    aiSupport.setCurrentDocument({ id: openDocId, title });
+  }
 }
 
 /** Show or hide one peer's caret label from outside the editor. */
@@ -254,6 +257,7 @@ async function openDocument(docId: string): Promise<boolean> {
     return true;
   }
   if (!(await canLeaveCurrentDocument())) return false;
+  aiSupport.setCurrentDocument(null);
   open?.rails.destroy();
   open?.provider.destroy();
   open?.editor.destroy();
@@ -302,6 +306,7 @@ async function openDocument(docId: string): Promise<boolean> {
   provider.connect();
   open = { doc, awareness, provider, editor, rails };
   openDocId = docId;
+  aiSupport.setCurrentDocument({ id: docId, title: deriveTitle(editor) });
 
   // Exposed in development so the editor can be driven directly. Synthetic
   // key events do not reach ProseMirror's input handling reliably, which makes
@@ -550,7 +555,7 @@ async function trashSelected() {
   // In the trash the same key means the opposite thing: put it back.
   if (trashMode) {
     try {
-      await editorDocuments.setDocumentDeleted(row.doc_id, false);
+      await editorApi.setDocumentDeleted(row.doc_id, false);
       notify(`Restored "${row.title || "Untitled"}"`);
       await refreshResults();
     } catch (error) {
@@ -562,7 +567,7 @@ async function trashSelected() {
   const wasOpen = row.doc_id === openDocId;
   if (wasOpen && !(await canLeaveCurrentDocument())) return;
   try {
-    await editorDocuments.setDocumentDeleted(row.doc_id, true);
+    await editorApi.setDocumentDeleted(row.doc_id, true);
     notify(`Moved "${row.title || "Untitled"}" to the trash · ${ACCEL_LABEL}⇧⌫ to find it`);
   } catch (error) {
     notify(`Could not trash: ${reason(error)}`, "error");
@@ -585,7 +590,7 @@ async function createDocumentInNewWindow(title: string) {
   // its preview editor, so it still needs the same durability guard.
   if (!isTauri() && !(await canLeaveCurrentDocument())) return;
   try {
-    const created = await editorDocuments.createDocument(title);
+    const created = await editorApi.createDocument(title);
     els.scrim.hidden = true;
     toggleConnections(false);
     try {
@@ -615,7 +620,7 @@ async function importMarkdownFile() {
   try {
     const file = await importMarkdownDocument(
       nativeFileBridge,
-      editorDocuments,
+      editorApi,
       showDocumentInNewWindow,
     );
     if (file) notify(`Imported “${file.file_name}” as a new document`);
@@ -741,7 +746,8 @@ async function boot() {
   relabelShortcutHints();
   connection = await loadConnection();
   mcp = new Mcp(connection.mcp_url, connection.token);
-  editorDocuments = new EditorDocuments(connection.mcp_url, connection.token);
+  editorApi = new EditorApi(connection.mcp_url, connection.token);
+  aiSupport.setReviewerApi(editorApi);
   aiSupport.setConnectionCommand(connection.stdio_command);
   await mcp.connect();
 
@@ -758,7 +764,7 @@ async function boot() {
     targetId =
       documents.find((document) => document.doc_id === last)?.doc_id ??
       documents[0]?.doc_id ??
-      (await editorDocuments.createDocument("")).doc_id;
+      (await editorApi.createDocument("")).doc_id;
   }
 
   await openDocument(targetId);
