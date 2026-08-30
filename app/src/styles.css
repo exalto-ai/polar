@@ -254,6 +254,25 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   font: inherit;
 }
 .reviewer-error { color: #ff8a80; font-size: 12px; }
+.provider-settings {
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+}
+.provider-settings h3 { margin: 3px 0 7px; font-size: 14px; }
+.provider-list { margin: 0; padding: 0; list-style: none; }
+.provider-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 0;
+  border-top: 1px solid var(--rule);
+}
+.provider-list li > div:first-child { display: grid; gap: 2px; }
+.provider-list [data-provider-status] { color: var(--ink-faint); font-size: 11px; }
+.provider-list [data-provider-status][data-configured="true"] { color: var(--accent); }
 .current-sources {
   margin: 0 0 16px;
   padding: 12px;

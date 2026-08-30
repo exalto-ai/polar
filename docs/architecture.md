@@ -479,6 +479,15 @@ tool checks; an operation already past authorization may finish. We accept that 
 than adding session binding, leases, heartbeat processes, a lifecycle ledger, or signing-specific
 Keychain ACL machinery.
 
+### AD-22 — Provider keys stay native; validation happens on use
+
+Built-in provider keys are entered through a native macOS secure field and stored in the login
+Keychain. JavaScript sends only `openai` or `anthropic`; it never receives or submits a key.
+Adding a key performs no provider request. The first chat request is the useful validation.
+
+**Cost:** setup cannot promise that a key, model, quota, or billing state will work later. The
+actual request reports that failure, without a separate catalog probe or validation ledger.
+
 ## 7. Explicit non-goals for MVP
 
 Folders and hierarchy · accounts and authentication · end-to-end encryption · mobile ·

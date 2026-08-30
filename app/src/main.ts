@@ -20,6 +20,7 @@ import { ACCEL_LABEL, accel, relabelShortcutHints } from "./keys";
 import { Mcp, type DocumentSummary } from "./mcp";
 import { colorFor, playfulName, seedFrom } from "./names";
 import { installProvenanceRails, type Rails } from "./provenance";
+import { tauriProProviderBridge } from "./pro-provider-bridge";
 import { SyncProvider, type AgentPresence, type ProviderStatus } from "./provider";
 import { installSuggestionReview, type SuggestionReviewController } from "./suggestions";
 
@@ -88,7 +89,10 @@ function reason(error: unknown): string {
   return text.length > 160 ? `${text.slice(0, 157)}…` : text;
 }
 
-const aiSupport = installAiSupport(document, { onNotice: notify });
+const aiSupport = installAiSupport(document, {
+  providerBridge: isTauri() ? tauriProProviderBridge() : null,
+  onNotice: notify,
+});
 
 async function visibleWordingRevision(): Promise<string | null> {
   const current = open;

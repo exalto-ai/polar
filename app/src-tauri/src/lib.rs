@@ -14,6 +14,11 @@ use std::{
 use tauri_plugin_dialog::DialogExt;
 use thoughtd::discovery::{self, Daemon};
 
+#[cfg(target_os = "macos")]
+mod macos_secure_input;
+mod pro_provider;
+mod provider_credentials;
+
 #[derive(serde::Serialize)]
 struct Connection {
     sync_url: String,
@@ -502,7 +507,10 @@ pub fn run() {
             new_window,
             import_markdown,
             export_markdown,
-            document_wording_revision
+            document_wording_revision,
+            pro_provider::provider_configurations,
+            pro_provider::configure_provider_key,
+            pro_provider::remove_provider_key
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
