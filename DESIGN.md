@@ -11,14 +11,23 @@ document or it does not belong in the app.
 | --- | --- | --- |
 | Ground | `#0c1622` | Window, editor, app-icon tile |
 | Accent | `#6ea1ff` | Caret, focus, active formatting, links |
+| Positive | `#76c392` | Connected, saved, available, and Verified state |
+| Positive text | `#9bd5ae` | Positive status copy on the ground |
+| Caution | `#d7a13a` | Pending, saving, incomplete, and attention state |
+| Caution text | `#e3c486` | Caution status copy on the ground |
+| Negative | `#d66b63` | Error, failed, destructive, and offline state |
+| Negative text | `#f0aaa4` | Negative status copy on the ground |
 
-Both are defined once in [`app/src/styles.css`](app/src/styles.css) as `--paper`
-and `--accent`. The editor intentionally uses one appearance so its ground is
+These are defined once in [`app/src/styles.css`](app/src/styles.css). The editor intentionally uses one appearance so its ground is
 always identical to the icon. Interface code should use the tokens.
 
 The rest of the palette in that file, including `--ink`, `--ink-soft`,
 `--ink-faint`, `--rule`, and `--raised`, is the neutral ramp. The greys carry a
 slight blue bias so they sit with the accent rather than beside it.
+
+The six `--status-*` variables are the non-accent semantic palette. They report
+outcomes and lifecycle state whose meaning is also present in text, structure,
+or an icon. They never indicate selection, focus, links, or actor identity.
 
 ### What the accent is for
 
