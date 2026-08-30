@@ -1,10 +1,26 @@
 import type { DocumentView } from "./mcp";
+import type { ProProvider } from "./pro-provider-bridge";
 import type {
   ReviewerApi,
   ReviewerConnection,
   ReviewerInput,
 } from "./reviewer-connections";
-import type { SuggestionDecisionOutcome, SuggestionList } from "./suggestions";
+import type {
+  SuggestionDecisionOutcome,
+  SuggestionList,
+  SuggestionPosition,
+} from "./suggestions";
+
+export type ChatSuggestionInput = {
+  documentId: string;
+  requestId: string;
+  provider: ProProvider;
+  requestedModel: string;
+  reportedModel: string | null;
+  assistantText: string;
+  wordingRevision: string;
+  after: SuggestionPosition;
+};
 
 export class EditorApi implements ReviewerApi {
   private readonly baseUrl: string;
@@ -34,6 +50,22 @@ export class EditorApi implements ReviewerApi {
     return this.request(
       "GET",
       `/editor/documents/${encodeURIComponent(docId)}/suggestions`,
+    );
+  }
+
+  proposeChatSuggestion(input: ChatSuggestionInput): Promise<SuggestionDecisionOutcome> {
+    return this.request(
+      "POST",
+      `/editor/documents/${encodeURIComponent(input.documentId)}/suggestions/pro-chat`,
+      {
+        request_id: input.requestId,
+        provider: input.provider,
+        requested_model: input.requestedModel,
+        reported_model: input.reportedModel,
+        assistant_text: input.assistantText,
+        wording_revision: input.wordingRevision,
+        after: input.after,
+      },
     );
   }
 

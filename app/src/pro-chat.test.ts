@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ChatSuggestionInput } from "./editor-api";
 import type { ProChatBridge, SendChatRequest } from "./pro-chat-bridge";
 import { installProChat } from "./pro-chat";
 
@@ -34,6 +35,7 @@ afterEach(() => {
 describe("built-in chat", () => {
   it("shares the current snapshot only after the user acknowledges the notice", async () => {
     let sent: SendChatRequest | null = null;
+    let suggested: ChatSuggestionInput | null = null;
     const bridge: ProChatBridge = {
       models: vi.fn().mockResolvedValue({
         provider: "openai",
@@ -51,12 +53,20 @@ describe("built-in chat", () => {
         };
       }),
     };
-    const controller = installProChat(document, { bridge });
+    const controller = installProChat(document, {
+      bridge,
+      createRequestId: () => "suggestion-one",
+      suggestResponse: vi.fn().mockImplementation(async (input: ChatSuggestionInput) => {
+        suggested = input;
+      }),
+    });
     controller.setActive(true);
     controller.setDocument({
       id: "private-document-id",
       title: "Draft",
       snapshot: () => ({ type: "doc", content: [] }),
+      suggestionPosition: () => ({ kind: "end" }),
+      waitUntilSaved: async () => true,
     });
 
     const provider = document.querySelector<HTMLSelectElement>("#pro-chat-provider")!;
@@ -95,6 +105,16 @@ describe("built-in chat", () => {
       expect(document.querySelector("#pro-chat-messages")?.textContent)
         .toContain("A clearer ending");
     });
+    document.querySelector<HTMLButtonElement>(".pro-chat-suggest")!.click();
+    await vi.waitFor(() => expect(suggested).not.toBeNull());
+    expect(suggested).toMatchObject({
+      documentId: "private-document-id",
+      requestId: "suggestion-one",
+      provider: "openai",
+      assistantText: "A clearer ending",
+      wordingRevision: "revision-1",
+      after: { kind: "end" },
+    });
     controller.destroy();
   });
 
@@ -115,7 +135,13 @@ describe("built-in chat", () => {
     };
     const controller = installProChat(document, { bridge });
     controller.setActive(true);
-    controller.setDocument({ id: "one", title: "One", snapshot: () => ({}) });
+    controller.setDocument({
+      id: "one",
+      title: "One",
+      snapshot: () => ({}),
+      suggestionPosition: () => ({ kind: "end" }),
+      waitUntilSaved: async () => true,
+    });
     const provider = document.querySelector<HTMLSelectElement>("#pro-chat-provider")!;
     provider.value = "openai";
     provider.dispatchEvent(new Event("change"));
@@ -139,7 +165,13 @@ describe("built-in chat", () => {
       expect(document.querySelector("#pro-chat-messages")?.textContent).toContain("Reply");
     });
 
-    controller.setDocument({ id: "two", title: "Two", snapshot: () => ({}) });
+    controller.setDocument({
+      id: "two",
+      title: "Two",
+      snapshot: () => ({}),
+      suggestionPosition: () => ({ kind: "end" }),
+      waitUntilSaved: async () => true,
+    });
     expect(document.querySelector("#pro-chat-messages")?.textContent).toBe("");
     expect(document.querySelector("#pro-chat-document")?.textContent).toContain("Two");
     controller.destroy();

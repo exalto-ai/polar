@@ -286,6 +286,7 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .pro-chat-messages strong { display: block; margin-bottom: 3px; font-size: 11px; }
 .pro-chat-messages p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; line-height: 1.45; }
 .pro-chat-messages small { display: block; margin-top: 5px; color: var(--ink-faint); font-size: 10px; }
+.pro-chat-suggest { margin-top: 7px; }
 .provider-settings {
   margin: 0 0 16px;
   padding: 12px;

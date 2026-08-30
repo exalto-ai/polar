@@ -2,8 +2,11 @@ import type {
   ChatMessage,
   ProChatBridge,
   ProviderModel,
+  SendChatResponse,
 } from "./pro-chat-bridge";
+import type { ChatSuggestionInput } from "./editor-api";
 import type { ProProvider } from "./pro-provider-bridge";
+import type { SuggestionPosition } from "./suggestions";
 
 const PROVIDER_NAMES: Record<ProProvider, string> = {
   openai: "OpenAI",
@@ -14,15 +17,22 @@ export type ProChatDocument = {
   id: string;
   title: string;
   snapshot(): unknown;
+  suggestionPosition(): SuggestionPosition;
+  waitUntilSaved(): Promise<boolean>;
 };
 
 type Options = {
   bridge?: ProChatBridge | null;
+  suggestResponse?: (input: ChatSuggestionInput) => Promise<unknown>;
+  createRequestId?: () => string;
+  onNotice?: (message: string, kind?: "info" | "error") => void;
 };
 
 type LocalMessage = ChatMessage & {
   meta?: string;
   incomplete?: boolean;
+  response?: SendChatResponse;
+  suggested?: boolean;
 };
 
 export type ProChatController = {
@@ -65,10 +75,12 @@ export function installProChat(
   const send = required<HTMLButtonElement>(panel, "#pro-chat-send");
   const newChat = required<HTMLButtonElement>(panel, "#pro-chat-new");
   const bridge = options.bridge ?? null;
+  const createRequestId = options.createRequestId ?? (() => crypto.randomUUID());
   const disposers: Array<() => void> = [];
   let currentDocument: ProChatDocument | null = null;
   let messages: LocalMessage[] = [];
   let pendingText: string | null = null;
+  let suggesting: LocalMessage | null = null;
   let active = false;
   let loadingModels = false;
   let destroyed = false;
@@ -105,6 +117,19 @@ export function installProChat(
       ].filter(Boolean).join(" · ");
       item.append(meta);
     }
+    if (message.response?.complete && options.suggestResponse) {
+      const suggest = root.createElement("button");
+      suggest.type = "button";
+      suggest.className = "text-button pro-chat-suggest";
+      suggest.textContent = message.suggested
+        ? "Suggested"
+        : suggesting === message
+          ? "Suggesting…"
+          : "Suggest in document";
+      suggest.disabled = message.suggested === true || suggesting !== null || pendingText !== null;
+      suggest.addEventListener("click", () => void suggestMessage(message));
+      item.append(suggest);
+    }
     return item;
   }
 
@@ -117,6 +142,7 @@ export function installProChat(
     messagesElement.hidden = rendered.length === 0;
     empty.hidden = rendered.length !== 0;
     newChat.hidden = messages.length === 0 && pendingText === null;
+    newChat.disabled = pendingText !== null || suggesting !== null;
   }
 
   function renderControls(): void {
@@ -127,11 +153,16 @@ export function installProChat(
       : "Open a document to start a chat.";
     modelSelect.disabled = selectedProvider === null || loadingModels;
     retry.disabled = loadingModels || selectedProvider === null || bridge === null;
-    input.disabled = currentDocument === null || pendingText !== null || bridge === null;
-    send.disabled = currentDocument === null || selectedProvider === null || !hasModel ||
-      !notice.checked || pendingText !== null || input.value.trim() === "" ||
+    input.disabled = currentDocument === null || pendingText !== null || suggesting !== null ||
       bridge === null;
-    panel.setAttribute("aria-busy", String(loadingModels || pendingText !== null));
+    send.disabled = currentDocument === null || selectedProvider === null || !hasModel ||
+      !notice.checked || pendingText !== null || suggesting !== null ||
+      input.value.trim() === "" ||
+      bridge === null;
+    panel.setAttribute(
+      "aria-busy",
+      String(loadingModels || pendingText !== null || suggesting !== null),
+    );
     send.textContent = pendingText === null ? "Send" : "Sending…";
   }
 
@@ -139,6 +170,7 @@ export function installProChat(
     requestGeneration += 1;
     messages = [];
     pendingText = null;
+    suggesting = null;
     input.value = "";
     setError(null);
     renderMessages();
@@ -193,7 +225,8 @@ export function installProChat(
     const message = input.value.trim();
     if (
       bridge === null || document === null || selectedProvider === null ||
-      modelSelect.value === "" || !notice.checked || pendingText !== null || !message
+      modelSelect.value === "" || !notice.checked || pendingText !== null ||
+      suggesting !== null || !message
     ) return;
 
     const model = modelSelect.value;
@@ -225,6 +258,7 @@ export function installProChat(
           text: response.text,
           meta: `${PROVIDER_NAMES[response.provider]} · ${reportedModel}`,
           incomplete: !response.complete,
+          response,
         },
       );
     } catch (cause) {
@@ -232,6 +266,55 @@ export function installProChat(
     } finally {
       if (!destroyed && generation === requestGeneration) {
         pendingText = null;
+        renderMessages();
+        renderControls();
+      }
+    }
+  }
+
+  async function suggestMessage(message: LocalMessage): Promise<void> {
+    const document = currentDocument;
+    const response = message.response;
+    if (
+      document === null || response === undefined || !response.complete ||
+      options.suggestResponse === undefined || message.suggested || suggesting !== null ||
+      pendingText !== null
+    ) return;
+    const generation = ++requestGeneration;
+    suggesting = message;
+    setError(null);
+    renderMessages();
+    renderControls();
+    try {
+      if (!(await document.waitUntilSaved())) {
+        throw new Error("Wait for this document to finish saving, then try again.");
+      }
+      if (destroyed || generation !== requestGeneration || currentDocument?.id !== document.id) {
+        return;
+      }
+      await options.suggestResponse({
+        documentId: document.id,
+        requestId: createRequestId(),
+        provider: response.provider,
+        requestedModel: response.requested_model,
+        reportedModel: response.reported_model,
+        assistantText: response.text,
+        wordingRevision: response.wording_revision,
+        after: document.suggestionPosition(),
+      });
+      if (destroyed || generation !== requestGeneration || currentDocument?.id !== document.id) {
+        return;
+      }
+      message.suggested = true;
+      options.onNotice?.("Suggestion added for review.");
+    } catch (cause) {
+      if (!destroyed && generation === requestGeneration) {
+        setError(`Could not create suggestion: ${oneLine(cause)}`);
+        options.onNotice?.("Could not create the suggestion.", "error");
+      }
+    } finally {
+      if (!destroyed && generation === requestGeneration) {
+        suggesting = null;
         renderMessages();
         renderControls();
       }
