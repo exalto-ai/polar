@@ -1722,6 +1722,7 @@ name = "thought-core"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "serde",
  "serde_json",
  "thought-schema",
  "thought-testkit",
@@ -1749,6 +1750,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thought-core",
  "thought-markdown",

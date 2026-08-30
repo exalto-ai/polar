@@ -7,6 +7,7 @@
 mod connections;
 mod lineage;
 mod mutation;
+mod suggestions;
 mod workspace;
 
 /// The actor id every editor window writes under, named here so the window can
@@ -19,6 +20,9 @@ pub use connections::{
 };
 pub use lineage::ProseMirrorRange;
 pub use mutation::MutationContext;
+pub use suggestions::{
+    DecisionOutcome, SuggestedChange, SuggestionError, SuggestionList, SuggestionOutcome,
+};
 pub use workspace::{
     ActorRef, ActorSummary, BlockAttribution, BlockSpan, DocumentLineage, DocumentSummary,
     DocumentView, EditOutcome, SearchHit, TextEdit, Workspace, WorkspaceError,

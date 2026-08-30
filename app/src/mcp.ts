@@ -240,6 +240,7 @@ export type DocumentView = {
   title: string;
   markdown: string;
   version: string;
+  content_revision: string;
   blocks: Array<{
     block_id: string;
     kind: string;

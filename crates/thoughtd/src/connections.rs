@@ -24,6 +24,7 @@ pub enum AuthenticatedPrincipal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewerOperation {
     Read,
+    Suggest,
     Edit,
     Create,
     Trash,
@@ -325,9 +326,12 @@ impl ConnectionRegistry {
                 connection_id,
                 credential_hash,
             } => {
-                if operation != ReviewerOperation::Read {
+                if !matches!(
+                    operation,
+                    ReviewerOperation::Read | ReviewerOperation::Suggest
+                ) {
                     return Err(RegistryError::PermissionDenied(
-                        "reviewer connections are read-only".into(),
+                        "reviewer connections can only read or suggest".into(),
                     ));
                 }
                 let connection = self
@@ -484,6 +488,11 @@ mod tests {
         assert!(
             registry
                 .authorize(&principal, ReviewerOperation::Read, Some(&first.doc_id))
+                .is_ok()
+        );
+        assert!(
+            registry
+                .authorize(&principal, ReviewerOperation::Suggest, Some(&first.doc_id))
                 .is_ok()
         );
         assert!(
