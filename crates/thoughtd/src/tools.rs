@@ -39,20 +39,11 @@ pub struct Caller {
     /// Groups one agent turn so it can be reverted as a unit.
     #[serde(default)]
     pub session: Option<String>,
-    /// The bundled window still creates and trashes documents through MCP.
-    /// Its human actor is a compatibility bridge until those lifecycle calls
-    /// move to the editor API; lineage assurance remains reported either way.
-    #[serde(default)]
-    pub kind: Option<String>,
 }
 
 impl Caller {
     fn actor(&self) -> ActorRef {
-        if self.kind.as_deref() == Some("human") {
-            ActorRef::human(&self.agent)
-        } else {
-            ActorRef::agent(&self.agent, self.model.as_deref(), self.session.as_deref())
-        }
+        ActorRef::agent(&self.agent, self.model.as_deref(), self.session.as_deref())
     }
 
     fn context(&self) -> MutationContext {

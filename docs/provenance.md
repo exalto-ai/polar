@@ -27,6 +27,11 @@ MCP and editor access to the user's private writing. It does not make self-asser
 observed, and adding another bearer would not protect against a hostile process running as the
 same OS user.
 
+Creating, importing, trashing, and restoring from the window use the daemon's narrow `/editor`
+routes. Agent-facing MCP tools always create agent actors; they cannot select `kind: human`.
+Both surfaces use the same bearer because it protects the same private store. Their different
+routes describe which product boundary observed an operation, not different user accounts.
+
 ## Storage
 
 SQLite has two authoritative tables:

@@ -106,6 +106,20 @@ impl Daemon {
             .replace("/mcp", "/sync")
     }
 
+    pub fn editor_post(&self, path: &str, body: serde_json::Value) -> serde_json::Value {
+        let url = self.url.replace("/mcp", path);
+        let mut response = self
+            .agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .send_json(&body)
+            .expect("editor request succeeded");
+        response
+            .body_mut()
+            .read_json()
+            .expect("editor response is json")
+    }
+
     pub fn rpc(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
         self.id.set(self.id.get() + 1);
         let mut body = serde_json::json!({
