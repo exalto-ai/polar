@@ -23,7 +23,11 @@ import { installProvenanceRails, type Rails } from "./provenance";
 import { tauriProChatBridge } from "./pro-chat-bridge";
 import { tauriProProviderBridge } from "./pro-provider-bridge";
 import { SyncProvider, type AgentPresence, type ProviderStatus } from "./provider";
-import { installSuggestionReview, type SuggestionReviewController } from "./suggestions";
+import {
+  installSuggestionReview,
+  suggestionPositionAtSelection,
+  type SuggestionReviewController,
+} from "./suggestions";
 
 type Connection = {
   sync_url: string;
@@ -93,6 +97,7 @@ function reason(error: unknown): string {
 const aiSupport = installAiSupport(document, {
   providerBridge: isTauri() ? tauriProProviderBridge() : null,
   chatBridge: isTauri() ? tauriProChatBridge() : null,
+  suggestChatResponse: (input) => editorApi.proposeChatSuggestion(input),
   onNotice: notify,
 });
 
@@ -189,10 +194,13 @@ function refreshTitle(editor: Editor) {
   document.title = title;
   void getCurrentWindow?.()?.setTitle(title);
   if (open?.editor === editor && openDocId) {
+    const current = open;
     aiSupport.setCurrentDocument({
       id: openDocId,
       title,
       snapshot: () => editor.getJSON(),
+      suggestionPosition: () => suggestionPositionAtSelection(editor, current.doc),
+      waitUntilSaved: () => current.provider.waitUntilSaved(),
     });
   }
 }
@@ -362,6 +370,8 @@ async function openDocument(docId: string): Promise<boolean> {
     id: docId,
     title: deriveTitle(editor),
     snapshot: () => editor.getJSON(),
+    suggestionPosition: () => suggestionPositionAtSelection(editor, doc),
+    waitUntilSaved: () => provider.waitUntilSaved(),
   });
   currentSources.setDocument(docId);
 

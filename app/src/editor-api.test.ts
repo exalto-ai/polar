@@ -56,4 +56,39 @@ describe("editor document lifecycle", () => {
       "http://127.0.0.1:1234/editor/documents/doc%2Fone/suggestions/review%2Fone/reject",
     ]);
   });
+
+  it("submits provider text only as a pending chat suggestion", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      Response.json({ suggestion: { suggestion_id: "pro-chat:one" } }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    const documents = new EditorDocuments("http://127.0.0.1:1234/mcp", "secret");
+
+    await documents.proposeChatSuggestion({
+      documentId: "doc/one",
+      requestId: "request-one",
+      provider: "openai",
+      requestedModel: "gpt-test",
+      reportedModel: null,
+      assistantText: "Suggested ending",
+      wordingRevision: "wording-one",
+      after: { kind: "end" },
+    });
+
+    expect(fetch).toHaveBeenCalledWith(
+      new URL("http://127.0.0.1:1234/editor/documents/doc%2Fone/suggestions/pro-chat"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          request_id: "request-one",
+          provider: "openai",
+          requested_model: "gpt-test",
+          reported_model: null,
+          assistant_text: "Suggested ending",
+          wording_revision: "wording-one",
+          after: { kind: "end" },
+        }),
+      }),
+    );
+  });
 });

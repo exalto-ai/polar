@@ -5,6 +5,11 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type * as Y from "yjs";
 import { alignBlocks, blockIdOf } from "./provenance";
 
+export type SuggestionPosition =
+  | { kind: "start" }
+  | { kind: "end" }
+  | { kind: "block"; block_id: string };
+
 export type SuggestionState = "pending" | "accepted" | "rejected" | "stale";
 
 export type SuggestionNode = {
@@ -94,6 +99,28 @@ function blockPositions(editor: Editor, ydoc: Y.Doc): Map<string, BlockPosition>
         : [];
     }),
   );
+}
+
+/** Place an inserted suggestion at the current block boundary. */
+export function suggestionPositionAtSelection(
+  editor: Editor,
+  ydoc: Y.Doc,
+): SuggestionPosition {
+  if (editor.state.doc.childCount === 0) return { kind: "start" };
+  const positions = [...blockPositions(editor, ydoc).entries()]
+    .map(([id, position]) => ({ id, ...position }))
+    .sort((left, right) => left.from - right.from);
+  if (positions.length === 0) {
+    throw new Error("This document is still aligning with its saved version.");
+  }
+  const cursor = editor.state.selection.from;
+  if (cursor <= positions[0].from + 1) return { kind: "start" };
+  const current = positions.find(({ from, to }) => cursor >= from && cursor <= to);
+  if (current) return { kind: "block", block_id: current.id };
+  const previous = [...positions].reverse().find(({ to }) => to < cursor);
+  return previous
+    ? { kind: "block", block_id: previous.id }
+    : { kind: "end" };
 }
 
 function nodeText(node: SuggestionNode): string {

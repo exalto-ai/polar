@@ -499,6 +499,18 @@ text; they do not enter the document or attribution log by themselves.
 request may have reached the provider even when the window receives no answer. Reviewable document
 changes remain a separate suggestion operation rather than an implicit power of chat.
 
+### AD-24 — Chat responses enter documents only through review
+
+A complete built-in chat response may be handed to the daemon as a pending block insertion. The
+daemon rejects it if the document wording has changed since generation. It uses the existing
+suggestion store and Accept/Reject flow; chat has no direct-write route. Provider and model labels
+are explicitly reported claims, not proof of upstream identity.
+
+**Cost:** the local window carries the visible response from native transport to the daemon rather
+than keeping a second native transcript. A modified window could alter a pending proposal, but it
+cannot bypass the local person’s review. Stronger provenance would require a signed provider
+response or a private transcript lifecycle, neither of which the MVP has a present need for.
+
 ## 7. Explicit non-goals for MVP
 
 Folders and hierarchy · accounts and authentication · end-to-end encryption · mobile ·

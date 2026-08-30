@@ -1,4 +1,5 @@
 import { writeClipboardText } from "./clipboard";
+import type { ChatSuggestionInput } from "./editor-api";
 import type { ProProviderBridge } from "./pro-provider-bridge";
 import type { ProChatBridge } from "./pro-chat-bridge";
 import { installProChat, type ProChatDocument } from "./pro-chat";
@@ -13,6 +14,7 @@ type AiSupportOptions = {
   reviewerApi?: ReviewerApi | null;
   providerBridge?: ProProviderBridge | null;
   chatBridge?: ProChatBridge | null;
+  suggestChatResponse?: (input: ChatSuggestionInput) => Promise<unknown>;
   onNotice?: (message: string, kind?: "info" | "error") => void;
 };
 
@@ -51,7 +53,11 @@ export function installAiSupport(
     onNotice: options.onNotice,
   });
   const chat = root.querySelector("#pro-chat")
-    ? installProChat(root, { bridge: options.chatBridge })
+    ? installProChat(root, {
+        bridge: options.chatBridge,
+        suggestResponse: options.suggestChatResponse,
+        onNotice: options.onNotice,
+      })
     : null;
   const providers = root.querySelector("#provider-settings")
     ? installProProvider(root, {
