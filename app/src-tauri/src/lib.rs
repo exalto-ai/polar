@@ -532,17 +532,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|handle, event| match event {
-        tauri::RunEvent::WindowEvent {
+    app.run(|handle, event| {
+        if let tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::Destroyed,
             ..
-        } => {
-            if let Some(state) = handle.try_state::<pro_chat::ChatState>() {
-                state.cancel_window(&label);
-            }
+        } = event
+            && let Some(state) = handle.try_state::<pro_chat::ChatState>()
+        {
+            state.cancel_window(&label);
         }
-        _ => {}
     });
 }
 
