@@ -81,4 +81,5 @@ agent I/O, export, and search. It is never the storage format.
 
 Attribution lives beside the CRDT because Yjs cannot carry it. The append-only op log answers
 who changed a block and when. Current text-lineage spans answer which recorded mutation
-introduced each surviving grapheme; they do not pretend to be tamper-proof history.
+introduced each surviving grapheme; they do not pretend to be tamper-proof history. The AI
+support sidebar groups those current sources without inventing a second proof or history API.
