@@ -12,6 +12,7 @@ mod workspace;
 /// be told who it is rather than hardcoding a string that `sync.rs` owns.
 pub const EDITOR_ACTOR_ID: &str = "human:editor";
 
+pub use lineage::ProseMirrorRange;
 pub use mutation::MutationContext;
 pub use workspace::{
     ActorRef, ActorSummary, BlockAttribution, BlockSpan, DocumentLineage, DocumentSummary,

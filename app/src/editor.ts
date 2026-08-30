@@ -2,19 +2,42 @@
  * The editor: TipTap over the shared Y.Doc, with the composition guard wired
  * to the provider.
  */
-import { Editor } from "@tiptap/core";
+import { Editor, Extension, getChangedRanges } from "@tiptap/core";
 import Collaboration from "@tiptap/extension-collaboration";
 import CollaborationCaret from "@tiptap/extension-collaboration-caret";
 import type { Awareness } from "y-protocols/awareness";
 import type * as Y from "yjs";
+import type { Transform } from "@tiptap/pm/transform";
 import { extensions } from "./schema";
 import type { SyncProvider } from "./provider";
 import { installLinkShortcut } from "./link";
 import { installSlashMenu } from "./slash";
 import { installToolbar, type ToolbarOptions } from "./toolbar";
+import { MAX_EDITOR_RANGES, type EditorRange } from "./protocol";
 
 export type Actor = { name: string; color: string; id: number };
 export type EditorActions = Omit<ToolbarOptions, "openLink" | "subscribeSaveStatus">;
+
+export function transactionRanges(transaction: Transform): EditorRange[] {
+  if (transaction.steps.length === 0) return [];
+  const ranges = getChangedRanges(transaction).map(({ oldRange, newRange }) => ({
+    beforeFrom: oldRange.from,
+    beforeTo: oldRange.to,
+    afterFrom: newRange.from,
+    afterTo: newRange.to,
+  }));
+  return ranges.length <= MAX_EDITOR_RANGES ? ranges : [];
+}
+
+function editorMutationExtension(provider: SyncProvider): Extension {
+  return Extension.create({
+    name: "thoughtEditorMutation",
+    priority: 10_000,
+    dispatchTransaction({ transaction, next }) {
+      provider.withEditorTransaction(transactionRanges(transaction), () => next(transaction));
+    },
+  });
+}
 
 /**
  * The caret each peer leaves behind.
@@ -49,6 +72,7 @@ export function createEditor(
   const editor = new Editor({
     element,
     extensions: [
+      editorMutationExtension(provider),
       ...extensions,
       // The fragment name must match the daemon's root (thought_core::CONTENT).
       Collaboration.configure({ fragment: doc.getXmlFragment("content") }),
@@ -58,7 +82,13 @@ export function createEditor(
         render: renderCaret as never,
       }),
     ],
-    autofocus: "end",
+    autofocus: false,
+    editable: false,
+  });
+
+  const unsubscribeHydration = provider.subscribeHydration((hydrated) => {
+    editor.setEditable(hydrated, false);
+    if (hydrated) editor.commands.focus("end");
   });
 
   const destroySlashMenu = installSlashMenu(editor, host);
@@ -75,6 +105,7 @@ export function createEditor(
     destroySlashMenu();
     links.destroy();
     destroyToolbar();
+    unsubscribeHydration();
   });
 
   // AD-17. y-prosemirror applies remote updates while an input method has live
