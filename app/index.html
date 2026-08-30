@@ -15,6 +15,7 @@
     <header class="chrome" data-tauri-drag-region>
       <span class="presence" id="presence"></span>
       <button class="status" id="status" title="Connections" aria-haspopup="dialog"></button>
+      <button class="ai-support-toggle" id="ai-support-toggle" type="button" aria-controls="ai-support-sidebar" aria-expanded="false">AI support</button>
     </header>
 
     <div class="popover" id="connections" hidden role="dialog" aria-label="Connections">
@@ -27,17 +28,26 @@
         <h2>Agents</h2>
         <ul id="agents"></ul>
       </section>
-      <section>
-        <h2>Connect an agent</h2>
-        <p class="note">Point any MCP client at this command. It finds the running daemon, or starts one.</p>
-        <pre id="stdio-command"></pre>
-        <button class="ghost" id="copy-command">Copy</button>
-      </section>
     </div>
 
-    <main class="page">
-      <div id="editor" class="editor"></div>
-    </main>
+    <div class="workspace">
+      <main class="page">
+        <div id="editor" class="editor"></div>
+      </main>
+
+      <aside class="ai-sidebar" id="ai-support-sidebar" aria-labelledby="ai-support-title" hidden>
+        <header class="ai-sidebar-header">
+          <div>
+            <span class="eyebrow">AI support</span>
+            <h2 id="ai-support-title">Connect an agent</h2>
+          </div>
+          <button class="icon-button" id="ai-sidebar-close" type="button" aria-label="Close AI support">×</button>
+        </header>
+        <p class="ai-sidebar-note">Point any MCP client at this command. It finds the running daemon, or starts one.</p>
+        <pre id="stdio-command"></pre>
+        <button class="ghost" id="copy-command" type="button" disabled>Copy</button>
+      </aside>
+    </div>
 
     <!-- Errors used to have nowhere to go: a failed call left the status dot
          green and the window silently wrong. -->
