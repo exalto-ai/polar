@@ -38,6 +38,7 @@ const MAX_CONVERSATION_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TURNS: usize = 100;
 const MAX_ID_BYTES: usize = 160;
 const MAX_REQUEST_ID_BYTES: usize = 256;
+const MAX_WORDING_REVISION_BYTES: usize = 128;
 const MAX_SSE_BUFFER_BYTES: usize = 512 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 256 * 1024;
 const MAX_SSE_EVENTS: usize = 20_000;
@@ -107,6 +108,18 @@ pub struct ChatTurn {
     pub output_tokens: Option<u64>,
     pub disclosure_version: u32,
     pub retry_of: Option<String>,
+    /// Wording and formatting sent with this request. Older saved turns leave
+    /// this empty and remain readable, but cannot become suggestions.
+    #[serde(default)]
+    pub wording_revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompletedChatResponse {
+    pub assistant_text: String,
+    pub requested_model: String,
+    pub reported_model: Option<String>,
+    pub wording_revision: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +341,34 @@ impl ChatState {
         Ok(history)
     }
 
+    pub(crate) fn completed_response(
+        &self,
+        document_id: &str,
+        provider: Provider,
+        turn_id: &str,
+    ) -> Result<CompletedChatResponse, String> {
+        validate_document_id(document_id)?;
+        if !safe_identifier(turn_id, MAX_ID_BYTES) {
+            return Err("That chat response is unavailable.".to_string());
+        }
+        let _state_lock = StateFileLock::acquire(&self.0.root, document_id, provider)?;
+        let history = load_history(&self.0.root, document_id, provider)?;
+        let turn = history
+            .turns
+            .iter()
+            .find(|turn| turn.id == turn_id && turn.status == ChatTurnStatus::Completed)
+            .ok_or_else(|| "Only a completed response can become a suggestion.".to_string())?;
+        if !safe_identifier(&turn.wording_revision, MAX_WORDING_REVISION_BYTES) {
+            return Err("Send a new message before creating a suggestion.".to_string());
+        }
+        Ok(CompletedChatResponse {
+            assistant_text: turn.assistant_text.clone(),
+            requested_model: turn.requested_model.clone(),
+            reported_model: turn.reported_model.clone(),
+            wording_revision: turn.wording_revision.clone(),
+        })
+    }
+
     fn clear(
         &self,
         document_id: &str,
@@ -545,6 +586,8 @@ fn validate_history(
                 .retry_of
                 .as_ref()
                 .is_some_and(|value| !safe_identifier(value, MAX_ID_BYTES))
+            || (!turn.wording_revision.is_empty()
+                && !safe_identifier(&turn.wording_revision, MAX_WORDING_REVISION_BYTES))
             || turn.disclosure_version == 0
             || turn.disclosure_version > CHAT_DISCLOSURE_VERSION
             || turn.created_at <= 0
@@ -659,6 +702,7 @@ struct ContextTurn {
 struct CurrentDocumentContext {
     title: String,
     markdown: String,
+    wording_revision: String,
 }
 
 struct PreparedChat {
@@ -704,6 +748,7 @@ fn current_document_context(request: &StartChatRequest) -> Result<CurrentDocumen
     thought_schema::Schema::v0()
         .validate(&document)
         .map_err(|_| "The current editor content could not be included safely.".to_string())?;
+    let wording_revision = thought_markdown::current_wording_revision(&document);
     let markdown = thought_markdown::to_markdown(&document);
     if markdown.len() > MAX_DOCUMENT_BYTES {
         return Err(
@@ -711,7 +756,11 @@ fn current_document_context(request: &StartChatRequest) -> Result<CurrentDocumen
                 .to_string(),
         );
     }
-    Ok(CurrentDocumentContext { title, markdown })
+    Ok(CurrentDocumentContext {
+        title,
+        markdown,
+        wording_revision,
+    })
 }
 
 fn validate_message(message: &str) -> Result<(), String> {
@@ -847,6 +896,7 @@ fn prepare_chat_with_document(
         output_tokens: None,
         disclosure_version: request.disclosure_version,
         retry_of,
+        wording_revision: document.wording_revision.clone(),
     };
     history.turns.push(turn.clone());
     history.revision = history
@@ -2799,9 +2849,13 @@ mod tests {
     use std::thread;
 
     fn test_document_context(markdown: impl Into<String>) -> CurrentDocumentContext {
+        let markdown = markdown.into();
         CurrentDocumentContext {
             title: "Current draft".to_string(),
-            markdown: markdown.into(),
+            wording_revision: thought_markdown::current_wording_revision(
+                &thought_markdown::from_markdown(&markdown),
+            ),
+            markdown,
         }
     }
 
@@ -2863,7 +2917,37 @@ mod tests {
             output_tokens: None,
             disclosure_version: CHAT_DISCLOSURE_VERSION,
             retry_of: None,
+            wording_revision: "wording-revision".to_string(),
         }
+    }
+
+    #[test]
+    fn suggestion_source_comes_from_a_completed_native_turn() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state = ChatState::new(
+            temporary.path().join("chat"),
+            "https://openai.invalid".to_string(),
+            "https://anthropic.invalid".to_string(),
+            true,
+        );
+        let mut history = ChatHistory::empty("document-1".to_string(), Provider::Openai);
+        let mut turn = completed_turn(
+            "turn-1",
+            Provider::Openai,
+            "Revise this",
+            "Exact native response",
+        );
+        turn.reported_model = Some("gpt-reported".to_string());
+        history.turns.push(turn);
+        history.revision = 1;
+        save_history(&state.0.root, &history).unwrap();
+
+        let source = state
+            .completed_response("document-1", Provider::Openai, "turn-1")
+            .unwrap();
+        assert_eq!(source.assistant_text, "Exact native response");
+        assert_eq!(source.reported_model.as_deref(), Some("gpt-reported"));
+        assert_eq!(source.wording_revision, "wording-revision");
     }
 
     fn sse_event(kind: &str, value: Value) -> SseEvent {

@@ -5,7 +5,10 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use std::sync::Arc;
-use thought_mcp::{ActorRef, MutationContext, ReviewerAccess, ReviewerClient, Workspace};
+use thought_mcp::{
+    ActorRef, MutationContext, ReviewerAccess, ReviewerClient, ReviewerProvider, SuggestedChange,
+    Workspace,
+};
 use thoughtd::connections::{ConnectionRegistry, now_ms};
 
 #[derive(Clone)]
@@ -24,6 +27,28 @@ struct CreateDocument {
 #[derive(serde::Deserialize)]
 struct SetDeleted {
     deleted: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProChatSuggestion {
+    request_id: String,
+    turn_id: String,
+    provider: ReviewerProvider,
+    requested_model: String,
+    #[serde(default)]
+    reported_model: Option<String>,
+    assistant_text: String,
+    wording_revision: String,
+    after: ProChatSuggestionPosition,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ProChatSuggestionPosition {
+    Start,
+    End,
+    Block { block_id: String },
 }
 
 #[derive(serde::Deserialize)]
@@ -61,6 +86,10 @@ pub fn routes(workspace: Arc<Workspace>, reviewers: Arc<ConnectionRegistry>) -> 
         .route(
             "/editor/documents/{doc_id}/suggestions",
             get(list_suggestions),
+        )
+        .route(
+            "/editor/documents/{doc_id}/suggestions/pro-chat",
+            post(create_pro_chat_suggestion),
         )
         .route(
             "/editor/documents/{doc_id}/suggestions/{suggestion_id}/accept",
@@ -133,6 +162,90 @@ async fn list_suggestions(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let suggestions = state.workspace.list_suggestions(&doc_id).map_err(failed)?;
     Ok(Json(serde_json::to_value(suggestions).map_err(failed)?))
+}
+
+async fn create_pro_chat_suggestion(
+    State(state): State<EditorState>,
+    Path(doc_id): Path<String>,
+    Json(request): Json<ProChatSuggestion>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+    if request.assistant_text.trim().is_empty()
+        || request.assistant_text.len() > MAX_RESPONSE_BYTES
+        || request.assistant_text.contains('\0')
+    {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "The chat response is empty or too large to suggest.".into(),
+        ));
+    }
+    for value in [
+        request.turn_id.as_str(),
+        request.requested_model.as_str(),
+        request.wording_revision.as_str(),
+    ] {
+        if value.is_empty() || value.len() > 160 || value.chars().any(char::is_control) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "The chat suggestion contains invalid metadata.".into(),
+            ));
+        }
+    }
+    if request.reported_model.as_deref().is_some_and(|value| {
+        value.is_empty() || value.len() > 160 || value.chars().any(char::is_control)
+    }) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "The chat suggestion contains invalid model metadata.".into(),
+        ));
+    }
+
+    let lineage = state.workspace.document_lineage(&doc_id).map_err(failed)?;
+    if lineage.current_wording_revision != request.wording_revision {
+        return Err((
+            StatusCode::CONFLICT,
+            "The document changed after this response was generated.".into(),
+        ));
+    }
+    let current = state.workspace.read_document(&doc_id).map_err(failed)?;
+    let after = match request.after {
+        ProChatSuggestionPosition::Start => Some("start".to_string()),
+        ProChatSuggestionPosition::End => None,
+        ProChatSuggestionPosition::Block { block_id } => Some(block_id),
+    };
+    let (provider_id, provider_label) = match request.provider {
+        ReviewerProvider::Openai => ("openai", "OpenAI"),
+        ReviewerProvider::Anthropic => ("anthropic", "Anthropic"),
+    };
+    let connection_id = format!("pro-chat:{provider_id}");
+    let actor = ActorRef::reviewer(
+        &connection_id,
+        provider_label,
+        request.reported_model.as_deref(),
+        Some(&request.turn_id),
+    );
+    let context = MutationContext::mcp_connection(
+        format!("{provider_label} chat (reported)"),
+        &connection_id,
+    );
+    let outcome = state
+        .workspace
+        .propose_suggestion(
+            &doc_id,
+            &request.request_id,
+            &current.content_revision,
+            &SuggestedChange::InsertBlocks {
+                after,
+                markdown: request.assistant_text,
+            },
+            None,
+            request.reported_model.as_deref(),
+            &connection_id,
+            &actor,
+            &context,
+        )
+        .map_err(failed)?;
+    Ok(Json(serde_json::to_value(outcome).map_err(failed)?))
 }
 
 async fn accept_suggestion(
