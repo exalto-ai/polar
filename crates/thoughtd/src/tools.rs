@@ -11,7 +11,9 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, tool, tool_router};
 use std::sync::Arc;
 use thought_core::Position;
-use thought_mcp::{ActorRef, MutationContext, ReviewerDocumentScope, TextEdit, Workspace};
+use thought_mcp::{
+    ActorRef, MutationContext, ReviewerDocumentScope, SuggestedChange, TextEdit, Workspace,
+};
 use thoughtd::connections::{
     AuthenticatedPrincipal, AuthorizedRequest, ConnectionRegistry, ReviewerOperation, now_ms,
 };
@@ -182,6 +184,72 @@ pub struct DeleteDocumentParams {
     pub caller: Caller,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SuggestedChangeParams {
+    ReplaceBlock {
+        block_id: String,
+        markdown: String,
+    },
+    InsertBlocks {
+        /// A `block_id` to insert after, or `"start"` / `"end"`.
+        #[serde(default)]
+        after: Option<String>,
+        markdown: String,
+    },
+    ReplaceText {
+        block_id: String,
+        find: String,
+        replace: String,
+        #[serde(default)]
+        occurrence: Option<usize>,
+    },
+    DeleteBlock {
+        block_id: String,
+    },
+}
+
+impl From<SuggestedChangeParams> for SuggestedChange {
+    fn from(value: SuggestedChangeParams) -> Self {
+        match value {
+            SuggestedChangeParams::ReplaceBlock { block_id, markdown } => {
+                Self::ReplaceBlock { block_id, markdown }
+            }
+            SuggestedChangeParams::InsertBlocks { after, markdown } => {
+                Self::InsertBlocks { after, markdown }
+            }
+            SuggestedChangeParams::ReplaceText {
+                block_id,
+                find,
+                replace,
+                occurrence,
+            } => Self::ReplaceText {
+                block_id,
+                find,
+                replace,
+                occurrence,
+            },
+            SuggestedChangeParams::DeleteBlock { block_id } => Self::DeleteBlock { block_id },
+        }
+    }
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SuggestParams {
+    pub doc_id: String,
+    /// Stable retry key chosen by the caller. Reusing it returns the first
+    /// proposal instead of creating a duplicate.
+    pub request_id: String,
+    /// The `content_revision` from `read_document`. Suggestions require an
+    /// exact base and fail if the document changed.
+    pub content_revision: String,
+    pub change: SuggestedChangeParams,
+    #[serde(default)]
+    pub explanation: Option<String>,
+    #[serde(flatten)]
+    pub caller: Caller,
+}
+
 #[tool_router(server_handler)]
 impl Thought {
     pub fn new(workspace: Arc<Workspace>, reviewers: Arc<ConnectionRegistry>) -> Self {
@@ -275,6 +343,54 @@ impl Thought {
         let view = self.workspace.read_document(&p.doc_id).map_err(failed)?;
         drop(authorized);
         Ok(Json(serde_json::to_value(view).map_err(failed)?))
+    }
+
+    #[tool(description = "List reviewer suggestions for one document and their current state.")]
+    fn list_suggestions(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<DocParams>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let (_principal, authorized) =
+            self.authorize(&parts, ReviewerOperation::Read, Some(&p.doc_id))?;
+        let suggestions = self.workspace.list_suggestions(&p.doc_id).map_err(failed)?;
+        drop(authorized);
+        Ok(Json(serde_json::to_value(suggestions).map_err(failed)?))
+    }
+
+    #[tool(
+        description = "Propose one block-addressed change for the user to review. This never edits document content directly. Read the document first and pass its exact content_revision."
+    )]
+    fn suggest_change(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<SuggestParams>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let (principal, authorized) =
+            self.authorize(&parts, ReviewerOperation::Suggest, Some(&p.doc_id))?;
+        let connection_id = authorized
+            .connection()
+            .expect("suggestions require a reviewer connection")
+            .id
+            .clone();
+        let reported_model = p.caller.model.clone();
+        let (actor, context) = self.mutation_identity(&principal, &authorized, &p.caller)?;
+        let change = SuggestedChange::from(p.change);
+        let outcome = self.workspace.propose_suggestion(
+            &p.doc_id,
+            &p.request_id,
+            &p.content_revision,
+            &change,
+            p.explanation.as_deref(),
+            reported_model.as_deref(),
+            &connection_id,
+            &actor,
+            &context,
+        );
+        drop(authorized);
+        Ok(Json(
+            serde_json::to_value(outcome.map_err(failed)?).map_err(failed)?,
+        ))
     }
 
     #[tool(
@@ -544,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_reviewer_connections_are_read_only() {
+    fn durable_reviewer_connections_can_read_and_suggest_but_not_edit() {
         let workspace = Arc::new(Workspace::open_in_memory().unwrap());
         let directory = tempfile::tempdir().unwrap();
         let registry = Arc::new(ConnectionRegistry::new(
@@ -569,6 +685,11 @@ mod tests {
         assert!(!stored.permissions.can_edit);
         assert!(!stored.permissions.can_create);
         assert!(!stored.permissions.can_trash);
+        assert!(
+            registry
+                .authorize(&principal, ReviewerOperation::Suggest, None)
+                .is_ok()
+        );
         for operation in [
             ReviewerOperation::Edit,
             ReviewerOperation::Create,
@@ -576,6 +697,63 @@ mod tests {
         ] {
             assert!(registry.authorize(&principal, operation, None).is_err());
         }
+    }
+
+    #[test]
+    fn suggestion_tool_records_a_proposal_without_editing_content() {
+        let workspace = Arc::new(Workspace::open_in_memory().unwrap());
+        let document = workspace
+            .create_document_from_markdown("", "# Draft", &ActorRef::editor())
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ConnectionRegistry::new(
+            workspace.clone(),
+            CredentialStore::files(directory.path()),
+        ));
+        let connection = registry
+            .create(
+                ReviewerClient::Codex,
+                "Codex reviewer".to_string(),
+                ReviewerPermissions::selected([document.doc_id.clone()], false, false),
+                10,
+            )
+            .unwrap();
+        let credential = registry.credential_for_shim(&connection.id).unwrap();
+        let principal = registry
+            .authenticate_reviewer(std::str::from_utf8(&credential).unwrap(), 11)
+            .unwrap()
+            .unwrap();
+        let thought = Thought::new(workspace.clone(), registry);
+
+        let response = thought
+            .suggest_change(
+                Extension(parts(principal)),
+                Parameters(SuggestParams {
+                    doc_id: document.doc_id.clone(),
+                    request_id: "request-one".into(),
+                    content_revision: document.content_revision.clone(),
+                    change: SuggestedChangeParams::ReplaceText {
+                        block_id: document.blocks[0].block_id.clone(),
+                        find: "Draft".into(),
+                        replace: "Final".into(),
+                        occurrence: Some(1),
+                    },
+                    explanation: Some("Tighter".into()),
+                    caller: Caller {
+                        agent: None,
+                        model: Some("reported-model".into()),
+                        session: Some("session-one".into()),
+                        kind: None,
+                    },
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(response.0["suggestion"]["state"], "pending");
+        assert_eq!(
+            workspace.read_document(&document.doc_id).unwrap().markdown,
+            "# Draft"
+        );
     }
 
     #[test]

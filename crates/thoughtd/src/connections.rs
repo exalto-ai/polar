@@ -61,6 +61,7 @@ struct FailureReporterBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewerOperation {
     Read,
+    Suggest,
     Edit,
     Create,
     Trash,
@@ -326,7 +327,9 @@ impl ConnectionRegistry {
             AuthenticatedPrincipal::Reviewer { .. } => {
                 let connection = self.revalidated_connection(principal, now_ms())?;
                 let allowed = match operation {
-                    ReviewerOperation::Read => connection.permissions.can_read,
+                    ReviewerOperation::Read | ReviewerOperation::Suggest => {
+                        connection.permissions.can_read
+                    }
                     ReviewerOperation::Edit
                     | ReviewerOperation::Create
                     | ReviewerOperation::Trash => false,
@@ -919,6 +922,7 @@ impl ReviewerOperation {
     fn verb(self) -> &'static str {
         match self {
             Self::Read => "read",
+            Self::Suggest => "suggest changes to",
             Self::Edit => "edit",
             Self::Create => "create",
             Self::Trash => "trash or restore",

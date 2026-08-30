@@ -3,9 +3,14 @@
 
 mod block;
 mod convert;
+mod suggestion;
 mod tree;
 
 pub use block::{BlockError, BlockRef, Position};
+pub use suggestion::{
+    SuggestionBlockPosition, SuggestionDecision, SuggestionPatch, SuggestionProposer,
+    SuggestionRecord, SuggestionRecordError, SuggestionState,
+};
 
 use thought_schema::Node;
 use yrs::types::xml::XmlFragment;
@@ -40,6 +45,9 @@ pub const CONTENT: &str = "content";
 
 /// Document metadata that must replicate: the deletion tombstone lives here.
 pub const META: &str = "meta";
+
+/// Replicated reviewer proposals and their current decision state.
+pub const SUGGESTIONS: &str = "suggestions";
 
 pub struct Document {
     doc: Doc,

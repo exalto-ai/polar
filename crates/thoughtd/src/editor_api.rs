@@ -87,6 +87,18 @@ pub fn routes(workspace: Arc<Workspace>, reviewers: Arc<ConnectionRegistry>) -> 
             post(set_document_deleted),
         )
         .route(
+            "/editor/documents/{doc_id}/suggestions",
+            get(list_suggestions),
+        )
+        .route(
+            "/editor/documents/{doc_id}/suggestions/{suggestion_id}/accept",
+            post(accept_suggestion),
+        )
+        .route(
+            "/editor/documents/{doc_id}/suggestions/{suggestion_id}/reject",
+            post(reject_suggestion),
+        )
+        .route(
             "/editor/reviewer-connections",
             get(list_reviewer_connections).post(create_reviewer_connection),
         )
@@ -173,6 +185,42 @@ async fn set_document_deleted(
         &ActorRef::editor(),
         &MutationContext::command(),
     )?;
+    Ok(Json(
+        serde_json::to_value(outcome).map_err(EditorApiError::internal)?,
+    ))
+}
+
+async fn list_suggestions(
+    State(state): State<EditorState>,
+    Path(doc_id): Path<String>,
+) -> Result<Json<serde_json::Value>, EditorApiError> {
+    let suggestions = state.workspace.list_suggestions(&doc_id)?;
+    Ok(Json(
+        serde_json::to_value(suggestions).map_err(EditorApiError::internal)?,
+    ))
+}
+
+async fn accept_suggestion(
+    State(state): State<EditorState>,
+    Path((doc_id, suggestion_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, EditorApiError> {
+    let outcome =
+        state
+            .workspace
+            .accept_suggestion(&doc_id, &suggestion_id, &ActorRef::editor())?;
+    Ok(Json(
+        serde_json::to_value(outcome).map_err(EditorApiError::internal)?,
+    ))
+}
+
+async fn reject_suggestion(
+    State(state): State<EditorState>,
+    Path((doc_id, suggestion_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, EditorApiError> {
+    let outcome =
+        state
+            .workspace
+            .reject_suggestion(&doc_id, &suggestion_id, &ActorRef::editor())?;
     Ok(Json(
         serde_json::to_value(outcome).map_err(EditorApiError::internal)?,
     ))
@@ -332,6 +380,19 @@ impl From<WorkspaceError> for EditorApiError {
     fn from(error: WorkspaceError) -> Self {
         let status = match &error {
             WorkspaceError::NoSuchDocument(_) => StatusCode::NOT_FOUND,
+            WorkspaceError::Suggestion(thought_mcp::SuggestionError::NotFound(_)) => {
+                StatusCode::NOT_FOUND
+            }
+            WorkspaceError::Suggestion(
+                thought_mcp::SuggestionError::BaseRevisionMismatch { .. }
+                | thought_mcp::SuggestionError::AlreadyDecided(_),
+            ) => StatusCode::CONFLICT,
+            WorkspaceError::Suggestion(thought_mcp::SuggestionError::InvalidInput(_)) => {
+                StatusCode::BAD_REQUEST
+            }
+            WorkspaceError::Suggestion(thought_mcp::SuggestionError::CorruptStored(_)) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
             WorkspaceError::InvalidMarkdown(_)
             | WorkspaceError::Block(_)
             | WorkspaceError::NotFound(_)
