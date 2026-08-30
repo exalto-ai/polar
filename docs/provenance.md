@@ -72,7 +72,13 @@ ledger.
 
 The AI support sidebar reads `document_lineage` directly and groups sources already present in
 the response. It shows labels, assurance, and alignment. It does not expose percentages, build a
-separate consumer ledger, hash the document again, or replay event history in the browser.
+separate consumer ledger, or replay event history in the browser.
+
+Each response includes a SHA-256 revision of the normalized Markdown projection. The native
+window computes the same revision from its visible editor tree and displays sources only when the
+two match. Pending saves, invalid editor trees, and stale responses fail closed. This binds the
+labels to the wording and formatting on screen; it is not a signature, timestamp, or proof of
+origin.
 
 ## Reviewer connections
 

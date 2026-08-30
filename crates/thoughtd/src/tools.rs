@@ -429,10 +429,10 @@ impl Thought {
     }
 
     #[tool(
-        description = "Current wording contribution by source, backed by surviving grapheme \
-                       spans and a versioned deterministic alignment. V1 does not carry editor \
-                       range anchors, so duplicate equal text from different sources can be \
-                       ambiguous; the response identifies its alignment basis."
+        description = "Current wording contribution by source, bound to a normalized visible-\
+                       wording revision. V1 does not carry editor range anchors, so duplicate \
+                       equal text from different sources can be ambiguous; the response \
+                       identifies its alignment basis."
     )]
     fn document_lineage(
         &self,

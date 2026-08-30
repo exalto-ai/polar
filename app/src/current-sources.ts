@@ -12,6 +12,7 @@ const REFRESH_DELAY_MS = 400;
 export function installCurrentSources(
   root: ParentNode,
   load: (docId: string) => Promise<DocumentLineage>,
+  currentRevision: () => Promise<string | null>,
 ): CurrentSources {
   const list = root.querySelector<HTMLUListElement>("#current-source-list")!;
   const status = root.querySelector<HTMLElement>("#current-source-status")!;
@@ -21,6 +22,12 @@ export function installCurrentSources(
   let docId: string | null = null;
   let timer: number | null = null;
   let request = 0;
+
+  function hideSources() {
+    list.replaceChildren();
+    list.hidden = true;
+    note.hidden = true;
+  }
 
   function render(lineage: DocumentLineage) {
     const sources = lineage.summary.grouped_contributions;
@@ -48,19 +55,30 @@ export function installCurrentSources(
   async function refresh() {
     const target = docId;
     if (!target) {
-      list.replaceChildren();
-      list.hidden = true;
-      note.hidden = true;
+      hideSources();
       retry.hidden = true;
       status.textContent = "Open a document to see its sources.";
       return;
     }
     const currentRequest = ++request;
+    hideSources();
     status.textContent = "Loading sources…";
     retry.hidden = true;
     try {
       const lineage = await load(target);
-      if (currentRequest === request && target === docId) render(lineage);
+      const visibleRevision = await currentRevision();
+      if (currentRequest !== request || target !== docId) return;
+      if (visibleRevision === null) {
+        retry.hidden = true;
+        status.textContent = "Sources are available after current changes are saved.";
+        return;
+      }
+      if (lineage.current_wording_revision !== visibleRevision) {
+        retry.hidden = false;
+        status.textContent = "Sources are catching up with the visible document.";
+        return;
+      }
+      render(lineage);
     } catch {
       if (currentRequest !== request || target !== docId) return;
       status.textContent = "Could not load sources.";
@@ -77,6 +95,10 @@ export function installCurrentSources(
     },
     scheduleRefresh() {
       if (!docId) return;
+      request += 1;
+      hideSources();
+      retry.hidden = true;
+      status.textContent = "Updating sources…";
       if (timer !== null) clearTimeout(timer);
       timer = window.setTimeout(() => {
         timer = null;
