@@ -401,6 +401,31 @@ writes never touch the text layer at all.
 
 Consequence: an IME failure is a bridge bug, not a reason to abandon the webview.
 
+### AD-18 — Text lineage records operations, not a second history system
+
+The CRDT and append-only update log remain the document history. Text lineage stores only
+what the current document needs: one source event for each committed mutation and compact
+UTF-16 spans pointing from surviving text to those events. The event id is the update-log
+sequence, and the update, event, spans, search index, tombstone cache, and block rails commit
+in one SQLite transaction.
+
+When an operation supplies exact before/after text ranges, lineage uses them. Otherwise it
+preserves only the common prefix and suffix within stable block ids and labels the result
+`inferred`.
+Content written before lineage existed is labelled `legacy_unknown`; it is not reconstructed
+from history and presented as fact. MCP identity is self-reported and can only produce
+`reported` provenance. A separate local editor capability is required before a mutation can
+be called `observed`.
+
+There is deliberately no receipt ledger, hash chain, replay engine, cached lineage state, or
+format/structure delta model. Those would duplicate the CRDT and imply verification the local
+daemon cannot provide. Evidence and verified traces may refer to source events later without
+changing this storage model.
+
+**Cost:** inferred alignment can be ambiguous when text repeats, current spans do not answer
+historical questions, and legacy content stays unknown. Exact editor ranges pay off the first;
+the op log answers history; neither justifies inventing missing provenance for the third.
+
 ### AD-15 — Direct writes for local unshared docs, suggestion mode once shared
 Per-session override either way. The reason to gate agent writes is other people, not the
 agent; gating solo local editing is friction with no beneficiary.
