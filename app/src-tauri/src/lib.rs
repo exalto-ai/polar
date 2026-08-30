@@ -19,6 +19,7 @@ use thoughtd::discovery::{self, Daemon};
 mod macos_secure_input;
 mod pro_chat;
 mod pro_provider;
+mod pro_suggestions;
 
 #[derive(serde::Serialize)]
 struct Connection {
@@ -527,7 +528,8 @@ pub fn run() {
             pro_chat::pro_chat_history,
             pro_chat::start_pro_chat,
             pro_chat::stop_pro_chat,
-            pro_chat::clear_pro_chat
+            pro_chat::clear_pro_chat,
+            pro_suggestions::suggest_chat_response
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

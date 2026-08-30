@@ -3,6 +3,7 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type * as Y from "yjs";
+import type { ProChatSuggestionPosition } from "./pro-chat-bridge";
 import { alignBlocks, blockIdOf } from "./provenance";
 
 export type SuggestionState = "pending" | "accepted" | "rejected" | "stale";
@@ -94,6 +95,29 @@ function blockPositions(editor: Editor, ydoc: Y.Doc): Map<string, BlockPosition>
         : [];
     }),
   );
+}
+
+/** Insert a chat response at the current block boundary. */
+export function suggestionPositionAtSelection(
+  editor: Editor,
+  ydoc: Y.Doc,
+): ProChatSuggestionPosition {
+  if (editor.state.doc.childCount === 0) return { kind: "start" };
+  const positions = [...blockPositions(editor, ydoc).entries()]
+    .map(([id, position]) => ({ id, ...position }))
+    .sort((left, right) => left.from - right.from);
+  if (positions.length !== editor.state.doc.childCount) {
+    throw new Error("This document is still aligning with its saved version.");
+  }
+  const cursor = editor.state.selection.from;
+  if (cursor <= positions[0].from + 1) return { kind: "start" };
+  if (cursor >= editor.state.doc.content.size) return { kind: "end" };
+  const current = positions.find(({ from, to }) => cursor >= from && cursor <= to);
+  if (current) return { kind: "block", block_id: current.id };
+  const previous = [...positions].reverse().find(({ to }) => to < cursor);
+  return previous
+    ? { kind: "block", block_id: previous.id }
+    : { kind: "start" };
 }
 
 function nodeText(node: SuggestionNode): string {

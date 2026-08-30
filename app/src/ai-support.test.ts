@@ -57,7 +57,13 @@ describe("AI support sidebar", () => {
   it("delegates reviewer state without owning it", () => {
     const controller = installAiSupport(document);
     const bridge = {} as never;
-    const context = { id: "doc-1", title: "Draft", snapshot: () => ({}) };
+    const context = {
+      id: "doc-1",
+      title: "Draft",
+      snapshot: () => ({}),
+      suggestionPosition: () => ({ kind: "end" } as const),
+      waitUntilSaved: () => Promise.resolve(true),
+    };
 
     controller.setConnectionCommand("thought-mcp-stdio");
     controller.setReviewerBridge(bridge);

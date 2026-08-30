@@ -6,6 +6,7 @@ import {
   type ProChatModel,
   type ProChatProvider,
   type ProChatProviderCapability,
+  type ProChatSuggestionPosition,
   type ProChatThinking,
   type ProChatTurn,
 } from "./pro-chat-bridge";
@@ -15,6 +16,8 @@ export type ProChatDocumentContext = {
   id: string;
   title: string;
   snapshot: () => unknown;
+  suggestionPosition: () => ProChatSuggestionPosition;
+  waitUntilSaved: () => Promise<boolean>;
 };
 
 type ProChatOptions = {
@@ -25,6 +28,8 @@ type ProChatOptions = {
   onActivityChange?: (active: boolean) => void;
   copyText?: (text: string) => Promise<void>;
   onResponseCopied?: () => void;
+  onSuggestionCreated?: (suggestionId: string) => void;
+  createRequestId?: () => string;
   onNotice?: (message: string, kind?: "info" | "error") => void;
 };
 
@@ -54,6 +59,7 @@ type MessageNodes = {
   retry: HTMLButtonElement;
   actions: HTMLElement;
   copy: HTMLButtonElement;
+  suggest: HTMLButtonElement;
 };
 
 const THINKING_LEVELS: readonly ProChatThinking[] = [
@@ -204,6 +210,7 @@ export function installProChat(
   const live = required<HTMLElement>(panel, "#pro-chat-live");
   const bridge = options.bridge ?? null;
   const copyText = options.copyText ?? writeClipboardText;
+  const createRequestId = options.createRequestId ?? (() => crypto.randomUUID());
   const disposers: Array<() => void> = [];
   const consentedProviders = new Set<ProChatProvider>();
   const messageNodes = new Map<string, MessageNodes>();
@@ -231,6 +238,8 @@ export function installProChat(
   let historyGeneration = 0;
   let clearGeneration = 0;
   let running: RunningRequest | null = null;
+  let suggestingTurnId: string | null = null;
+  const suggestedTurnIds = new Set<string>();
   let initialAvailabilityResolved = false;
 
   function listen<K extends keyof HTMLElementEventMap>(
@@ -267,7 +276,7 @@ export function installProChat(
   }
 
   function isBusy(): boolean {
-    return running !== null || clearing;
+    return running !== null || clearing || suggestingTurnId !== null;
   }
 
   function publishBusy(): void {
@@ -362,11 +371,16 @@ export function installProChat(
           options.onNotice?.("Could not copy this response.", "error");
         });
     });
-    actions.append(retry, copy);
+    const suggest = document.createElement("button");
+    suggest.type = "button";
+    suggest.className = "pro-chat-turn-suggest";
+    suggest.textContent = "Suggest in document";
+    suggest.addEventListener("click", () => void suggestTurn(turn.id));
+    actions.append(retry, copy, suggest);
     footer.append(status, actions);
     assistantArticle.append(assistantHeader, assistant, footer);
     item.append(user, assistantArticle);
-    return { item, assistant, assistantMeta, status, retry, actions, copy };
+    return { item, assistant, assistantMeta, status, retry, actions, copy, suggest };
   }
 
   function renderTurns(): void {
@@ -416,6 +430,15 @@ export function installProChat(
       const responseReady = turn.status !== "pending" && turn.assistant_text.length > 0;
       nodes.actions.hidden = !responseReady && nodes.retry.hidden;
       nodes.copy.disabled = !responseReady || nodes.copy.textContent === "Copied";
+      const canSuggest = turn.status === "completed" &&
+        turn.assistant_text.length > 0 && turn.wording_revision.length > 0;
+      nodes.suggest.hidden = !canSuggest;
+      nodes.suggest.disabled = !canSuggest || isBusy() || suggestedTurnIds.has(turn.id);
+      nodes.suggest.textContent = suggestingTurnId === turn.id
+        ? "Suggesting…"
+        : suggestedTurnIds.has(turn.id)
+          ? "Suggested"
+          : "Suggest in document";
       messages.append(nodes.item);
     }
 
@@ -584,6 +607,8 @@ export function installProChat(
     retryLoad = null;
     clearing = false;
     stopping = false;
+    suggestingTurnId = null;
+    suggestedTurnIds.clear();
     publishBusy();
     if (active && selectedProvider) void loadHistory();
     else render();
@@ -877,6 +902,43 @@ export function installProChat(
   async function retryTurn(turnId: string): Promise<void> {
     const turn = history?.turns.find(({ id }) => id === turnId);
     if (turn) await retryTurnByValue(turn);
+  }
+
+  async function suggestTurn(turnId: string): Promise<void> {
+    const context = documentContext;
+    const turn = history?.turns.find(({ id }) => id === turnId);
+    if (
+      bridge === null || context === null || turn?.status !== "completed" ||
+      !turn.assistant_text || !turn.wording_revision || isBusy()
+    ) return;
+    suggestingTurnId = turnId;
+    publishBusy();
+    render();
+    try {
+      if (!(await context.waitUntilSaved())) {
+        throw new Error("Wait for this document to finish saving, then try again.");
+      }
+      if (documentContext !== context || !history?.turns.some(({ id }) => id === turnId)) {
+        return;
+      }
+      const result = await bridge.suggestResponse({
+        documentId: context.id,
+        provider: turn.provider,
+        turnId,
+        requestId: createRequestId(),
+        after: context.suggestionPosition(),
+      });
+      if (documentContext !== context) return;
+      suggestedTurnIds.add(turnId);
+      options.onSuggestionCreated?.(result.suggestion_id);
+      options.onNotice?.("Suggestion added for review.");
+    } catch (cause) {
+      options.onNotice?.(`Could not create suggestion: ${shortError(cause)}`, "error");
+    } finally {
+      if (suggestingTurnId === turnId) suggestingTurnId = null;
+      publishBusy();
+      render();
+    }
   }
 
   async function stopRunning(): Promise<void> {

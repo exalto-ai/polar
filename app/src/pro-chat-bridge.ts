@@ -67,6 +67,20 @@ export type ProChatTurn = {
   retryable: boolean;
   input_tokens: number | null;
   output_tokens: number | null;
+  wording_revision: string;
+};
+
+export type ProChatSuggestionPosition =
+  | { kind: "start" }
+  | { kind: "end" }
+  | { kind: "block"; block_id: string };
+
+export type ProChatSuggestRequest = {
+  documentId: string;
+  provider: ProChatProvider;
+  turnId: string;
+  requestId: string;
+  after: ProChatSuggestionPosition;
 };
 
 export type ProChatHistory = {
@@ -127,6 +141,7 @@ export type ProChatBridge = {
     onEvent: (event: ProChatEvent) => void,
   ): Promise<ProChatStartResult>;
   stop(operationId: string): Promise<boolean>;
+  suggestResponse(request: ProChatSuggestRequest): Promise<{ suggestion_id: string }>;
   clear(
     documentId: string,
     provider: ProChatProvider,
@@ -158,6 +173,16 @@ export function tauriProChatBridge(): ProChatBridge {
     },
     stop: (operationId) =>
       invoke<boolean>("stop_pro_chat", { operationId }),
+    suggestResponse: ({ documentId, provider, turnId, requestId, after }) =>
+      invoke<{ suggestion_id: string }>("suggest_chat_response", {
+        request: {
+          document_id: documentId,
+          provider,
+          turn_id: turnId,
+          request_id: requestId,
+          after,
+        },
+      }),
     clear: (documentId, provider, expectedRevision) =>
       invoke<ProChatHistory>("clear_pro_chat", {
         documentId,

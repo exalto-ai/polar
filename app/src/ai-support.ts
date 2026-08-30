@@ -20,6 +20,7 @@ type AiSupportOptions = {
   chatBridge?: ProChatBridge | null;
   openExternal?: (url: string) => Promise<void>;
   onChatResponseCopied?: () => void;
+  onChatSuggestionCreated?: (suggestionId: string) => void;
   onNotice?: (message: string, kind?: "info" | "error") => void;
 };
 
@@ -62,6 +63,7 @@ export function installAiSupport(
         onBusyChange: (provider) => providers?.setChatBusy(provider),
         copyText,
         onResponseCopied: options.onChatResponseCopied,
+        onSuggestionCreated: options.onChatSuggestionCreated,
         onNotice: options.onNotice,
       })
     : null;
