@@ -217,6 +217,44 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   overflow-wrap: anywhere;
 }
 
+.reviewer-heading,
+.reviewer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.reviewer-heading { margin: 18px 0 8px; }
+.reviewer-list { list-style: none; margin: 0; padding: 0; }
+.reviewer-list li {
+  padding: 11px 0;
+  border-top: 1px solid var(--rule);
+}
+.reviewer-list li > div:first-child { display: grid; gap: 3px; margin-bottom: 8px; }
+.reviewer-list small { color: var(--ink-faint); }
+.reviewer-actions { justify-content: flex-start; flex-wrap: wrap; }
+.reviewer-actions button { font-size: 11px; }
+.reviewer-form,
+.reviewer-setup {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.reviewer-form h3,
+.reviewer-setup h3 { margin: 0 0 12px; font-size: 14px; }
+.reviewer-form label { display: grid; gap: 5px; margin-bottom: 11px; color: var(--ink-soft); font-size: 12px; }
+.reviewer-form input,
+.reviewer-form select {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+.reviewer-error { color: #ff8a80; font-size: 12px; }
+
 @media (max-width: 760px) {
   .ai-sidebar {
     position: fixed;

@@ -115,4 +115,32 @@ CREATE INDEX IF NOT EXISTS lineage_spans_source ON lineage_spans(source_event_id
 CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
   doc_id UNINDEXED, title, body, tokenize='porter unicode61'
 );
+
+-- A reviewer credential authorizes one configured, read-only ingress. The raw
+-- credential lives in an owner-only native file; SQLite keeps only its hash.
+CREATE TABLE IF NOT EXISTS reviewer_connections (
+  id              TEXT PRIMARY KEY CHECK (
+                    length(id) BETWEEN 1 AND 64
+                    AND id NOT GLOB '*[^a-z0-9-]*'
+                  ),
+  client          TEXT NOT NULL CHECK (client IN (
+                    'chatgpt', 'codex', 'claude_desktop', 'claude_code'
+                  )),
+  display_label   TEXT NOT NULL CHECK (length(trim(display_label)) BETWEEN 1 AND 80),
+  document_scope  TEXT NOT NULL CHECK (document_scope IN ('current', 'all')),
+  document_id     TEXT REFERENCES documents(id),
+  credential_hash BLOB NOT NULL UNIQUE CHECK (length(credential_hash) = 32),
+  revision        INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL,
+  last_seen_at    INTEGER,
+  revoked_at      INTEGER,
+  reported_model  TEXT CHECK (reported_model IS NULL OR length(reported_model) <= 256),
+  CHECK (
+    (document_scope = 'current' AND document_id IS NOT NULL)
+    OR (document_scope = 'all' AND document_id IS NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS reviewer_connections_active
+  ON reviewer_connections(revoked_at, updated_at DESC);
 "#;

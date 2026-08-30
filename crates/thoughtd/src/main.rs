@@ -15,6 +15,7 @@ mod tools;
 
 use thoughtd::sync;
 
+use thoughtd::connections::{ConnectionRegistry, now_ms};
 use thoughtd::{discovery, logging};
 
 use axum::http::{HeaderValue, Method, Request, StatusCode};
@@ -77,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     let workspace = Arc::new(Workspace::open(&db_path)?);
+    let reviewers = Arc::new(ConnectionRegistry::platform(workspace.clone()));
     let token = discovery::random_token()?;
     let instance_id = loop {
         let candidate = discovery::random_token()?;
@@ -86,17 +88,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let service_workspace = workspace.clone();
+    let service_reviewers = reviewers.clone();
     let service = StreamableHttpService::new(
-        move || Ok(tools::Thought::new(service_workspace.clone())),
+        move || {
+            Ok(tools::Thought::new(
+                service_workspace.clone(),
+                service_reviewers.clone(),
+            ))
+        },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default()
             .with_max_request_body_bytes(thoughtd::MAX_MCP_REQUEST_BODY_BYTES),
     );
 
     let health_instance = instance_id.clone();
-    let expected = token.clone();
-    let sync_state = sync::SyncState::new(workspace.clone());
-    let protected = axum::Router::new()
+    let mcp_expected = token.clone();
+    let mcp_reviewers = reviewers.clone();
+    let mcp_routes = axum::Router::new()
         .route(
             discovery::MCP_HEALTH_PATH,
             axum::routing::get(move || {
@@ -105,14 +113,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .nest_service("/mcp", service)
+        .layer(middleware::from_fn(
+            move |mut req: Request<axum::body::Body>, next: Next| {
+                let expected = mcp_expected.clone();
+                let reviewers = mcp_reviewers.clone();
+                async move {
+                    let presented = req
+                        .headers()
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.strip_prefix("Bearer "));
+                    let principal = match presented {
+                        Some(value) if value == expected => reviewers.internal_principal(),
+                        Some(value) => match reviewers.authenticate(value, now_ms()) {
+                            Ok(Some(principal)) => principal,
+                            _ => return Err(StatusCode::UNAUTHORIZED),
+                        },
+                        None => return Err(StatusCode::UNAUTHORIZED),
+                    };
+                    req.extensions_mut().insert(principal);
+                    Ok::<Response, StatusCode>(next.run(req).await)
+                }
+            },
+        ));
+
+    let editor_expected = token.clone();
+    let sync_state = sync::SyncState::new(workspace.clone());
+    let editor_routes = axum::Router::new()
         // The editor connects here and speaks the same protocol the relay will
         // (M2.1): one protocol, two transports.
         .route("/sync", axum::routing::any(sync::handler))
         .with_state(sync_state)
-        .merge(editor_api::routes(workspace.clone()))
+        .merge(editor_api::routes(workspace.clone(), reviewers.clone()))
         .layer(middleware::from_fn(
             move |req: Request<axum::body::Body>, next: Next| {
-                let expected = expected.clone();
+                let expected = editor_expected.clone();
                 async move {
                     // Any local process can reach a loopback port, and documents are
                     // the user's private writing. Possession of the 0600 discovery
@@ -154,7 +189,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 async move { axum::Json(discovery::IdentityResponse::current(&instance_id)) }
             }),
         )
-        .merge(protected)
+        .merge(mcp_routes)
+        .merge(editor_routes)
         // CORS, outermost so it runs before auth.
         //
         // The webview is cross-origin whichever way it loads — tauri://localhost

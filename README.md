@@ -57,17 +57,17 @@ the editor you are already using, and each new window is visibly cascaded from i
 ⌘W closes the window without prompting because Proof of Thought's CRDT store remains
 authoritative. Export is an explicit one-time action and never establishes a mirrored file.
 
-The daemon can also be run on its own. Reviewers connect through the verified stdio bridge,
-so no development script or browser endpoint reads bearer capabilities directly:
+The daemon can also be run on its own. Add reviewers from the AI support sidebar. Each saved
+connection gets its own read-only credential and current-document or all-document scope:
 
 ```bash
 cargo run -p thoughtd
 ```
 
-It prints its port and writes `daemon.json` (mode 0600) with a bearer token. MCP clients
-that speak HTTP can use the URL inside; clients that spawn a stdio server should spawn
-`thought-mcp-stdio`, which reuses the published daemon or safely starts a replacement when
-discovery is stale, then proxies to it. Process-lifetime home and store locks decide which
+It prints its port and writes `daemon.json` (mode 0600) with the native app capability.
+Reviewer setup commands spawn `thought-mcp-stdio --connection <id>`; the shim reads that
+connection's separate credential from an owner-only file and never prints it. It reuses the
+published daemon or starts one when discovery is stale. Process-lifetime locks decide which
 daemon may publish and open SQLite; file presence and PIDs do not.
 
 ## Shape

@@ -22,15 +22,15 @@ them. There is no batch protocol or retry id: if an acknowledgement is lost, res
 Yjs update is a no-op and can be acknowledged safely. The editor stays read-only until its first
 sync frame is applied, so a range never describes an unhydrated placeholder document.
 
-This is a product trust boundary, not authentication of a human. The same loopback bearer guards
-MCP and editor access to the user's private writing. It does not make self-asserted MCP identity
-observed, and adding another bearer would not protect against a hostile process running as the
-same OS user.
+This is a product trust boundary, not authentication of a human. The native app bearer guards
+editor access. Each configured reviewer has a separate read-only credential and document scope.
+That credential identifies the configured Proof of Thought ingress, not the app, model, provider,
+person, or conversation behind it. Owner-only files are not a sandbox against hostile software
+already running as the same OS user.
 
-Creating, importing, trashing, and restoring from the window use the daemon's narrow `/editor`
-routes. Agent-facing MCP tools always create agent actors; they cannot select `kind: human`.
-Both surfaces use the same bearer because it protects the same private store. Their different
-routes describe which product boundary observed an operation, not different user accounts.
+Creating, importing, trashing, restoring, and managing reviewers use the daemon's narrow
+`/editor` routes. Reviewer MCP calls are read-only in this change. Their configured connection ID
+is durable attribution; model text remains reported and unverified.
 
 ## Storage
 

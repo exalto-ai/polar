@@ -448,6 +448,23 @@ signing, notarization, and packaged-executable checks to be repeated. The bundle
 and application-data paths stay stable so a package rename does not strand documents or
 daemon discovery state.
 
+### AD-21 — Reviewer connections get separate scoped credentials
+
+The native app keeps the platform bearer from `daemon.json`. Each configured reviewer gets a
+different 256-bit credential, stored in an owner-only native file with only its hash in SQLite.
+The copyable setup command contains a stable connection ID, never the credential. Every MCP tool
+rechecks that connection and its current-document or all-document scope. Reviewer connections are
+read-only until the suggestion layer grants a separate operation.
+
+This authenticates one configured local Proof of Thought ingress. It does not authenticate the
+calling app, provider, model, person, or conversation; those remain reported claims under AD-6.
+It is also not an OS sandbox: software already running as the same user can read owner files.
+
+**Cost:** credentials need native files and reset/revoke handling. Revocation stops subsequent
+tool checks; an operation already past authorization may finish. We accept that narrow race rather
+than adding session binding, leases, heartbeat processes, a lifecycle ledger, or signing-specific
+Keychain ACL machinery.
+
 ## 7. Explicit non-goals for MVP
 
 Folders and hierarchy · accounts and authentication · end-to-end encryption · mobile ·

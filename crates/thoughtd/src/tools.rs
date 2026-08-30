@@ -5,15 +5,21 @@
 //! anything worth testing belongs one layer down where it can be tested without
 //! a server.
 
+use axum::http::request::Parts;
+use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, tool, tool_router};
 use std::sync::Arc;
 use thought_core::Position;
 use thought_mcp::{ActorRef, MutationContext, TextEdit, Workspace};
+use thoughtd::connections::{
+    AuthenticatedPrincipal, AuthorizedRequest, ConnectionRegistry, ReviewerOperation,
+};
 
 #[derive(Clone)]
 pub struct Thought {
     workspace: Arc<Workspace>,
+    reviewers: Arc<ConnectionRegistry>,
 }
 
 /// Every tool failure passes through here, so this is the one place that can
@@ -26,6 +32,18 @@ fn failed(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(message, None)
 }
 
+fn denied(error: impl std::fmt::Display) -> ErrorData {
+    ErrorData::invalid_request(format!("reviewer authorization failed: {error}"), None)
+}
+
+fn principal(parts: &Parts) -> Result<AuthenticatedPrincipal, ErrorData> {
+    parts
+        .extensions
+        .get::<AuthenticatedPrincipal>()
+        .cloned()
+        .ok_or_else(|| ErrorData::invalid_request("missing authenticated connection", None))
+}
+
 /// Every write names its caller. There is no anonymous edit path, because an
 /// unattributed change cannot be shown in the activity feed or reverted as part
 /// of a run (AD-6, AD-11).
@@ -33,7 +51,8 @@ fn failed(e: impl std::fmt::Display) -> ErrorData {
 pub struct Caller {
     /// Stable name for the agent. Reused across reconnects — a per-connection
     /// identity would fragment one agent into many actors.
-    pub agent: String,
+    #[serde(default)]
+    pub agent: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     /// Groups one agent turn so it can be reverted as a unit.
@@ -42,12 +61,17 @@ pub struct Caller {
 }
 
 impl Caller {
-    fn actor(&self) -> ActorRef {
-        ActorRef::agent(&self.agent, self.model.as_deref(), self.session.as_deref())
-    }
-
-    fn context(&self) -> MutationContext {
-        MutationContext::mcp(self.agent.clone())
+    fn internal_identity(&self) -> Result<(ActorRef, MutationContext), ErrorData> {
+        let agent = self
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| ErrorData::invalid_params("agent is required", None))?;
+        Ok((
+            ActorRef::agent(agent, self.model.as_deref(), self.session.as_deref()),
+            MutationContext::mcp(agent),
+        ))
     }
 }
 
@@ -151,8 +175,43 @@ pub struct DeleteDocumentParams {
 
 #[tool_router(server_handler)]
 impl Thought {
-    pub fn new(workspace: Arc<Workspace>) -> Self {
-        Thought { workspace }
+    pub fn new(workspace: Arc<Workspace>, reviewers: Arc<ConnectionRegistry>) -> Self {
+        Thought {
+            workspace,
+            reviewers,
+        }
+    }
+
+    fn authorize(
+        &self,
+        parts: &Parts,
+        operation: ReviewerOperation,
+        document_id: Option<&str>,
+    ) -> Result<(AuthenticatedPrincipal, AuthorizedRequest), ErrorData> {
+        let principal = principal(parts)?;
+        let authorized = self
+            .reviewers
+            .authorize(&principal, operation, document_id)
+            .map_err(denied)?;
+        Ok((principal, authorized))
+    }
+
+    fn mutation_identity(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        authorized: &AuthorizedRequest,
+        caller: &Caller,
+    ) -> Result<(ActorRef, MutationContext), ErrorData> {
+        if let Some(connection) = authorized.connection() {
+            self.reviewers
+                .note_reported_model(principal, caller.model.as_deref())
+                .map_err(denied)?;
+            return Ok((
+                connection.reported_actor(caller.session.as_deref(), caller.model.as_deref()),
+                connection.reported_mutation_context(),
+            ));
+        }
+        caller.internal_identity()
     }
 
     #[tool(
@@ -162,11 +221,13 @@ impl Thought {
     )]
     fn list_documents(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<ListParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let (_, authorized) = self.authorize(&parts, ReviewerOperation::Read, None)?;
         let docs = self
             .workspace
-            .list_documents(p.limit, p.trashed)
+            .list_documents_scoped(p.limit, p.trashed, authorized.selected_document())
             .map_err(failed)?;
         Ok(Json(serde_json::json!({ "documents": docs })))
     }
@@ -178,8 +239,10 @@ impl Thought {
     )]
     fn read_document(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DocParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.authorize(&parts, ReviewerOperation::Read, Some(&p.doc_id))?;
         let view = self.workspace.read_document(&p.doc_id).map_err(failed)?;
         Ok(Json(serde_json::to_value(view).map_err(failed)?))
     }
@@ -190,8 +253,10 @@ impl Thought {
     )]
     fn document_actors(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DocParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.authorize(&parts, ReviewerOperation::Read, Some(&p.doc_id))?;
         let actors = self.workspace.document_actors(&p.doc_id).map_err(failed)?;
         Ok(Json(serde_json::json!({ "actors": actors })))
     }
@@ -205,8 +270,10 @@ impl Thought {
     )]
     fn block_provenance(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DocParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.authorize(&parts, ReviewerOperation::Read, Some(&p.doc_id))?;
         let blocks = self.workspace.block_provenance(&p.doc_id).map_err(failed)?;
         Ok(Json(serde_json::json!({ "blocks": blocks })))
     }
@@ -216,8 +283,10 @@ impl Thought {
     )]
     fn document_lineage(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DocParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.authorize(&parts, ReviewerOperation::Read, Some(&p.doc_id))?;
         let lineage = self.workspace.document_lineage(&p.doc_id).map_err(failed)?;
         Ok(Json(serde_json::to_value(lineage).map_err(failed)?))
     }
@@ -225,9 +294,14 @@ impl Thought {
     #[tool(description = "Full-text search across documents.")]
     fn search(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SearchParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
-        let hits = self.workspace.search(&p.query, p.limit).map_err(failed)?;
+        let (_, authorized) = self.authorize(&parts, ReviewerOperation::Read, None)?;
+        let hits = self
+            .workspace
+            .search_scoped(&p.query, p.limit, authorized.selected_document())
+            .map_err(failed)?;
         Ok(Json(serde_json::json!({ "hits": hits })))
     }
 
@@ -237,10 +311,11 @@ impl Thought {
     )]
     fn create_document(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<CreateParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
-        let actor = p.caller.actor();
-        let context = p.caller.context();
+        let (principal, authorized) = self.authorize(&parts, ReviewerOperation::Create, None)?;
+        let (actor, context) = self.mutation_identity(&principal, &authorized, &p.caller)?;
         let view = match p.initial_markdown {
             Some(markdown) => self
                 .workspace
@@ -256,8 +331,12 @@ impl Thought {
     #[tool(description = "Replace one block's content with markdown.")]
     fn replace_block(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<ReplaceBlockParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let (principal, authorized) =
+            self.authorize(&parts, ReviewerOperation::Edit, Some(&p.doc_id))?;
+        let (actor, context) = self.mutation_identity(&principal, &authorized, &p.caller)?;
         let out = self
             .workspace
             .replace_block_with_context(
@@ -265,8 +344,8 @@ impl Thought {
                 &p.block_id,
                 &p.markdown,
                 p.version.as_deref(),
-                &p.caller.actor(),
-                &p.caller.context(),
+                &actor,
+                &context,
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
@@ -275,6 +354,7 @@ impl Thought {
     #[tool(description = "Insert new blocks after a block, or at the start or end.")]
     fn insert_blocks(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<InsertBlocksParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
         let position = match p.after.as_deref() {
@@ -282,6 +362,9 @@ impl Thought {
             Some("start") => Position::Start,
             Some(id) => Position::After(id.to_string()),
         };
+        let (principal, authorized) =
+            self.authorize(&parts, ReviewerOperation::Edit, Some(&p.doc_id))?;
+        let (actor, context) = self.mutation_identity(&principal, &authorized, &p.caller)?;
         let out = self
             .workspace
             .insert_blocks_with_context(
@@ -289,8 +372,8 @@ impl Thought {
                 &position,
                 &p.markdown,
                 p.version.as_deref(),
-                &p.caller.actor(),
-                &p.caller.context(),
+                &actor,
+                &context,
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
@@ -303,8 +386,12 @@ impl Thought {
     )]
     fn replace_text(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<ReplaceTextParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let (principal, authorized) =
+            self.authorize(&parts, ReviewerOperation::Edit, Some(&p.doc_id))?;
+        let (actor, context) = self.mutation_identity(&principal, &authorized, &p.caller)?;
         let out = self
             .workspace
             .replace_text_with_context(
@@ -316,8 +403,8 @@ impl Thought {
                     occurrence: p.occurrence,
                 },
                 p.version.as_deref(),
-                &p.caller.actor(),
-                &p.caller.context(),
+                &actor,
+                &context,
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
@@ -329,16 +416,15 @@ impl Thought {
     )]
     fn set_document_deleted(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DeleteDocumentParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let (principal, authorized) =
+            self.authorize(&parts, ReviewerOperation::Trash, Some(&p.doc_id))?;
+        let (actor, context) = self.mutation_identity(&principal, &authorized, &p.caller)?;
         let out = self
             .workspace
-            .set_document_deleted_with_context(
-                &p.doc_id,
-                p.deleted,
-                &p.caller.actor(),
-                &p.caller.context(),
-            )
+            .set_document_deleted_with_context(&p.doc_id, p.deleted, &actor, &context)
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
     }
@@ -346,16 +432,20 @@ impl Thought {
     #[tool(description = "Delete a block.")]
     fn delete_block(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<DeleteBlockParams>,
     ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let (principal, authorized) =
+            self.authorize(&parts, ReviewerOperation::Edit, Some(&p.doc_id))?;
+        let (actor, context) = self.mutation_identity(&principal, &authorized, &p.caller)?;
         let out = self
             .workspace
             .delete_block_with_context(
                 &p.doc_id,
                 &p.block_id,
                 p.version.as_deref(),
-                &p.caller.actor(),
-                &p.caller.context(),
+                &actor,
+                &context,
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))

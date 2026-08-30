@@ -43,6 +43,21 @@ impl ActorRef {
         }
     }
 
+    pub fn reviewer(
+        connection_id: &str,
+        display_name: &str,
+        model: Option<&str>,
+        session: Option<&str>,
+    ) -> ActorRef {
+        ActorRef {
+            id: format!("reviewer:{connection_id}"),
+            kind: "agent".into(),
+            display_name: display_name.into(),
+            model: model.map(str::to_string),
+            session_id: session.map(str::to_string),
+        }
+    }
+
     /// The window's own actor.
     ///
     /// Every window on a device is the same actor, which AD-6 already implies:
@@ -315,6 +330,10 @@ impl Workspace {
         result
     }
 
+    pub(crate) fn with_store<T>(&self, f: impl FnOnce(&Store) -> T) -> T {
+        self.with(|inner| f(&inner.store))
+    }
+
     pub fn create_document(
         &self,
         title: &str,
@@ -492,6 +511,20 @@ impl Workspace {
         })
     }
 
+    pub fn list_documents_scoped(
+        &self,
+        limit: usize,
+        trashed: bool,
+        document_id: Option<&str>,
+    ) -> Result<Vec<DocumentSummary>, WorkspaceError> {
+        let mut documents = self.list_documents(usize::MAX, trashed)?;
+        if let Some(document_id) = document_id {
+            documents.retain(|document| document.doc_id == document_id);
+        }
+        documents.truncate(limit);
+        Ok(documents)
+    }
+
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, WorkspaceError> {
         self.with(|inner| {
             let titles: HashMap<String, String> = inner
@@ -506,6 +539,36 @@ impl Workspace {
                 .into_iter()
                 .map(|(doc_id, snippet)| SearchHit {
                     title: titles.get(&doc_id).cloned().unwrap_or_default(),
+                    doc_id,
+                    snippet,
+                })
+                .collect())
+        })
+    }
+
+    pub fn search_scoped(
+        &self,
+        query: &str,
+        limit: usize,
+        document_id: Option<&str>,
+    ) -> Result<Vec<SearchHit>, WorkspaceError> {
+        let Some(document_id) = document_id else {
+            return self.search(query, limit);
+        };
+        self.with(|inner| {
+            let title = inner
+                .store
+                .list_documents(false)?
+                .into_iter()
+                .find(|document| document.id == document_id)
+                .map(|document| document.title)
+                .unwrap_or_default();
+            Ok(inner
+                .store
+                .search_document(query, document_id, limit)?
+                .into_iter()
+                .map(|(doc_id, snippet)| SearchHit {
+                    title: title.clone(),
                     doc_id,
                     snippet,
                 })

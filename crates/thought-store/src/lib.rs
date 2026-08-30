@@ -103,6 +103,32 @@ pub struct DocumentRow {
     pub deleted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewerConnectionRow {
+    pub id: String,
+    pub client: String,
+    pub display_label: String,
+    pub document_scope: String,
+    pub document_id: Option<String>,
+    pub credential_hash: [u8; 32],
+    pub revision: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_seen_at: Option<i64>,
+    pub revoked_at: Option<i64>,
+    pub reported_model: Option<String>,
+}
+
+pub struct NewReviewerConnection<'a> {
+    pub id: &'a str,
+    pub client: &'a str,
+    pub display_label: &'a str,
+    pub document_scope: &'a str,
+    pub document_id: Option<&'a str>,
+    pub credential_hash: &'a [u8; 32],
+    pub created_at: i64,
+}
+
 /// Everything that makes a newly created document visible and recoverable.
 /// Stored in one SQLite transaction so callers never observe a document row
 /// without its CRDT state, search entry, and initial attribution.
@@ -620,6 +646,23 @@ impl Store {
         Ok(rows)
     }
 
+    pub fn search_document(
+        &self,
+        query: &str,
+        document_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, SqlError> {
+        let mut statement = self.conn.prepare(
+            "SELECT doc_id, snippet(doc_fts, 2, '<b>', '</b>', '…', 12)
+             FROM doc_fts WHERE doc_fts MATCH ?1 AND doc_id = ?2 LIMIT ?3",
+        )?;
+        statement
+            .query_map(params![query, document_id, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect()
+    }
+
     /// Documents, most recently updated first.
     ///
     /// `trashed` selects which side of the tombstone to look at. Deleting is
@@ -646,6 +689,171 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    pub fn create_reviewer_connection(
+        &self,
+        input: &NewReviewerConnection<'_>,
+    ) -> Result<ReviewerConnectionRow, SqlError> {
+        self.conn.execute(
+            "INSERT INTO reviewer_connections (
+               id, client, display_label, document_scope, document_id,
+               credential_hash, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![
+                input.id,
+                input.client,
+                input.display_label,
+                input.document_scope,
+                input.document_id,
+                input.credential_hash,
+                input.created_at,
+            ],
+        )?;
+        self.reviewer_connection(input.id)?
+            .ok_or(SqlError::QueryReturnedNoRows)
+    }
+
+    pub fn reviewer_connection(&self, id: &str) -> Result<Option<ReviewerConnectionRow>, SqlError> {
+        self.conn
+            .query_row(
+                "SELECT id, client, display_label, document_scope, document_id,
+                        credential_hash, revision, created_at, updated_at,
+                        last_seen_at, revoked_at, reported_model
+                 FROM reviewer_connections WHERE id = ?1",
+                [id],
+                reviewer_connection_row,
+            )
+            .optional()
+    }
+
+    pub fn list_reviewer_connections(&self) -> Result<Vec<ReviewerConnectionRow>, SqlError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, client, display_label, document_scope, document_id,
+                    credential_hash, revision, created_at, updated_at,
+                    last_seen_at, revoked_at, reported_model
+             FROM reviewer_connections
+             ORDER BY revoked_at IS NOT NULL, updated_at DESC",
+        )?;
+        statement
+            .query_map([], reviewer_connection_row)?
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub fn reviewer_connection_by_credential_hash(
+        &self,
+        credential_hash: &[u8; 32],
+    ) -> Result<Option<ReviewerConnectionRow>, SqlError> {
+        self.conn
+            .query_row(
+                "SELECT id, client, display_label, document_scope, document_id,
+                        credential_hash, revision, created_at, updated_at,
+                        last_seen_at, revoked_at, reported_model
+                 FROM reviewer_connections
+                 WHERE credential_hash = ?1 AND revoked_at IS NULL",
+                [credential_hash],
+                reviewer_connection_row,
+            )
+            .optional()
+    }
+
+    pub fn update_reviewer_connection(
+        &self,
+        id: &str,
+        expected_revision: i64,
+        display_label: &str,
+        document_scope: &str,
+        document_id: Option<&str>,
+        updated_at: i64,
+    ) -> Result<Option<ReviewerConnectionRow>, SqlError> {
+        let changed = self.conn.execute(
+            "UPDATE reviewer_connections
+             SET display_label = ?3, document_scope = ?4, document_id = ?5,
+                 revision = revision + 1, updated_at = ?6
+             WHERE id = ?1 AND revision = ?2 AND revoked_at IS NULL",
+            params![
+                id,
+                expected_revision,
+                display_label,
+                document_scope,
+                document_id,
+                updated_at,
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.reviewer_connection(id)
+    }
+
+    pub fn rotate_reviewer_credential(
+        &self,
+        id: &str,
+        expected_revision: i64,
+        credential_hash: &[u8; 32],
+        updated_at: i64,
+    ) -> Result<Option<ReviewerConnectionRow>, SqlError> {
+        let changed = self.conn.execute(
+            "UPDATE reviewer_connections
+             SET credential_hash = ?3, revision = revision + 1, updated_at = ?4
+             WHERE id = ?1 AND revision = ?2 AND revoked_at IS NULL",
+            params![id, expected_revision, credential_hash, updated_at],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.reviewer_connection(id)
+    }
+
+    pub fn revoke_reviewer_connection(
+        &self,
+        id: &str,
+        expected_revision: i64,
+        revoked_at: i64,
+    ) -> Result<Option<ReviewerConnectionRow>, SqlError> {
+        let changed = self.conn.execute(
+            "UPDATE reviewer_connections
+             SET revoked_at = ?3, revision = revision + 1, updated_at = ?3
+             WHERE id = ?1 AND revision = ?2 AND revoked_at IS NULL",
+            params![id, expected_revision, revoked_at],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.reviewer_connection(id)
+    }
+
+    pub fn mark_reviewer_seen(
+        &self,
+        id: &str,
+        seen_at: i64,
+    ) -> Result<Option<ReviewerConnectionRow>, SqlError> {
+        let changed = self.conn.execute(
+            "UPDATE reviewer_connections
+             SET last_seen_at = MAX(COALESCE(last_seen_at, 0), ?2)
+             WHERE id = ?1 AND revoked_at IS NULL",
+            params![id, seen_at],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.reviewer_connection(id)
+    }
+
+    pub fn update_reviewer_reported_model(
+        &self,
+        id: &str,
+        model: Option<&str>,
+    ) -> Result<Option<ReviewerConnectionRow>, SqlError> {
+        let changed = self.conn.execute(
+            "UPDATE reviewer_connections SET reported_model = ?2
+             WHERE id = ?1 AND revoked_at IS NULL",
+            params![id, model],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.reviewer_connection(id)
     }
 
     /// Everyone who has written to a document, most recent first.
@@ -796,6 +1004,35 @@ fn insert_event(
         ],
     )?;
     Ok(())
+}
+
+fn reviewer_connection_row(row: &rusqlite::Row<'_>) -> Result<ReviewerConnectionRow, SqlError> {
+    let hash = row.get::<_, Vec<u8>>(5)?;
+    let credential_hash: [u8; 32] = hash.try_into().map_err(|value: Vec<u8>| {
+        SqlError::FromSqlConversionFailure(
+            value.len(),
+            rusqlite::types::Type::Blob,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "reviewer credential hash must be 32 bytes",
+            )
+            .into(),
+        )
+    })?;
+    Ok(ReviewerConnectionRow {
+        id: row.get(0)?,
+        client: row.get(1)?,
+        display_label: row.get(2)?,
+        document_scope: row.get(3)?,
+        document_id: row.get(4)?,
+        credential_hash,
+        revision: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        last_seen_at: row.get(9)?,
+        revoked_at: row.get(10)?,
+        reported_model: row.get(11)?,
+    })
 }
 
 fn replace_lineage_spans(
