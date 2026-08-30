@@ -418,6 +418,10 @@ from history and presented as fact. MCP identity is self-reported and can only p
 the ProseMirror dispatch boundary. The loopback bearer authorizes access to private writing;
 it does not authenticate actor identity.
 
+Window-only document lifecycle operations use small `/editor` HTTP routes on the same loopback
+daemon. They do not travel through public MCP tools with a caller-selected `kind`. This is a
+surface boundary, not a second authentication system: the existing bearer protects both routes.
+
 There is deliberately no receipt ledger, hash chain, replay engine, cached lineage state, or
 format/structure delta model. Those would duplicate the CRDT and imply verification the local
 daemon cannot provide. Evidence and verified traces may refer to source events later without
