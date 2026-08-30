@@ -59,6 +59,18 @@ pub fn routes(workspace: Arc<Workspace>, reviewers: Arc<ConnectionRegistry>) -> 
             post(set_document_deleted),
         )
         .route(
+            "/editor/documents/{doc_id}/suggestions",
+            get(list_suggestions),
+        )
+        .route(
+            "/editor/documents/{doc_id}/suggestions/{suggestion_id}/accept",
+            post(accept_suggestion),
+        )
+        .route(
+            "/editor/documents/{doc_id}/suggestions/{suggestion_id}/reject",
+            post(reject_suggestion),
+        )
+        .route(
             "/editor/reviewer-connections",
             get(list_reviewers).post(create_reviewer),
         )
@@ -111,6 +123,36 @@ async fn set_document_deleted(
             &ActorRef::editor(),
             &MutationContext::command(),
         )
+        .map_err(failed)?;
+    Ok(Json(serde_json::to_value(outcome).map_err(failed)?))
+}
+
+async fn list_suggestions(
+    State(state): State<EditorState>,
+    Path(doc_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let suggestions = state.workspace.list_suggestions(&doc_id).map_err(failed)?;
+    Ok(Json(serde_json::to_value(suggestions).map_err(failed)?))
+}
+
+async fn accept_suggestion(
+    State(state): State<EditorState>,
+    Path((doc_id, suggestion_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let outcome = state
+        .workspace
+        .accept_suggestion(&doc_id, &suggestion_id, &ActorRef::editor())
+        .map_err(failed)?;
+    Ok(Json(serde_json::to_value(outcome).map_err(failed)?))
+}
+
+async fn reject_suggestion(
+    State(state): State<EditorState>,
+    Path((doc_id, suggestion_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let outcome = state
+        .workspace
+        .reject_suggestion(&doc_id, &suggestion_id, &ActorRef::editor())
         .map_err(failed)?;
     Ok(Json(serde_json::to_value(outcome).map_err(failed)?))
 }

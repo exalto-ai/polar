@@ -59,14 +59,15 @@ choice, not a storage one.
 No attempt to model rich text as rows. SQLite holds binary Yjs update frames, periodic
 compacted snapshots, actor records, and an FTS index over the markdown projection.
 
-### AD-5 — Agent edits are anchored, surgical, and default to a suggestion layer
+### AD-5 — Agent changes are block-addressed and reviewer changes are suggestions
 
 There is deliberately **no `update_document(id, full_markdown)` tool**. Whole-document
 replacement produces a diff touching every block, destroys concurrent human edits, and
 makes attribution meaningless. Agent tools address blocks by ID and edit ranges (§4).
 
-Agents write into a suggestion layer by default; direct write is a per-session grant.
-Suggestions live in the document CRDT so they replicate to other peers.
+Configured reviewers cannot call the direct-write tools. They can submit one normalized,
+block-addressed patch with `suggest_change`; the local editor accepts or rejects it.
+Suggestions live in the document CRDT so they replicate to every window and survive restart.
 
 ### AD-6 — Actor identity now, authentication later
 
@@ -148,12 +149,14 @@ rather than fatal to the stack.
 Y.Doc
 ├─ "content"      Y.XmlFragment            ProseMirror document
 ├─ "meta"         Y.Map                    title, icon, created_at, deleted_at (LWW)
-├─ "suggestions"  Y.Map<id, Suggestion>    agent proposals, replicated
+├─ "suggestions"  Y.Map<id, Suggestion>    reviewer proposals, replicated
 └─ "comments"     Y.Map<id, Comment>       range-anchored threads
 ```
 
-Anchors are encoded Yjs `RelativePosition`s, which survive concurrent edits. That property
-is the entire reason suggestions and comments can be trusted under agent load.
+Agent edits and suggestion patches address stable block ids. A suggestion also records an
+exact content revision; any intervening content change makes it stale. This deliberately
+trades automatic rebasing for a small, auditable acceptance path. Future range-anchored
+comments may use Yjs `RelativePosition`s independently.
 
 ---
 
@@ -220,15 +223,6 @@ CREATE TABLE block_provenance (
 );
 CREATE INDEX block_provenance_doc ON block_provenance(doc_id);
 
--- Derived read-model, rebuilt from the doc CRDT. Authority is Y.Doc "suggestions".
-CREATE TABLE suggestion_index (
-  id          TEXT PRIMARY KEY,
-  doc_id      TEXT NOT NULL REFERENCES documents(id),
-  actor_id    TEXT NOT NULL,
-  status      TEXT NOT NULL,             -- 'pending' | 'accepted' | 'rejected'
-  created_at  INTEGER NOT NULL
-);
-
 CREATE VIRTUAL TABLE doc_fts USING fts5(
   doc_id UNINDEXED, title, body, tokenize='porter unicode61'
 );
@@ -247,7 +241,7 @@ list_documents(query?, limit?)
   -> [{ doc_id, title, updated_at, word_count }]
 
 read_document(doc_id, format="markdown")
-  -> { markdown, version, blocks: [{ block_id, type, line_range }] }
+  -> { markdown, version, content_revision, blocks: [{ block_id, type, line_range }] }
 
 search(query, limit?)
   -> [{ doc_id, block_id, title, snippet }]
@@ -265,22 +259,30 @@ much as for the window: "who wrote this paragraph" is a question an agent asks b
 rewriting someone's work. A block with no entry is unattributed, which is not the same as
 belonging to the caller (M2.8).
 
-**Write** — every call takes the `version` from the last read.
+**Direct write** — unavailable to configured reviewer credentials. Every call takes the
+`version` from the last read.
 
 ```
 replace_block(doc_id, block_id, markdown, version)
 insert_blocks(doc_id, after=block_id|"start", markdown, version)
 delete_block(doc_id, block_id, version)
 replace_text(doc_id, block_id, find, replace, occurrence?, version)
-comment(doc_id, block_id, body)
 ```
 
 On a stale `version`, the daemon **warns and proceeds** rather than rejecting — the CRDT
 merges correctly regardless; the risk is semantic (the agent reasoned about text that has
 since changed), so the right response is to tell the agent what moved, not to fail the write.
 
-In suggestion mode (the default) every write lands in the `suggestions` map for
-accept/reject instead of mutating `content`. Direct write is granted per session.
+**Reviewer proposal**
+
+```
+suggest_change(doc_id, request_id, content_revision, change, explanation?)
+list_suggestions(doc_id)
+```
+
+The proposal call normalizes the requested operation once and stores that patch in the
+document's `suggestions` map. Acceptance requires the exact `content_revision`; it never
+attempts a three-way merge. See [`suggestions.md`](suggestions.md).
 
 ---
 
@@ -396,8 +398,8 @@ feature amplifies a bug most Yjs apps never trip.
 
 Mitigation, and it is cheap: hold inbound remote updates while `view.composing` is true and
 flush on `compositionend`. This is the same buffer AD-16 already requires for coalescing,
-with one more condition on the flush. AD-15 helps independently — in suggestion mode agent
-writes never touch the text layer at all.
+with one more condition on the flush. AD-15 helps independently: configured reviewer
+proposals do not touch the text layer until a person accepts them.
 
 Consequence: an IME failure is a bridge bug, not a reason to abandon the webview.
 
@@ -437,9 +439,15 @@ historical questions, and legacy content stays unknown. Exact editor ranges pay 
 the op log answers history; neither justifies inventing missing provenance for the third. The
 window briefly hides current sources while a local edit is still saving.
 
-### AD-15 — Direct writes for local unshared docs, suggestion mode once shared
-Per-session override either way. The reason to gate agent writes is other people, not the
-agent; gating solo local editing is friction with no beneficiary.
+### AD-15 — The local editor writes directly; configured reviewers propose
+
+The bundled editor writes through the daemon's observed editor routes. Durable reviewer
+credentials can read and propose but cannot directly edit, create, trash, or restore. A
+future direct-write grant must be a separate, expiring session capability if the product
+needs one; it is not a dormant permission flag in the current protocol.
+
+**Cost:** reviewers always wait for acceptance, including on local unshared documents. This
+is simpler and safer than shipping an unused grant lifecycle in the MVP.
 
 ### AD-20 — One product name and one machine namespace
 
@@ -459,8 +467,8 @@ daemon discovery state.
 The native app keeps the platform bearer from `daemon.json`. Each configured reviewer gets a
 different 256-bit credential, stored in an owner-only native file with only its hash in SQLite.
 The copyable setup command contains a stable connection ID, never the credential. Every MCP tool
-rechecks that connection and its current-document or all-document scope. Reviewer connections are
-read-only until the suggestion layer grants a separate operation.
+rechecks that connection and its current-document or all-document scope. Reviewer credentials
+authorize reads and replicated suggestions, never direct content mutation.
 
 This authenticates one configured local Proof of Thought ingress. It does not authenticate the
 calling app, provider, model, person, or conversation; those remain reported claims under AD-6.
