@@ -28,7 +28,11 @@ import {
   type Rails,
 } from "./provenance";
 import { SyncProvider, type AgentPresence, type ProviderStatus } from "./provider";
-import { installSuggestionReview, type SuggestionReviewController } from "./suggestions";
+import {
+  installSuggestionReview,
+  suggestionPositionAtSelection,
+  type SuggestionReviewController,
+} from "./suggestions";
 
 type Connection = {
   sync_url: string;
@@ -101,6 +105,10 @@ const aiSupport = installAiSupport(document, {
   chatBridge: tauriProChatBridge(),
   onNotice: notify,
   onChatResponseCopied: () => open?.editor.commands.focus(),
+  onChatSuggestionCreated: () => {
+    void open?.suggestions.refresh();
+    open?.editor.commands.focus();
+  },
 });
 
 async function visibleWordingRevision(): Promise<string | null> {
@@ -207,6 +215,14 @@ function refreshTitle(editor: Editor) {
         if (open?.editor !== editor) throw new Error("This document is no longer open.");
         if (!open.provider.isHydrated) throw new Error("This document is still opening.");
         return editor.getJSON();
+      },
+      suggestionPosition: () => {
+        if (open?.editor !== editor) throw new Error("This document is no longer open.");
+        return suggestionPositionAtSelection(editor, open.doc);
+      },
+      waitUntilSaved: () => {
+        if (open?.editor !== editor) return Promise.resolve(false);
+        return open.provider.waitUntilSaved();
       },
     });
   }

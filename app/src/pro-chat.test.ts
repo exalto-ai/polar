@@ -38,6 +38,7 @@ function turn(
     retryable: false,
     input_tokens: null,
     output_tokens: null,
+    wording_revision: "",
     ...overrides,
   };
 }
@@ -56,7 +57,13 @@ function documentContext(
   title = "Draft",
   snapshot: () => unknown = () => ({ type: "doc", content: [] }),
 ): ProChatDocumentContext {
-  return { id, title, snapshot };
+  return {
+    id,
+    title,
+    snapshot,
+    suggestionPosition: () => ({ kind: "end" }),
+    waitUntilSaved: () => Promise.resolve(true),
+  };
 }
 
 function capabilities() {
@@ -108,6 +115,7 @@ function bridge(overrides: Partial<ProChatBridge> = {}): ProChatBridge {
       Promise.resolve(history(documentId, provider))),
     start: vi.fn().mockResolvedValue({ operation_id: "operation-1", turn_id: "turn-1" }),
     stop: vi.fn().mockResolvedValue(true),
+    suggestResponse: vi.fn().mockResolvedValue({ suggestion_id: "suggestion-1" }),
     clear: vi.fn().mockImplementation((documentId, provider) =>
       Promise.resolve(history(documentId, provider, [], 2))),
     ...overrides,
@@ -292,6 +300,50 @@ describe("Pro chat", () => {
     expect(onResponseCopied).toHaveBeenCalledOnce();
     expect(buttons.map(({ textContent }) => textContent)).not.toContain("Insert at cursor");
     expect(buttons.map(({ textContent }) => textContent)).not.toContain("Replace document");
+  });
+
+  it("creates a pending suggestion from a saved completed turn", async () => {
+    const suggestResponse = vi.fn().mockResolvedValue({ suggestion_id: "suggestion-1" });
+    const onSuggestionCreated = vi.fn();
+    const onNotice = vi.fn();
+    const chatBridge = bridge({
+      suggestResponse,
+      history: vi.fn().mockResolvedValue(history("doc-1", "openai", [
+        turn("turn-1", {
+          assistant_text: "Suggested paragraph",
+          status: "completed",
+          wording_revision: "wording-revision",
+        }),
+      ], 1)),
+    });
+    controller = installProChat(document, {
+      bridge: chatBridge,
+      createRequestId: () => "request-1",
+      onSuggestionCreated,
+      onNotice,
+    });
+    controller.setDocument(documentContext());
+    controller.setActive(true);
+
+    const suggest = await vi.waitFor(() => {
+      const button = [...document.querySelectorAll<HTMLButtonElement>(
+        ".pro-chat-reply-actions button",
+      )].find(({ textContent }) => textContent === "Suggest in document");
+      expect(button).toBeTruthy();
+      return button!;
+    });
+    suggest.click();
+
+    await vi.waitFor(() => expect(suggestResponse).toHaveBeenCalledWith({
+      documentId: "doc-1",
+      provider: "openai",
+      turnId: "turn-1",
+      requestId: "request-1",
+      after: { kind: "end" },
+    }));
+    expect(onSuggestionCreated).toHaveBeenCalledWith("suggestion-1");
+    expect(onNotice).toHaveBeenCalledWith("Suggestion added for review.");
+    expect(suggest.textContent).toBe("Suggested");
   });
 
   it("stops a stream and retries the same turn with its original settings", async () => {

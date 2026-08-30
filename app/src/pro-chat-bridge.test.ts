@@ -58,6 +58,13 @@ describe("Pro chat bridge", () => {
     await bridge.history("doc-1", "anthropic");
     await bridge.start(request, onEvent);
     await bridge.stop("operation-1");
+    await bridge.suggestResponse({
+      documentId: "doc-1",
+      provider: "openai",
+      turnId: "turn-1",
+      requestId: "request-1",
+      after: { kind: "end" },
+    });
     await bridge.clear("doc-1", "openai", 7);
 
     expect(mocks.invoke.mock.calls[0]).toEqual(["pro_chat_capabilities"]);
@@ -75,6 +82,18 @@ describe("Pro chat bridge", () => {
       { operationId: "operation-1" },
     ]);
     expect(mocks.invoke.mock.calls[4]).toEqual([
+      "suggest_chat_response",
+      {
+        request: {
+          document_id: "doc-1",
+          provider: "openai",
+          turn_id: "turn-1",
+          request_id: "request-1",
+          after: { kind: "end" },
+        },
+      },
+    ]);
+    expect(mocks.invoke.mock.calls[5]).toEqual([
       "clear_pro_chat",
       { documentId: "doc-1", provider: "openai", expectedRevision: 7 },
     ]);

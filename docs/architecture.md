@@ -474,6 +474,22 @@ cannot claim provider-verified provenance.
 **Cost:** the native layer owns provider-specific streaming state and a private transcript store.
 Stopping a request cannot prove the provider stopped processing immediately.
 
+### AD-25 — Chat responses enter documents through the existing suggestion path
+
+A completed built-in chat response can become a pending block insertion at the editor's current
+position. It never writes document content directly. Native code reloads the response, model, and
+wording revision from the private transcript; the webview chooses only the saved turn and insertion
+point. The daemon rejects the proposal if current wording no longer matches the wording sent to the
+provider. Accept and Reject remain the same operations used for reviewer suggestions.
+
+The native process reuses the daemon's private platform bearer. A second provider bearer would not
+create a useful boundary because the bundled webview can already invoke the native command and use
+the platform connection. Provider and model labels remain Reported, not Verified.
+
+**Cost:** the first version inserts complete response blocks rather than replacing a selected text
+range. Moving or editing the document after generation requires a new response. The private
+transcript and replicated suggestion remain separate records.
+
 ### AD-15 — The local editor writes directly; configured reviewers propose
 
 The bundled editor writes through the daemon's observed editor routes. Durable reviewer
