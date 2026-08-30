@@ -11,7 +11,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use thought_mcp::{ActorRef, Workspace};
+use thought_mcp::{ActorRef, ProseMirrorRange, Workspace};
 use tokio::sync::broadcast;
 
 /// Wire tags. Length-prefixed binary, because Yjs updates are binary and
@@ -25,7 +25,10 @@ mod tag {
     pub const ERROR: u8 = 0x06;
     pub const PRESENCE: u8 = 0x07;
     pub const ACK: u8 = 0x08;
+    pub const EDITOR_MUTATION: u8 = 0x09;
 }
+
+pub const MAX_EDITOR_RANGES: usize = 64;
 
 #[derive(Debug, Clone)]
 pub enum Frame {
@@ -39,6 +42,13 @@ pub enum Frame {
     },
     Update {
         doc_id: String,
+        update: Vec<u8>,
+    },
+    /// One complete local editor dispatch. The Yjs update remains the source
+    /// of document truth; ranges only strengthen current-text alignment.
+    EditorMutation {
+        doc_id: String,
+        ranges: Vec<ProseMirrorRange>,
         update: Vec<u8>,
     },
     Broadcast {
@@ -78,6 +88,23 @@ impl Frame {
             } => (tag::SUBSCRIBE, doc_id, state_vector.clone()),
             Frame::Sync { doc_id, update } => (tag::SYNC, doc_id, update.clone()),
             Frame::Update { doc_id, update } => (tag::UPDATE, doc_id, update.clone()),
+            Frame::EditorMutation {
+                doc_id,
+                ranges,
+                update,
+            } => {
+                assert!(ranges.len() <= MAX_EDITOR_RANGES);
+                let mut body = Vec::with_capacity(1 + ranges.len() * 16 + update.len());
+                body.push(ranges.len() as u8);
+                for range in ranges {
+                    body.extend_from_slice(&range.before_from.to_be_bytes());
+                    body.extend_from_slice(&range.before_to.to_be_bytes());
+                    body.extend_from_slice(&range.after_from.to_be_bytes());
+                    body.extend_from_slice(&range.after_to.to_be_bytes());
+                }
+                body.extend_from_slice(update);
+                (tag::EDITOR_MUTATION, doc_id, body)
+            }
             Frame::Broadcast { doc_id, update } => (tag::BROADCAST, doc_id, update.clone()),
             Frame::Awareness { doc_id, payload } => (tag::AWARENESS, doc_id, payload.clone()),
             Frame::Error { doc_id, message } => (tag::ERROR, doc_id, message.as_bytes().to_vec()),
@@ -119,6 +146,38 @@ impl Frame {
                 doc_id,
                 update: body,
             },
+            tag::EDITOR_MUTATION => {
+                let (&count, rest) = body.split_first()?;
+                let count = usize::from(count);
+                if count > MAX_EDITOR_RANGES {
+                    return None;
+                }
+                let range_bytes = count.checked_mul(16)?;
+                if rest.len() <= range_bytes {
+                    return None;
+                }
+                let (encoded_ranges, update) = rest.split_at(range_bytes);
+                let (encoded_ranges, remainder) = encoded_ranges.as_chunks::<16>();
+                debug_assert!(remainder.is_empty());
+                let ranges = encoded_ranges
+                    .iter()
+                    .map(|bytes| {
+                        let range = ProseMirrorRange {
+                            before_from: u32::from_be_bytes(bytes[0..4].try_into().ok()?),
+                            before_to: u32::from_be_bytes(bytes[4..8].try_into().ok()?),
+                            after_from: u32::from_be_bytes(bytes[8..12].try_into().ok()?),
+                            after_to: u32::from_be_bytes(bytes[12..16].try_into().ok()?),
+                        };
+                        (range.before_from <= range.before_to && range.after_from <= range.after_to)
+                            .then_some(range)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Frame::EditorMutation {
+                    doc_id,
+                    ranges,
+                    update: update.to_vec(),
+                }
+            }
             tag::BROADCAST => Frame::Broadcast {
                 doc_id,
                 update: body,
@@ -339,6 +398,22 @@ fn handle(
                 }],
             }
         }
+
+        Frame::EditorMutation {
+            doc_id,
+            ranges,
+            update,
+        } => match state
+            .workspace
+            .apply_editor_update(&doc_id, &update, &ranges)
+        {
+            Ok(None) => vec![Frame::Ack { doc_id }],
+            Ok(Some(_)) => vec![Frame::Ack { doc_id }],
+            Err(error) => vec![Frame::Error {
+                doc_id,
+                message: error.to_string(),
+            }],
+        },
 
         // Presence, never persisted.
         Frame::Awareness { doc_id, payload } => {

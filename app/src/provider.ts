@@ -9,7 +9,13 @@
  */
 import * as Y from "yjs";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
-import { decode, encode, Tag } from "./protocol";
+import {
+  decode,
+  encode,
+  encodeEditorMutation,
+  Tag,
+  type EditorRange,
+} from "./protocol";
 
 /** Marks transactions that came off the wire, so they are not echoed back. */
 export const REMOTE = Symbol("remote");
@@ -32,27 +38,30 @@ export type AgentPresence = {
  * unchanged until its ACK arrives. All later updates can be merged into one
  * tail, which keeps the queue at two entries even during a long editing burst.
  */
+type OutboundMutation = { update: Uint8Array; ranges: EditorRange[] };
+
 class OutboundQueue {
-  private inFlight: Uint8Array | null = null;
-  private queued: Uint8Array | null = null;
+  private inFlight: OutboundMutation | null = null;
+  private queued: OutboundMutation[] = [];
 
   get length(): number {
-    return Number(this.inFlight !== null) + Number(this.queued !== null);
+    return Number(this.inFlight !== null) + this.queued.length;
   }
 
   get hasPending(): boolean {
-    return this.inFlight !== null || this.queued !== null;
+    return this.inFlight !== null || this.queued.length > 0;
   }
 
-  enqueue(update: Uint8Array) {
-    this.queued = this.merge(this.queued, update.slice());
+  enqueue(update: Uint8Array, ranges: readonly EditorRange[]) {
+    this.queued.push({
+      update: update.slice(),
+      ranges: ranges.map((range) => ({ ...range })),
+    });
   }
 
-  /** Move the sole unsent update into the in-flight position. */
-  beginSend(): Uint8Array | null {
-    if (this.inFlight !== null || this.queued === null) return null;
-    this.inFlight = this.queued;
-    this.queued = null;
+  beginSend(): OutboundMutation | null {
+    if (this.inFlight !== null || this.queued.length === 0) return null;
+    this.inFlight = this.queued.shift()!;
     return this.inFlight;
   }
 
@@ -69,14 +78,8 @@ class OutboundQueue {
    */
   retryInFlight() {
     if (this.inFlight === null) return;
-    this.queued = this.merge(this.inFlight, this.queued);
+    this.queued.unshift(this.inFlight);
     this.inFlight = null;
-  }
-
-  private merge(left: Uint8Array | null, right: Uint8Array | null): Uint8Array | null {
-    if (left === null) return right;
-    if (right === null) return left;
-    return Y.mergeUpdates([left, right]);
   }
 }
 
@@ -95,6 +98,10 @@ export class SyncProvider {
   private saveError = false;
   private saveStatus: SaveStatus = "connecting";
   private readonly saveListeners = new Set<(status: SaveStatus) => void>();
+  private hydrated = false;
+  private initialSyncPending = false;
+  private readonly hydrationListeners = new Set<(hydrated: boolean) => void>();
+  private activeEditorTransaction: { ranges: EditorRange[]; updates: Uint8Array[] } | null = null;
 
   constructor(
     private readonly url: string,
@@ -125,8 +132,8 @@ export class SyncProvider {
 
     this.onStatus("connecting");
     this.setSaveStatus("connecting");
-    // A new connection retries all unacknowledged work as one Yjs update. This
-    // is safe when only the ACK was lost because Yjs updates are idempotent.
+    // A new connection retries the exact unacknowledged editor transaction.
+    // This is safe when only the ACK was lost because Yjs updates are idempotent.
     this.outbound.retryInFlight();
     this.saveError = false;
     // The browser WebSocket API cannot set headers, so the token rides as a
@@ -145,8 +152,7 @@ export class SyncProvider {
       this.onStatus("connected");
       // Announce what we already have; the daemon replies with the difference.
       socket.send(encode(Tag.Subscribe, this.docId, Y.encodeStateVector(this.doc)));
-      this.flushOutbound();
-      if (!this.outbound.hasPending) this.setSaveStatus("saved");
+      if (this.hydrated) this.flushOutbound();
     };
 
     socket.onmessage = (event) => {
@@ -156,6 +162,9 @@ export class SyncProvider {
 
       switch (frame.tag) {
         case Tag.Sync:
+          this.initialSyncPending = true;
+          this.queue(frame.body);
+          break;
         case Tag.Broadcast:
           this.queue(frame.body);
           break;
@@ -219,6 +228,31 @@ export class SyncProvider {
   setComposing(composing: boolean) {
     this.composing = composing;
     if (!composing) this.schedule();
+  }
+
+  withEditorTransaction<T>(ranges: readonly EditorRange[], run: () => T): T {
+    if (this.activeEditorTransaction !== null) return run();
+    const capture = {
+      ranges: ranges.map((range) => ({ ...range })),
+      updates: [] as Uint8Array[],
+    };
+    this.activeEditorTransaction = capture;
+    try {
+      return run();
+    } finally {
+      this.activeEditorTransaction = null;
+      if (capture.updates.length > 0) {
+        const update =
+          capture.updates.length === 1 ? capture.updates[0] : Y.mergeUpdates(capture.updates);
+        this.enqueueLocal(update, capture.ranges);
+      }
+    }
+  }
+
+  subscribeHydration(listener: (hydrated: boolean) => void): () => void {
+    this.hydrationListeners.add(listener);
+    listener(this.hydrated);
+    return () => this.hydrationListeners.delete(listener);
   }
 
   /**
@@ -285,7 +319,15 @@ export class SyncProvider {
 
   private onLocalUpdate = (update: Uint8Array, origin: unknown) => {
     if (origin === REMOTE) return;
-    this.outbound.enqueue(update);
+    if (this.activeEditorTransaction !== null) {
+      this.activeEditorTransaction.updates.push(update.slice());
+      return;
+    }
+    this.enqueueLocal(update, []);
+  };
+
+  private enqueueLocal(update: Uint8Array, ranges: readonly EditorRange[]) {
+    this.outbound.enqueue(update, ranges);
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.flushOutbound();
     } else if (
@@ -294,7 +336,7 @@ export class SyncProvider {
     ) {
       this.setSaveStatus("offline");
     }
-  };
+  }
 
   private onAwarenessChange = (
     changes: { added: number[]; updated: number[]; removed: number[] },
@@ -314,14 +356,15 @@ export class SyncProvider {
     if (
       socket?.readyState !== WebSocket.OPEN ||
       this.saveError ||
+      !this.hydrated ||
       !this.outbound.hasPending
     ) {
       return;
     }
 
-    const update = this.outbound.beginSend();
-    if (update === null) return;
-    socket.send(encode(Tag.Update, this.docId, update));
+    const mutation = this.outbound.beginSend();
+    if (mutation === null) return;
+    socket.send(encodeEditorMutation(this.docId, mutation.ranges, mutation.update));
     this.setSaveStatus("saving");
   }
 
@@ -383,6 +426,18 @@ export class SyncProvider {
     const merged = this.inbound.length === 1 ? this.inbound[0] : Y.mergeUpdates(this.inbound);
     this.inbound = [];
     Y.applyUpdate(this.doc, merged, REMOTE);
+    if (this.initialSyncPending) {
+      this.initialSyncPending = false;
+      this.setHydrated();
+    }
+  }
+
+  private setHydrated() {
+    if (this.hydrated) return;
+    this.hydrated = true;
+    for (const listener of this.hydrationListeners) listener(true);
+    if (this.outbound.hasPending) this.flushOutbound();
+    else this.setSaveStatus("saved");
   }
 
   /** Pending inbound updates. Exposed so tests can observe the buffer. */

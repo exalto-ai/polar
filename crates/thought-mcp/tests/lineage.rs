@@ -1,5 +1,7 @@
-use thought_mcp::{ActorRef, TextEdit, Workspace};
+use thought_core::Document;
+use thought_mcp::{ActorRef, ProseMirrorRange, TextEdit, Workspace};
 use thought_provenance::{Alignment, Assurance, Ingress};
+use thought_schema::Node;
 
 #[test]
 fn a_small_edit_only_claims_the_text_it_added() {
@@ -82,4 +84,100 @@ fn documents_without_lineage_are_labeled_unknown() {
     assert_eq!(source.ingress, Ingress::LegacyUnknown);
     assert_eq!(source.assurance, Assurance::Unknown);
     assert_eq!(source.alignment, Alignment::Unknown);
+}
+
+#[test]
+fn editor_ranges_disambiguate_repeated_text() {
+    let workspace = Workspace::open_in_memory().unwrap();
+    let created = workspace
+        .create_document_from_markdown("", "yesyes", &ActorRef::human("writer"))
+        .unwrap();
+    let peer = Document::new();
+    peer.apply_update(
+        &workspace
+            .sync_since(&created.doc_id, &peer.state_vector())
+            .unwrap(),
+    )
+    .unwrap();
+    let before = peer.state_vector();
+    peer.replace_block(
+        &created.blocks[0].block_id,
+        &Node::element("paragraph", vec![Node::text("yesYES", vec![])]),
+    )
+    .unwrap();
+
+    workspace
+        .apply_editor_update(
+            &created.doc_id,
+            &peer.diff_since(&before),
+            &[ProseMirrorRange {
+                before_from: 4,
+                before_to: 7,
+                after_from: 4,
+                after_to: 7,
+            }],
+        )
+        .unwrap();
+
+    let lineage = workspace.document_lineage(&created.doc_id).unwrap();
+    let editor = lineage
+        .summary
+        .contributions
+        .iter()
+        .find(|item| item.source.label == "Written here")
+        .unwrap();
+    assert_eq!(editor.graphemes, 3);
+    assert_eq!(editor.source.alignment, Alignment::Exact);
+    assert_eq!(editor.source.assurance, Assurance::Observed);
+}
+
+#[test]
+fn unusable_editor_ranges_fall_back_without_losing_the_edit() {
+    let workspace = Workspace::open_in_memory().unwrap();
+    let created = workspace
+        .create_document_from_markdown("", "before", &ActorRef::human("writer"))
+        .unwrap();
+    let peer = Document::new();
+    peer.apply_update(
+        &workspace
+            .sync_since(&created.doc_id, &peer.state_vector())
+            .unwrap(),
+    )
+    .unwrap();
+    let before = peer.state_vector();
+    peer.replace_block(
+        &created.blocks[0].block_id,
+        &Node::element("paragraph", vec![Node::text("after", vec![])]),
+    )
+    .unwrap();
+
+    workspace
+        .apply_editor_update(
+            &created.doc_id,
+            &peer.diff_since(&before),
+            &[ProseMirrorRange {
+                before_from: 99,
+                before_to: 99,
+                after_from: 99,
+                after_to: 99,
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(
+        workspace
+            .read_document(&created.doc_id)
+            .unwrap()
+            .markdown
+            .trim(),
+        "after"
+    );
+    let lineage = workspace.document_lineage(&created.doc_id).unwrap();
+    let editor = lineage
+        .summary
+        .contributions
+        .iter()
+        .find(|item| item.source.label == "Written here")
+        .unwrap();
+    assert_eq!(editor.source.alignment, Alignment::Inferred);
 }
