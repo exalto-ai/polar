@@ -726,9 +726,9 @@ M1 proved the daemon is complete without a UI. M2 attaches one, and in doing so 
 two mitigations the probe and the source audit turned up: update coalescing (AD-16) and the
 IME composition guard (AD-17).
 
-**Shape decided 2026-08-23:** single window with a ⌘K switcher, no sidebar. Agent carets and
-authorship colors visible. Full v0 schema including table editing. System sans throughout,
-light and dark.
+**Shape amended 2026-08-30:** document-scoped windows with the shared ⌘K switcher and an
+optional right sidebar for agent and proof controls. Agent carets and authorship colors remain
+visible. Full v0 schema including table editing. System sans throughout, light and dark.
 
 ## M2.0 — Acceptance
 
@@ -801,8 +801,14 @@ adjacency is why both belong to the same milestone.
 
 ## M2.5 — The window
 
-Document-scoped windows, no sidebar. ⌘K opens a switcher backed by the daemon's FTS index,
-the same `search` the agents use, so there is one search implementation rather than two.
+Each document has its own native window. ⌘K opens a switcher backed by the daemon's FTS index,
+the same `search` the agents use, so there is one search implementation rather than two. An
+optional right sidebar holds agent and proof controls without interrupting startup or changing
+how a document opens.
+
+**Cost:** the sidebar reduces horizontal editing space while open and adds a focus region that
+must leave keyboard and assistive-technology navigation while closed. It is presentation only;
+the daemon and CRDT remain the document authority.
 
 System sans throughout, sized and spaced for long-form writing. The editor and window use
 the fixed deep-blue `#0c1622` ground shared with the app icon. A compact, centered toolbar
