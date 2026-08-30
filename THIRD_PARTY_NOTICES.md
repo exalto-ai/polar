@@ -2,7 +2,8 @@
 
 ## Lucide
 
-The editor includes the `globe`, `copy`, `pencil`, `link-2`, and `link-2-off` icons from
+The editor includes the `file-plus`, `folder-open`, `save`, `globe`, `copy`,
+`pencil`, `link-2`, and `link-2-off` icons from
 [Lucide](https://github.com/lucide-icons/lucide), copied from commit
 `23f9abc4ed0146cffededd3d7f94c1018bfdf693`.
 
