@@ -41,6 +41,30 @@ describe("editor lifecycle API", () => {
     );
     await expect(api.createDocument("")).rejects.toThrow("not allowed");
   });
+
+  it("lists and decides suggestions through editor-only routes", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(response({ content_revision: "rev", suggestions: [] }))
+      .mockResolvedValueOnce(response({ suggestion: { state: "accepted" } }))
+      .mockResolvedValueOnce(response({ suggestion: { state: "rejected" } }));
+    const api = new EditorApi("http://localhost:9000/mcp", "editor-secret", fetcher);
+
+    await api.listSuggestions("doc/one");
+    await api.acceptSuggestion("doc/one", "review/one");
+    await api.rejectSuggestion("doc/one", "review/one");
+
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      "http://localhost:9000/editor/documents/doc%2Fone/suggestions",
+      "http://localhost:9000/editor/documents/doc%2Fone/suggestions/review%2Fone/accept",
+      "http://localhost:9000/editor/documents/doc%2Fone/suggestions/review%2Fone/reject",
+    ]);
+    expect(fetcher.mock.calls.map(([, init]) => init)).toEqual([
+      { method: "GET", headers: { Authorization: "Bearer editor-secret" } },
+      { method: "POST", headers: { Authorization: "Bearer editor-secret" } },
+      { method: "POST", headers: { Authorization: "Bearer editor-secret" } },
+    ]);
+  });
 });
 
 const permissions: ReviewerPermissions = {

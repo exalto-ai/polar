@@ -364,7 +364,7 @@ export function installReviewerConnections(
     );
     const note = document.createElement("p");
     note.className = "reviewer-permission-note";
-    note.textContent = "Reviewer connections are read-only. Reviewable suggestions arrive in a later update.";
+    note.textContent = "Reviewers can read and propose changes. They cannot edit document content directly.";
     fieldset.append(note);
     return fieldset;
   }

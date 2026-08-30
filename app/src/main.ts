@@ -26,6 +26,7 @@ import {
   type Rails,
 } from "./provenance";
 import { SyncProvider, type AgentPresence, type ProviderStatus } from "./provider";
+import { installSuggestionReview, type SuggestionReviewController } from "./suggestions";
 
 type Connection = {
   sync_url: string;
@@ -60,6 +61,7 @@ let open: {
   provider: SyncProvider;
   editor: Editor;
   rails: Rails;
+  suggestions: SuggestionReviewController;
 } | null = null;
 let openDocId = "";
 let closingAfterAutosave = false;
@@ -266,6 +268,7 @@ async function openDocument(docId: string): Promise<boolean> {
   }
   if (!(await canLeaveCurrentDocument())) return false;
   aiSupport.setCurrentDocument(null);
+  open?.suggestions.destroy();
   open?.rails.destroy();
   open?.provider.destroy();
   open?.editor.destroy();
@@ -310,9 +313,13 @@ async function openDocument(docId: string): Promise<boolean> {
   awareness.setLocalStateField("user", user);
 
   const rails = installProvenanceRails(editor, doc, els.editor, connection.actor_id);
+  const suggestions = installSuggestionReview(editor, doc, docId, editorApi, {
+    beforeDecision: () => provider.waitUntilSaved(),
+    onNotice: notify,
+  });
 
   provider.connect();
-  open = { doc, awareness, provider, editor, rails };
+  open = { doc, awareness, provider, editor, rails, suggestions };
   openDocId = docId;
   aiSupport.setCurrentDocument({ id: docId, title: deriveTitle(editor) });
   currentSources.setDocument(docId);
