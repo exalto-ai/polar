@@ -271,6 +271,11 @@ export class SyncProvider {
     return this.outbound.hasPending;
   }
 
+  /** True once the first daemon snapshot has replaced the empty editor. */
+  get isHydrated(): boolean {
+    return this.hydrated;
+  }
+
   /**
    * Wait for pending local work to reach SQLite, without waiting forever when
    * the daemon is unavailable. `false` means the caller must keep this provider

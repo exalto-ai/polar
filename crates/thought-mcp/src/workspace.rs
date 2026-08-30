@@ -154,6 +154,8 @@ pub struct ActorSummary {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DocumentLineage {
     pub doc_id: String,
+    /// Digest of the normalized wording and formatting represented by this response.
+    pub current_wording_revision: String,
     pub summary: CurrentSourceSummary,
     pub spans: Vec<LiveLineageSpan>,
 }
@@ -1160,13 +1162,15 @@ impl Workspace {
 
     pub fn document_lineage(&self, doc_id: &str) -> Result<DocumentLineage, WorkspaceError> {
         self.with(|inner| {
-            inner.doc(doc_id)?;
+            let current_wording_revision =
+                thought_markdown::current_wording_revision(&inner.doc(doc_id)?.read());
             let lineage = inner
                 .lineages
                 .get(doc_id)
                 .expect("document hydration installs lineage");
             Ok(DocumentLineage {
                 doc_id: doc_id.to_string(),
+                current_wording_revision,
                 summary: lineage.current_source_summary()?,
                 spans: lineage.spans().to_vec(),
             })

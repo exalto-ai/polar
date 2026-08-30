@@ -4348,6 +4348,7 @@ dependencies = [
 name = "thought-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "thought-schema",
  "yrs",
@@ -4357,8 +4358,10 @@ dependencies = [
 name = "thought-markdown"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "pulldown-cmark",
  "serde_json",
+ "sha2",
  "thought-schema",
 ]
 
@@ -4369,6 +4372,7 @@ dependencies = [
  "base64 0.22.1",
  "serde",
  "serde_json",
+ "sha2",
  "thought-core",
  "thought-markdown",
  "thought-schema",

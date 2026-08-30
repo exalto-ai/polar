@@ -89,7 +89,38 @@ function reason(error: unknown): string {
 }
 
 const aiSupport = installAiSupport(document, { onNotice: notify });
-const currentSources = installCurrentSources(document, (docId) => mcp.documentLineage(docId));
+
+async function visibleWordingRevision(): Promise<string | null> {
+  const current = open;
+  const docId = openDocId;
+  if (
+    !current ||
+    !docId ||
+    !isTauri() ||
+    !current.provider.isHydrated ||
+    current.provider.hasPendingChanges
+  ) {
+    return null;
+  }
+  const revision = await invoke<string>("document_wording_revision", {
+    document: current.editor.getJSON(),
+  });
+  if (
+    open !== current ||
+    openDocId !== docId ||
+    !current.provider.isHydrated ||
+    current.provider.hasPendingChanges
+  ) {
+    return null;
+  }
+  return revision;
+}
+
+const currentSources = installCurrentSources(
+  document,
+  (docId) => mcp.documentLineage(docId),
+  visibleWordingRevision,
+);
 
 /**
  * Agents that have written recently.
@@ -263,6 +294,7 @@ async function openDocument(docId: string): Promise<boolean> {
   }
   if (!(await canLeaveCurrentDocument())) return false;
   aiSupport.setCurrentDocument(null);
+  currentSources.setDocument(null);
   open?.suggestions.destroy();
   open?.rails.destroy();
   open?.provider.destroy();
@@ -329,6 +361,14 @@ async function openDocument(docId: string): Promise<boolean> {
   editor.on("update", () => refreshTitle(editor));
   editor.on("update", scheduleProvenance);
   editor.on("update", currentSources.scheduleRefresh);
+  const stopSourceHydration = provider.subscribeHydration((hydrated) => {
+    if (hydrated) currentSources.scheduleRefresh();
+  });
+  const stopSourceSaveStatus = provider.subscribeSaveStatus((status) => {
+    if (status === "saved") currentSources.scheduleRefresh();
+  });
+  editor.on("destroy", stopSourceHydration);
+  editor.on("destroy", stopSourceSaveStatus);
   awareness.on("change", renderPeers);
   refreshTitle(editor);
   activeAgents.clear();
