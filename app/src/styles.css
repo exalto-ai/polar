@@ -204,6 +204,33 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   justify-content: space-between;
   gap: 10px;
 }
+.current-sources {
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+}
+.current-sources h3 { margin: 3px 0 10px; }
+.current-sources > p { margin: 0; }
+.current-sources ul {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+.current-sources li {
+  display: grid;
+  gap: 2px;
+  padding: 8px 9px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+.current-sources li span {
+  color: var(--ink-soft);
+  font-size: 11px;
+  text-transform: capitalize;
+}
 .text-button {
   padding: 0;
   border: 0;
