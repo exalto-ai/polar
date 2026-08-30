@@ -72,6 +72,46 @@ CREATE TABLE IF NOT EXISTS block_provenance (
 );
 CREATE INDEX IF NOT EXISTS block_provenance_doc ON block_provenance(doc_id);
 
+-- One compact event per durable mutation. This is local attribution metadata,
+-- not a signature or a tamper-proof ledger.
+CREATE TABLE IF NOT EXISTS provenance_events (
+  event_id        INTEGER PRIMARY KEY,
+  doc_id          TEXT    NOT NULL REFERENCES documents(id),
+  update_seq      INTEGER NOT NULL UNIQUE REFERENCES updates(seq),
+  actor_id        TEXT    REFERENCES actors(id),
+  action          TEXT    NOT NULL CHECK (action IN ('edit', 'trash', 'restore')),
+  group_key       TEXT    NOT NULL,
+  source_label    TEXT    NOT NULL,
+  ingress         TEXT    NOT NULL CHECK (ingress IN (
+                    'entered', 'command', 'pasted', 'imported', 'mcp', 'api',
+                    'suggestion', 'unknown', 'legacy_unknown'
+                  )),
+  assurance       TEXT    NOT NULL CHECK (assurance IN (
+                    'observed', 'reported', 'verified', 'unknown'
+                  )),
+  alignment       TEXT    NOT NULL CHECK (alignment IN ('exact', 'inferred', 'unknown')),
+  session_id      TEXT,
+  created_at      INTEGER NOT NULL,
+  UNIQUE (doc_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS provenance_events_doc_event
+  ON provenance_events(doc_id, event_id);
+
+-- Authoritative current surviving text. It changes in the same transaction as
+-- the Yjs update and provenance event, so no replay or cache digest is needed.
+CREATE TABLE IF NOT EXISTS lineage_spans (
+  doc_id          TEXT    NOT NULL REFERENCES documents(id),
+  block_id        TEXT    NOT NULL,
+  node_path       TEXT    NOT NULL,
+  start_utf16     INTEGER NOT NULL CHECK (start_utf16 >= 0),
+  end_utf16       INTEGER NOT NULL CHECK (end_utf16 > start_utf16),
+  source_event_id INTEGER NOT NULL,
+  PRIMARY KEY (doc_id, block_id, node_path, start_utf16),
+  FOREIGN KEY (doc_id, source_event_id)
+    REFERENCES provenance_events(doc_id, event_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS lineage_spans_source ON lineage_spans(source_event_id);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
   doc_id UNINDEXED, title, body, tokenize='porter unicode61'
 );
