@@ -12,6 +12,7 @@ export type SendChatRequest = {
   model: string;
   messages: ChatMessage[];
   message: string;
+  focus_text: string | null;
   disclosure_version: 1;
 };
 

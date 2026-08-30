@@ -201,6 +201,10 @@ function refreshTitle(editor: Editor) {
       snapshot: () => editor.getJSON(),
       suggestionPosition: () => suggestionPositionAtSelection(editor, current.doc),
       waitUntilSaved: () => current.provider.waitUntilSaved(),
+      selectedText: () => {
+        const { from, to } = editor.state.selection;
+        return from === to ? null : editor.state.doc.textBetween(from, to, "\n", "\n");
+      },
     });
   }
 }
@@ -372,6 +376,10 @@ async function openDocument(docId: string): Promise<boolean> {
     snapshot: () => editor.getJSON(),
     suggestionPosition: () => suggestionPositionAtSelection(editor, doc),
     waitUntilSaved: () => provider.waitUntilSaved(),
+    selectedText: () => {
+      const { from, to } = editor.state.selection;
+      return from === to ? null : editor.state.doc.textBetween(from, to, "\n", "\n");
+    },
   });
   currentSources.setDocument(docId);
 

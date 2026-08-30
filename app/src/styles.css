@@ -277,6 +277,16 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .pro-chat textarea { min-height: 66px; padding: 8px; resize: vertical; line-height: 1.4; }
 .pro-chat form { display: grid; gap: 8px; }
 .pro-chat form > button { justify-self: end; }
+.pro-chat-focus-actions { display: grid; justify-items: start; gap: 6px; }
+.pro-chat-focus {
+  width: 100%;
+  padding: 7px;
+  border-left: 2px solid var(--accent);
+  color: var(--ink-soft);
+  background: var(--raised);
+  font-size: 11px;
+}
+.pro-chat-focus span { display: block; margin-bottom: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .pro-chat-consent { display: flex; gap: 7px; color: var(--ink-soft); font-size: 11.5px; line-height: 1.35; }
 .pro-chat-consent input { flex: 0 0 auto; margin: 2px 0 0; }
 .pro-chat-messages { display: grid; gap: 8px; margin: 0 0 10px; padding: 0; list-style: none; }

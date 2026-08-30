@@ -13,3 +13,6 @@ The transport is intentionally non-streaming and non-persistent. It has no trans
 file locks, restart recovery, thinking controls, Stop, Retry, or hidden reasoning surface. It
 returns bounded visible text, the requested and reported model labels, the wording revision sent,
 and whether the provider reported a complete response.
+
+An optional selected-text focus is sent as a separate bounded plain-text field. It never becomes a
+file attachment or durable editor range.
