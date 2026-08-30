@@ -496,6 +496,109 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   letter-spacing: -0.035em;
 }
 
+/* ---------- reviewer suggestions ---------- */
+/* A proposal reads like an editorial slip attached to the affected block.
+   The accent rail is the one loud element; the writing surface stays quiet. */
+.tiptap > .suggestion-target {
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  box-shadow: inset 2px 0 color-mix(in srgb, var(--accent) 82%, transparent);
+}
+.suggestion-slip {
+  margin: 10px 0 22px;
+  padding: 12px 14px 13px;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px 10px 10px 4px;
+  background: color-mix(in srgb, var(--raised) 74%, var(--paper));
+  color: var(--ink);
+  font: 12px/1.45 var(--sans);
+  letter-spacing: 0;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+}
+.suggestion-slip[data-state="stale"] {
+  border-left-color: var(--ink-faint);
+  box-shadow: none;
+}
+.suggestion-slip > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+}
+.suggestion-slip > header strong {
+  display: block;
+  margin-top: 1px;
+  color: var(--ink);
+  font-size: 12.5px;
+}
+.suggestion-eyebrow {
+  display: block;
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.suggestion-slip[data-state="stale"] .suggestion-eyebrow { color: var(--ink-faint); }
+.suggestion-state {
+  flex: 0 0 auto;
+  color: var(--ink-faint);
+  font-size: 9.5px;
+}
+.suggestion-explanation,
+.suggestion-stale-note,
+.suggestion-error { margin: 9px 0 0; }
+.suggestion-explanation { color: var(--ink-soft); }
+.suggestion-stale-note { color: var(--ink-faint); }
+.suggestion-error { color: #f0aaa4; }
+.suggestion-preview {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  overflow-x: auto;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--paper) 68%, transparent);
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+}
+.suggestion-preview del { color: var(--ink-faint); text-decoration-thickness: 1px; }
+.suggestion-preview ins { color: var(--ink); text-decoration: none; }
+.suggestion-preview-arrow { color: var(--accent); }
+.suggestion-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 11px;
+}
+.suggestion-actions button {
+  min-height: 27px;
+  padding: 4px 9px;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: 600 10.5px/1 var(--sans);
+}
+.suggestion-actions .suggestion-accept {
+  border-color: color-mix(in srgb, var(--accent) 64%, var(--rule));
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--ink);
+}
+.suggestion-actions button:not(:disabled):hover,
+.suggestion-actions button:not(:disabled):focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+.suggestion-actions button:disabled { opacity: 0.55; }
+
+@media (max-width: 600px) {
+  .suggestion-preview { display: grid; }
+  .suggestion-preview-arrow { transform: rotate(90deg); transform-origin: center; }
+}
+
 /* ---------- formatting toolbar ---------- */
 .format-toolbar {
   position: sticky;

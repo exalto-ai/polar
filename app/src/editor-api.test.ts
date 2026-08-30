@@ -36,4 +36,24 @@ describe("editor document lifecycle", () => {
       "invalid markdown",
     );
   });
+
+  it("lists and decides suggestions through editor-only routes", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ content_revision: "rev", suggestions: [] }))
+      .mockResolvedValueOnce(Response.json({ suggestion: { state: "accepted" } }))
+      .mockResolvedValueOnce(Response.json({ suggestion: { state: "rejected" } }));
+    vi.stubGlobal("fetch", fetch);
+    const documents = new EditorDocuments("http://127.0.0.1:1234/mcp", "secret");
+
+    await documents.listSuggestions("doc/one");
+    await documents.acceptSuggestion("doc/one", "review/one");
+    await documents.rejectSuggestion("doc/one", "review/one");
+
+    expect(fetch.mock.calls.map(([url]) => url.toString())).toEqual([
+      "http://127.0.0.1:1234/editor/documents/doc%2Fone/suggestions",
+      "http://127.0.0.1:1234/editor/documents/doc%2Fone/suggestions/review%2Fone/accept",
+      "http://127.0.0.1:1234/editor/documents/doc%2Fone/suggestions/review%2Fone/reject",
+    ]);
+  });
 });
