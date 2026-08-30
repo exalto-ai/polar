@@ -8,6 +8,7 @@ import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { Editor } from "@tiptap/core";
 import { createEditor } from "./editor";
+import { EditorDocuments } from "./editor-api";
 import {
   exportMarkdownDocument,
   importMarkdownDocument,
@@ -46,6 +47,7 @@ const els = {
 
 let connection: Connection;
 let mcp: Mcp;
+let editorDocuments: EditorDocuments;
 let open: {
   doc: Y.Doc;
   awareness: Awareness;
@@ -552,7 +554,7 @@ async function trashSelected() {
   // In the trash the same key means the opposite thing: put it back.
   if (trashMode) {
     try {
-      await mcp.setDocumentDeleted(row.doc_id, false);
+      await editorDocuments.setDocumentDeleted(row.doc_id, false);
       notify(`Restored "${row.title || "Untitled"}"`);
       await refreshResults();
     } catch (error) {
@@ -564,7 +566,7 @@ async function trashSelected() {
   const wasOpen = row.doc_id === openDocId;
   if (wasOpen && !(await canLeaveCurrentDocument())) return;
   try {
-    await mcp.setDocumentDeleted(row.doc_id, true);
+    await editorDocuments.setDocumentDeleted(row.doc_id, true);
     notify(`Moved "${row.title || "Untitled"}" to the trash · ${ACCEL_LABEL}⇧⌫ to find it`);
   } catch (error) {
     notify(`Could not trash: ${reason(error)}`, "error");
@@ -587,7 +589,7 @@ async function createDocumentInNewWindow(title: string) {
   // its preview editor, so it still needs the same durability guard.
   if (!isTauri() && !(await canLeaveCurrentDocument())) return;
   try {
-    const created = await mcp.createDocument(title);
+    const created = await editorDocuments.createDocument(title);
     els.scrim.hidden = true;
     toggleConnections(false);
     try {
@@ -617,7 +619,7 @@ async function importMarkdownFile() {
   try {
     const file = await importMarkdownDocument(
       nativeFileBridge,
-      mcp,
+      editorDocuments,
       showDocumentInNewWindow,
     );
     if (file) notify(`Imported “${file.file_name}” as a new document`);
@@ -746,6 +748,7 @@ async function boot() {
   relabelShortcutHints();
   connection = await loadConnection();
   mcp = new Mcp(connection.mcp_url, connection.token);
+  editorDocuments = new EditorDocuments(connection.mcp_url, connection.token);
   els.stdioCommand.textContent = connection.stdio_command;
   await mcp.connect();
 
@@ -762,7 +765,7 @@ async function boot() {
     targetId =
       documents.find((document) => document.doc_id === last)?.doc_id ??
       documents[0]?.doc_id ??
-      (await mcp.createDocument("")).doc_id;
+      (await editorDocuments.createDocument("")).doc_id;
   }
 
   await openDocument(targetId);
