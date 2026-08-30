@@ -153,7 +153,60 @@ export class Mcp {
       .blocks as BlockAttribution[];
   }
 
+  async documentLineage(docId: string): Promise<DocumentLineage> {
+    return await this.call("document_lineage", { doc_id: docId });
+  }
+
 }
+
+export type LineageIngress =
+  | "entered"
+  | "command"
+  | "pasted"
+  | "imported"
+  | "mcp"
+  | "api"
+  | "suggestion"
+  | "unknown"
+  | "legacy_unknown";
+
+export type LineageSource = {
+  id: number;
+  group_key: string;
+  label: string;
+  ingress: LineageIngress;
+  assurance: "observed" | "reported" | "verified" | "unknown";
+  alignment: "exact" | "inferred" | "unknown";
+};
+
+export type DocumentLineage = {
+  doc_id: string;
+  current_wording_revision: string;
+  summary: {
+    total_graphemes: number;
+    total_non_whitespace_graphemes: number;
+    contributions: Array<{
+      source: LineageSource;
+      graphemes: number;
+      non_whitespace_graphemes: number;
+    }>;
+    grouped_contributions: Array<{
+      group: Omit<LineageSource, "id" | "group_key"> & { key: string };
+      event_count: number;
+      graphemes: number;
+      non_whitespace_graphemes: number;
+    }>;
+  };
+  spans: Array<{
+    location: {
+      block_id: string;
+      path: number[];
+      from_utf16: number;
+      to_utf16: number;
+    };
+    source_id: number;
+  }>;
+};
 
 export type Actor = {
   actor_id: string;

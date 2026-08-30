@@ -427,9 +427,15 @@ format/structure delta model. Those would duplicate the CRDT and imply verificat
 daemon cannot provide. Evidence and verified traces may refer to source events later without
 changing this storage model.
 
+`document_lineage` includes a SHA-256 revision of the normalized Markdown projection represented
+by the response. The native window computes the same revision from its visible editor tree and
+renders current sources only on an exact match. This is a consistency binding, not a signature or
+proof of origin.
+
 **Cost:** inferred alignment can be ambiguous when text repeats, current spans do not answer
 historical questions, and legacy content stays unknown. Exact editor ranges pay off the first;
-the op log answers history; neither justifies inventing missing provenance for the third.
+the op log answers history; neither justifies inventing missing provenance for the third. The
+window briefly hides current sources while a local edit is still saving.
 
 ### AD-15 — Direct writes for local unshared docs, suggestion mode once shared
 Per-session override either way. The reason to gate agent writes is other people, not the

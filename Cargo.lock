@@ -1732,9 +1732,11 @@ dependencies = [
 name = "thought-markdown"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "proptest",
  "pulldown-cmark",
  "serde_json",
+ "sha2",
  "thought-schema",
  "thought-testkit",
 ]
