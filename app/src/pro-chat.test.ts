@@ -39,6 +39,7 @@ function turn(
     input_tokens: null,
     output_tokens: null,
     wording_revision: "",
+    selected_text: null,
     ...overrides,
   };
 }
@@ -61,6 +62,7 @@ function documentContext(
     id,
     title,
     snapshot,
+    selectedText: () => "Focused sentence",
     suggestionPosition: () => ({ kind: "end" }),
     waitUntilSaved: () => Promise.resolve(true),
   };
@@ -195,6 +197,13 @@ describe("Pro chat", () => {
     expect(document.querySelector("#pro-chat-sharing")?.textContent).toContain(
       "To OpenAI: this document’s title and contents",
     );
+    document.querySelector<HTMLButtonElement>("#pro-chat-use-selection")!.click();
+    expect(document.querySelector("#pro-chat-focus-preview")?.textContent).toBe(
+      "Focused sentence",
+    );
+    expect(document.querySelector("#pro-chat-sharing")?.textContent).toContain(
+      "selected-text focus",
+    );
     enableComposer();
     expect(send.disabled).toBe(false);
     expect(document.querySelector<HTMLElement>(".pro-chat-consent")!.hidden).toBe(true);
@@ -217,7 +226,8 @@ describe("Pro chat", () => {
         thinking: "default",
         message: "Visible message",
         retry_turn_id: null,
-        disclosure_version: 2,
+        selected_text: "Focused sentence",
+        disclosure_version: 3,
       },
       expect.any(Function),
     );

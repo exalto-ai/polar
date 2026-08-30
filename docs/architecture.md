@@ -490,6 +490,16 @@ the platform connection. Provider and model labels remain Reported, not Verified
 range. Moving or editing the document after generation requires a new response. The private
 transcript and replicated suggestion remain separate records.
 
+### AD-26 — Selected chat focus is explicit and plain text
+
+Built-in chat always sends the current document. A person may additionally capture the current
+editor selection as plain-text focus for the next request. The interface shows and can remove that
+snapshot before Send. Native code bounds it, classifies it as untrusted context, and stores it with
+the visible turn so an explicit retry addresses the same focus.
+
+**Cost:** focus is a text snapshot, not a durable editor range. It can become stale while the
+person continues editing, and it does not narrow the complete-document disclosure.
+
 ### AD-15 — The local editor writes directly; configured reviewers propose
 
 The bundled editor writes through the daemon's observed editor routes. Durable reviewer

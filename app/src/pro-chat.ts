@@ -16,6 +16,7 @@ export type ProChatDocumentContext = {
   id: string;
   title: string;
   snapshot: () => unknown;
+  selectedText: () => string | null;
   suggestionPosition: () => ProChatSuggestionPosition;
   waitUntilSaved: () => Promise<boolean>;
 };
@@ -49,6 +50,7 @@ type RunningRequest = {
   draft: string | null;
   settled: boolean;
   cancelRequested: boolean;
+  selectedText: string | null;
 };
 
 type MessageNodes = {
@@ -60,6 +62,7 @@ type MessageNodes = {
   actions: HTMLElement;
   copy: HTMLButtonElement;
   suggest: HTMLButtonElement;
+  focus: HTMLElement;
 };
 
 const THINKING_LEVELS: readonly ProChatThinking[] = [
@@ -198,6 +201,10 @@ export function installProChat(
   const errorMessage = required<HTMLElement>(panel, "#pro-chat-error-message");
   const errorRetry = required<HTMLButtonElement>(panel, "#pro-chat-error-retry");
   const composer = required<HTMLFormElement>(panel, "#pro-chat-composer");
+  const useSelection = required<HTMLButtonElement>(panel, "#pro-chat-use-selection");
+  const focusChip = required<HTMLElement>(panel, "#pro-chat-focus-chip");
+  const focusPreview = required<HTMLElement>(panel, "#pro-chat-focus-preview");
+  const removeSelection = required<HTMLButtonElement>(panel, "#pro-chat-remove-selection");
   const message = required<HTMLTextAreaElement>(panel, "#pro-chat-message");
   const messageIssue = required<HTMLElement>(panel, "#pro-chat-message-issue");
   const sharing = required<HTMLElement>(panel, "#pro-chat-sharing");
@@ -238,6 +245,7 @@ export function installProChat(
   let historyGeneration = 0;
   let clearGeneration = 0;
   let running: RunningRequest | null = null;
+  let selectedFocus: string | null = null;
   let suggestingTurnId: string | null = null;
   const suggestedTurnIds = new Set<string>();
   let initialAvailabilityResolved = false;
@@ -294,10 +302,11 @@ export function installProChat(
   function renderSharing(): void {
     const name = providerName();
     const earlier = visibleMessageCount();
+    const focus = selectedFocus ? ", the selected-text focus" : "";
     sharing.textContent = earlier === 0
-      ? `To ${name}: this document’s title and contents, including formatting and links, plus this message. No files are attached. API charges apply.`
-      : `To ${name}: this document’s title and contents, including formatting and links, this message, and ${earlier} completed earlier chat messages. No files are attached. API charges apply.`;
-    consentCopy.textContent = `I agree to send this document’s title and contents, including formatting and links, and visible chat to ${name}. API charges may apply.`;
+      ? `To ${name}: this document’s title and contents${focus}, plus this message. API charges apply.`
+      : `To ${name}: this document’s title and contents${focus}, this message, and ${earlier} completed earlier chat messages. API charges apply.`;
+    consentCopy.textContent = `I agree to send this document’s title and contents, any selection I explicitly add, and visible chat to ${name}. API charges may apply.`;
   }
 
   function responseText(turnId: string): string {
@@ -317,7 +326,9 @@ export function installProChat(
     userLabel.textContent = "You";
     const userText = document.createElement("p");
     userText.textContent = turn.user_text;
-    user.append(userLabel, userText);
+    const focus = document.createElement("small");
+    focus.className = "pro-chat-turn-focus";
+    user.append(userLabel, userText, focus);
 
     const assistantArticle = document.createElement("article");
     assistantArticle.className = "pro-chat-message assistant";
@@ -380,7 +391,7 @@ export function installProChat(
     footer.append(status, actions);
     assistantArticle.append(assistantHeader, assistant, footer);
     item.append(user, assistantArticle);
-    return { item, assistant, assistantMeta, status, retry, actions, copy, suggest };
+    return { item, assistant, assistantMeta, status, retry, actions, copy, suggest, focus };
   }
 
   function renderTurns(): void {
@@ -403,6 +414,10 @@ export function installProChat(
       const userText = required<HTMLElement>(nodes.item, ".pro-chat-message.user p");
       const providerLabel = required<HTMLElement>(nodes.item, ".pro-chat-message.assistant .pro-chat-message-label");
       userText.textContent = turn.user_text;
+      nodes.focus.hidden = !turn.selected_text;
+      nodes.focus.textContent = turn.selected_text
+        ? `Focused on: ${turn.selected_text.replace(/\s+/g, " ").slice(0, 100)}`
+        : "";
       providerLabel.textContent = providerName(turn.provider);
       nodes.assistantMeta.textContent = turn.reported_model
         ? `Provider reported ${turn.reported_model}`
@@ -500,6 +515,10 @@ export function installProChat(
     consentLabel.hidden = providerConsent;
     billingReminder.hidden = !providerConsent;
     message.disabled = busy || historyLoading || !ready;
+    useSelection.disabled = busy || historyLoading || !ready;
+    focusChip.hidden = selectedFocus === null;
+    focusPreview.textContent = selectedFocus?.replace(/\s+/g, " ").slice(0, 100) ?? "";
+    removeSelection.disabled = busy;
     message.setAttribute(
       "aria-describedby",
       providerConsent
@@ -609,6 +628,7 @@ export function installProChat(
     stopping = false;
     suggestingTurnId = null;
     suggestedTurnIds.clear();
+    selectedFocus = null;
     publishBusy();
     if (active && selectedProvider) void loadHistory();
     else render();
@@ -726,6 +746,9 @@ export function installProChat(
       if (context.draft !== null && message.value === context.draft) {
         message.value = "";
       }
+      if (context.selectedText !== null && selectedFocus === context.selectedText) {
+        selectedFocus = null;
+      }
       if (visible && history) {
         history.revision = event.revision;
         upsertTurn(event.turn);
@@ -810,6 +833,7 @@ export function installProChat(
       draft: visibleMessage,
       settled: false,
       cancelRequested: false,
+      selectedText: retryTurn ? null : selectedFocus,
     };
     running = requestContext;
     loadError = null;
@@ -830,6 +854,7 @@ export function installProChat(
           thinking: targetThinking,
           message: visibleMessage,
           retry_turn_id: retryTurn?.id ?? null,
+          selected_text: retryTurn ? null : selectedFocus,
           disclosure_version: PRO_CHAT_DISCLOSURE_VERSION,
         },
         (event) => handleEvent(requestContext, event),
@@ -1075,6 +1100,28 @@ export function installProChat(
     render();
   });
   listen(message, "input", render);
+  listen(useSelection, "click", () => {
+    try {
+      const value = documentContext?.selectedText() ?? null;
+      if (!value) {
+        options.onNotice?.("Select some document text first.", "error");
+        return;
+      }
+      if (utf8.encode(value).byteLength > 64 * 1024 || value.includes("\0")) {
+        options.onNotice?.("Selected text must be 64 KiB or smaller.", "error");
+        return;
+      }
+      selectedFocus = value;
+      render();
+    } catch (cause) {
+      options.onNotice?.(`Could not use this selection: ${shortError(cause)}`, "error");
+    }
+  });
+  listen(removeSelection, "click", () => {
+    selectedFocus = null;
+    render();
+    useSelection.focus();
+  });
   listen(message, "keydown", (event) => {
     if (
       event.key !== "Enter" ||
