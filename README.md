@@ -15,8 +15,10 @@ margin says who wrote each block. `cargo test --workspace` is green and CI gates
 One thing is still owed from M2: the manual IME pass (AD-8), which needs a person at a
 keyboard rather than a test. M3 — sharing through a relay — is planned but not built.
 
-- **[docs/architecture.md](docs/architecture.md)** — 17 decisions, each with its cost
+- **[docs/architecture.md](docs/architecture.md)** — decisions, each with its cost
   stated. Written to be argued with.
+- **[docs/provenance.md](docs/provenance.md)** — what text lineage claims, stores, and
+  deliberately does not claim.
 - **[DESIGN.md](DESIGN.md)** — one accent, one mark, and the file each is
   defined in.
 - **[prototypes/editor-probe](prototypes/editor-probe)** — throwaway probe answering
@@ -30,6 +32,7 @@ keyboard rather than a test. M3 — sharing through a relay — is planned but n
 | `thought-schema` | The document model, `schema.json`, content-expression validation |
 | `thought-markdown` | The markdown projection, both directions, property-tested |
 | `thought-core` | yrs documents, block identity, block-scoped edits |
+| `thought-provenance` | Current visible-text lineage |
 | `thought-store` | SQLite op log, snapshots, actors, search |
 | `thought-mcp` | The agent tool surface, with no transport attached |
 | `thoughtd` | The daemon: MCP over loopback HTTP |
@@ -86,6 +89,6 @@ agent editing a document with no window open is the normal path rather than a sp
 Documents are a ProseMirror tree in a Yjs `XmlFragment`. Markdown is a projection used for
 agent I/O, export, and search — never the storage format.
 
-Attribution lives in the SQLite op log rather than the CRDT, because Yjs cannot carry it.
-That log is what makes *who wrote this block* answerable at all, and it is never compacted
-away.
+Attribution lives beside the CRDT because Yjs cannot carry it. The append-only op log answers
+who changed a block and when. Current text-lineage spans answer which recorded mutation
+introduced each surviving grapheme; they do not pretend to be tamper-proof history.

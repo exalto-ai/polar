@@ -4,15 +4,18 @@
 //! tested with no window, no server, and no client — which is the whole claim
 //! of AD-2.
 
+mod lineage;
+mod mutation;
 mod workspace;
 
 /// The actor id every editor window writes under, named here so the window can
 /// be told who it is rather than hardcoding a string that `sync.rs` owns.
 pub const EDITOR_ACTOR_ID: &str = "human:editor";
 
+pub use mutation::MutationContext;
 pub use workspace::{
-    ActorRef, ActorSummary, BlockAttribution, BlockSpan, DocumentSummary, DocumentView,
-    EditOutcome, SearchHit, TextEdit, Workspace, WorkspaceError,
+    ActorRef, ActorSummary, BlockAttribution, BlockSpan, DocumentLineage, DocumentSummary,
+    DocumentView, EditOutcome, SearchHit, TextEdit, Workspace, WorkspaceError,
 };
 
 #[cfg(test)]

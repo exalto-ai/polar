@@ -7,7 +7,7 @@
 //! the op log exists for *provenance* and is never compacted away, because the
 //! activity feed and per-run revert read it (AD-13).
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -118,6 +118,58 @@ pub struct InitialDocument<'a> {
     pub attributed_at: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProvenanceEventRow {
+    pub event_id: i64,
+    pub actor_id: Option<String>,
+    pub action: String,
+    pub group_key: String,
+    pub source_label: String,
+    pub ingress: String,
+    pub assurance: String,
+    pub alignment: String,
+    pub session_id: Option<String>,
+    pub created_at: i64,
+}
+
+pub struct ProvenanceEventInput<'a> {
+    pub event_id: i64,
+    pub actor_id: Option<&'a str>,
+    pub action: &'a str,
+    pub group_key: &'a str,
+    pub source_label: &'a str,
+    pub ingress: &'a str,
+    pub assurance: &'a str,
+    pub alignment: &'a str,
+    pub session_id: Option<&'a str>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineageSpanRow {
+    pub block_id: String,
+    pub node_path: String,
+    pub start_utf16: i64,
+    pub end_utf16: i64,
+    pub source_event_id: i64,
+}
+
+pub struct LineageUpdate<'a> {
+    pub doc_id: &'a str,
+    pub expected_seq: i64,
+    pub payload: &'a [u8],
+    pub actor_id: &'a str,
+    pub origin: Origin,
+    pub session_id: Option<&'a str>,
+    pub title: &'a str,
+    pub markdown: &'a str,
+    pub deleted_at: Option<i64>,
+    pub touched_blocks: &'a [String],
+    pub current_blocks: &'a [String],
+    pub event: ProvenanceEventInput<'a>,
+    pub spans: &'a [LineageSpanRow],
+}
+
 /// What a cold start needs: the newest snapshot, plus every update after it.
 #[derive(Debug, Default)]
 pub struct Restored {
@@ -222,6 +274,205 @@ impl Store {
             )?;
         }
         transaction.commit()
+    }
+
+    pub fn create_initial_document_with_lineage(
+        &self,
+        document: InitialDocument<'_>,
+        expected_seq: i64,
+        event: ProvenanceEventInput<'_>,
+        spans: &[LineageSpanRow],
+    ) -> Result<(), SqlError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let timestamp = now_ms();
+        transaction.execute(
+            "INSERT INTO documents (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+            params![document.id, document.title, timestamp],
+        )?;
+        transaction.execute(
+            "INSERT INTO updates
+               (seq, doc_id, payload, actor_id, origin, session_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                expected_seq,
+                document.id,
+                document.payload,
+                document.actor_id,
+                document.origin.as_str(),
+                document.session_id,
+                timestamp,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO doc_fts (doc_id, title, body) VALUES (?1, ?2, ?3)",
+            params![document.id, document.title, document.markdown],
+        )?;
+        for block_id in document.block_ids {
+            transaction.execute(
+                "INSERT INTO block_provenance
+                   (doc_id, block_id, created_by, created_at, touched_by, touched_at, session_id)
+                 VALUES (?1, ?2, ?3, ?5, ?3, ?5, ?4)",
+                params![
+                    document.id,
+                    block_id,
+                    document.actor_id,
+                    document.session_id,
+                    document.attributed_at,
+                ],
+            )?;
+        }
+        insert_event(&transaction, document.id, expected_seq, &event)?;
+        replace_lineage_spans(&transaction, document.id, spans)?;
+        transaction.commit()
+    }
+
+    pub fn next_update_seq(&self) -> Result<i64, SqlError> {
+        self.conn
+            .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM updates", [], |row| {
+                row.get(0)
+            })
+    }
+
+    pub fn commit_lineage_update(&self, update: LineageUpdate<'_>) -> Result<i64, SqlError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO updates
+               (seq, doc_id, payload, actor_id, origin, session_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                update.expected_seq,
+                update.doc_id,
+                update.payload,
+                update.actor_id,
+                update.origin.as_str(),
+                update.session_id,
+                update.event.created_at,
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE documents
+             SET title = ?2, updated_at = ?3, deleted_at = ?4
+             WHERE id = ?1",
+            params![
+                update.doc_id,
+                update.title,
+                update.event.created_at,
+                update.deleted_at,
+            ],
+        )?;
+        transaction.execute("DELETE FROM doc_fts WHERE doc_id = ?1", [update.doc_id])?;
+        transaction.execute(
+            "INSERT INTO doc_fts (doc_id, title, body) VALUES (?1, ?2, ?3)",
+            params![update.doc_id, update.title, update.markdown],
+        )?;
+        for block_id in update.touched_blocks {
+            transaction.execute(
+                "INSERT INTO block_provenance
+                   (doc_id, block_id, created_by, created_at, touched_by, touched_at, session_id)
+                 VALUES (?1, ?2, ?3, ?5, ?3, ?5, ?4)
+                 ON CONFLICT(doc_id, block_id) DO UPDATE SET
+                   touched_by = excluded.touched_by,
+                   touched_at = excluded.touched_at,
+                   session_id = excluded.session_id",
+                params![
+                    update.doc_id,
+                    block_id,
+                    update.actor_id,
+                    update.session_id,
+                    update.event.created_at,
+                ],
+            )?;
+        }
+        let current = update
+            .current_blocks
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let mut statement =
+            transaction.prepare("SELECT block_id FROM block_provenance WHERE doc_id = ?1")?;
+        let present = statement
+            .query_map([update.doc_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        for block_id in present.iter().filter(|id| !current.contains(*id)) {
+            transaction.execute(
+                "DELETE FROM block_provenance WHERE doc_id = ?1 AND block_id = ?2",
+                params![update.doc_id, block_id],
+            )?;
+        }
+        insert_event(
+            &transaction,
+            update.doc_id,
+            update.expected_seq,
+            &update.event,
+        )?;
+        replace_lineage_spans(&transaction, update.doc_id, update.spans)?;
+        transaction.commit()?;
+        Ok(update.expected_seq)
+    }
+
+    pub fn seed_legacy_lineage(
+        &self,
+        doc_id: &str,
+        update_seq: i64,
+        event: ProvenanceEventInput<'_>,
+        spans: &[LineageSpanRow],
+    ) -> Result<(), SqlError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        insert_event(&transaction, doc_id, update_seq, &event)?;
+        replace_lineage_spans(&transaction, doc_id, spans)?;
+        transaction.commit()
+    }
+
+    pub fn latest_update_seq(&self, doc_id: &str) -> Result<Option<i64>, SqlError> {
+        self.conn.query_row(
+            "SELECT MAX(seq) FROM updates WHERE doc_id = ?1",
+            [doc_id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn provenance_events(&self, doc_id: &str) -> Result<Vec<ProvenanceEventRow>, SqlError> {
+        let mut statement = self.conn.prepare(
+            "SELECT event_id, actor_id, action, group_key, source_label, ingress,
+                    assurance, alignment, session_id, created_at
+             FROM provenance_events WHERE doc_id = ?1 ORDER BY event_id",
+        )?;
+        statement
+            .query_map([doc_id], |row| {
+                Ok(ProvenanceEventRow {
+                    event_id: row.get(0)?,
+                    actor_id: row.get(1)?,
+                    action: row.get(2)?,
+                    group_key: row.get(3)?,
+                    source_label: row.get(4)?,
+                    ingress: row.get(5)?,
+                    assurance: row.get(6)?,
+                    alignment: row.get(7)?,
+                    session_id: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })?
+            .collect()
+    }
+
+    pub fn lineage_spans(&self, doc_id: &str) -> Result<Vec<LineageSpanRow>, SqlError> {
+        let mut statement = self.conn.prepare(
+            "SELECT block_id, node_path, start_utf16, end_utf16, source_event_id
+             FROM lineage_spans WHERE doc_id = ?1
+             ORDER BY block_id, node_path, start_utf16",
+        )?;
+        statement
+            .query_map([doc_id], |row| {
+                Ok(LineageSpanRow {
+                    block_id: row.get(0)?,
+                    node_path: row.get(1)?,
+                    start_utf16: row.get(2)?,
+                    end_utf16: row.get(3)?,
+                    source_event_id: row.get(4)?,
+                })
+            })?
+            .collect()
     }
 
     /// Append one update frame. Callers batch an agent turn into a single frame
@@ -514,6 +765,61 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+fn insert_event(
+    transaction: &Transaction<'_>,
+    doc_id: &str,
+    update_seq: i64,
+    event: &ProvenanceEventInput<'_>,
+) -> Result<(), SqlError> {
+    transaction.execute(
+        "INSERT INTO provenance_events (
+           event_id, doc_id, update_seq, actor_id, action, group_key, source_label,
+           ingress, assurance, alignment, session_id, created_at
+         ) VALUES (
+           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
+         )",
+        params![
+            event.event_id,
+            doc_id,
+            update_seq,
+            event.actor_id,
+            event.action,
+            event.group_key,
+            event.source_label,
+            event.ingress,
+            event.assurance,
+            event.alignment,
+            event.session_id,
+            event.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn replace_lineage_spans(
+    transaction: &Transaction<'_>,
+    doc_id: &str,
+    spans: &[LineageSpanRow],
+) -> Result<(), SqlError> {
+    transaction.execute("DELETE FROM lineage_spans WHERE doc_id = ?1", [doc_id])?;
+    for span in spans {
+        transaction.execute(
+            "INSERT INTO lineage_spans (
+               doc_id, block_id, node_path, start_utf16, end_utf16, source_event_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                doc_id,
+                span.block_id,
+                span.node_path,
+                span.start_utf16,
+                span.end_utf16,
+                span.source_event_id,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn now_ms() -> i64 {
