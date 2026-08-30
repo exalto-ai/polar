@@ -414,8 +414,9 @@ preserves only the common prefix and suffix within stable block ids and labels t
 `inferred`.
 Content written before lineage existed is labelled `legacy_unknown`; it is not reconstructed
 from history and presented as fact. MCP identity is self-reported and can only produce
-`reported` provenance. A separate local editor capability is required before a mutation can
-be called `observed`.
+`reported` provenance. A mutation is `observed` only when the bundled editor captures it at
+the ProseMirror dispatch boundary. The loopback bearer authorizes access to private writing;
+it does not authenticate actor identity.
 
 There is deliberately no receipt ledger, hash chain, replay engine, cached lineage state, or
 format/structure delta model. Those would duplicate the CRDT and imply verification the local

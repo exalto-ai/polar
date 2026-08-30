@@ -6,6 +6,7 @@
 //! asserts against it, and CI fails if the committed file is stale.
 
 use std::path::PathBuf;
+use thought_mcp::ProseMirrorRange;
 use thoughtd::sync::Frame;
 
 fn fixture_path() -> PathBuf {
@@ -42,6 +43,19 @@ fn cases() -> Vec<(&'static str, Frame)> {
             Frame::Update {
                 doc_id: "01a02d26-ac02-7072".into(),
                 update: vec![42; 8],
+            },
+        ),
+        (
+            "editor-mutation",
+            Frame::EditorMutation {
+                doc_id: "doc-1".into(),
+                ranges: vec![ProseMirrorRange {
+                    before_from: 2,
+                    before_to: 5,
+                    after_from: 2,
+                    after_to: 4,
+                }],
+                update: vec![9, 8, 7],
             },
         ),
         (
@@ -118,6 +132,22 @@ fn describe(frame: &Frame) -> serde_json::Value {
         } => ("subscribe", doc_id, state_vector.clone()),
         Frame::Sync { doc_id, update } => ("sync", doc_id, update.clone()),
         Frame::Update { doc_id, update } => ("update", doc_id, update.clone()),
+        Frame::EditorMutation {
+            doc_id,
+            ranges,
+            update,
+        } => {
+            let mut body = Vec::with_capacity(1 + ranges.len() * 16 + update.len());
+            body.push(ranges.len() as u8);
+            for range in ranges {
+                body.extend_from_slice(&range.before_from.to_be_bytes());
+                body.extend_from_slice(&range.before_to.to_be_bytes());
+                body.extend_from_slice(&range.after_from.to_be_bytes());
+                body.extend_from_slice(&range.after_to.to_be_bytes());
+            }
+            body.extend_from_slice(update);
+            ("editor_mutation", doc_id, body)
+        }
         Frame::Broadcast { doc_id, update } => ("broadcast", doc_id, update.clone()),
         Frame::Awareness { doc_id, payload } => ("awareness", doc_id, payload.clone()),
         Frame::Error { doc_id, message } => ("error", doc_id, message.as_bytes().to_vec()),
@@ -180,4 +210,16 @@ fn malformed_frames_are_refused_rather_than_panicking() {
     );
     // An unknown tag is not a frame we understand.
     assert!(Frame::decode(&[0x7f, 0, 0, 0, 0]).is_none(), "unknown tag");
+    assert!(
+        Frame::decode(&[0x09, 0, 0, 0, 0, 0]).is_none(),
+        "editor mutation without an update"
+    );
+    assert!(
+        Frame::decode(&[0x09, 0, 0, 0, 0, 1, 0, 0]).is_none(),
+        "truncated editor range"
+    );
+    assert!(
+        Frame::decode(&[0x09, 0, 0, 0, 0, 65, 1]).is_none(),
+        "too many editor ranges"
+    );
 }

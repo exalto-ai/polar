@@ -9,6 +9,7 @@ mod harness;
 use futures_util::{SinkExt, StreamExt};
 use harness::{Daemon, Frame};
 use thought_core::Document;
+use thought_mcp::ProseMirrorRange;
 use thought_schema::{Node, normalize};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -117,8 +118,14 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
     let delta = local.diff_since(&before);
     send(
         &mut a,
-        Frame::Update {
+        Frame::EditorMutation {
             doc_id: doc_id.clone(),
+            ranges: vec![ProseMirrorRange {
+                before_from: 7,
+                before_to: 7,
+                after_from: 7,
+                after_to: 26,
+            }],
             update: delta.clone(),
         },
     )
@@ -134,6 +141,15 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
             .contains("typed in the window"),
         "ACK arrived before the edit reached SQLite"
     );
+    let lineage = daemon.call("document_lineage", serde_json::json!({ "doc_id": doc_id }));
+    let editor_source = lineage["summary"]["contributions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["source"]["label"] == "Written here")
+        .expect("editor contribution");
+    assert_eq!(editor_source["source"]["alignment"], "exact");
+    assert_eq!(editor_source["source"]["assurance"], "observed");
 
     // B is told, without having asked.
     match recv(&mut b).await {
@@ -149,8 +165,14 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
     // an ACK after the daemon confirms the same update is already persisted.
     send(
         &mut a,
-        Frame::Update {
+        Frame::EditorMutation {
             doc_id: doc_id.clone(),
+            ranges: vec![ProseMirrorRange {
+                before_from: 7,
+                before_to: 7,
+                after_from: 7,
+                after_to: 26,
+            }],
             update: delta,
         },
     )
