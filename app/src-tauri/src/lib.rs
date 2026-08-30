@@ -5,9 +5,9 @@
 //! (AD-10) — the same standalone binary either way, so the switch costs no
 //! code here.
 
-use thoughtd::discovery::{self, Daemon};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use thoughtd::discovery::{self, Daemon};
 
 #[derive(serde::Serialize)]
 struct Connection {
@@ -48,10 +48,13 @@ fn connection(state: tauri::State<'_, Daemon>) -> Connection {
 /// live carets at all.
 #[tauri::command]
 fn new_window(app: tauri::AppHandle) -> Result<String, String> {
-    let label = format!("window-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0));
+    let label = format!(
+        "window-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
     // The overlay title bar and the hidden title are macOS-only: the builder
     // does not carry those methods at all on other platforms.
     #[allow(unused_mut)]
@@ -71,13 +74,20 @@ fn new_window(app: tauri::AppHandle) -> Result<String, String> {
     Ok(label)
 }
 
-/// Reuse a running daemon, or start one. Never assume: a discovery file
-/// outlives the process that wrote it.
+/// Reuse the published instance when its identity and bearer both work.
+/// Otherwise start a candidate: lifetime home and store locks decide whether
+/// that child may replace stale discovery, so clients never infer ownership
+/// from a PID or the presence of a file.
 fn ensure_daemon() -> Result<Daemon, String> {
-    if let Some(daemon) = discovery::read()
-        && reachable(&daemon)
-    {
-        return Ok(daemon);
+    if let Some(daemon) = discovery::read() {
+        if discovery::authenticated_reachable(&daemon) {
+            return Ok(daemon);
+        }
+    } else if discovery::discovery_path().exists() {
+        return Err(format!(
+            "The thought daemon discovery record uses an incompatible or invalid format. Quit any older Proof of Thought or thoughtd process, then remove {}.",
+            discovery::discovery_path().display()
+        ));
     }
 
     let thoughtd =
@@ -93,13 +103,16 @@ fn ensure_daemon() -> Result<Daemon, String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Some(daemon) = discovery::read()
-            && reachable(&daemon)
+            && discovery::authenticated_reachable(&daemon)
         {
             return Ok(daemon);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    Err("thoughtd did not become reachable".into())
+    Err(
+        "thoughtd did not become reachable within 10 seconds; another process may own the workspace"
+            .into(),
+    )
 }
 
 /// Find `thoughtd` or `thought-mcp-stdio`.
@@ -130,19 +143,33 @@ fn find_binary(name: &str) -> Option<std::path::PathBuf> {
         .map(|p| p.canonicalize().unwrap_or(p))
 }
 
-/// An HTTP error status is still an answer. Only a transport failure means
-/// nothing is listening — the distinction the stdio shim got wrong first.
-fn reachable(daemon: &Daemon) -> bool {
-    let sent = ureq::post(&daemon.url)
-        .header("Authorization", &format!("Bearer {}", daemon.token))
-        .header("Accept", "application/json, text/event-stream")
-        .send_json(serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "ping"}));
-    !matches!(sent, Err(ureq::Error::ConnectionFailed | ureq::Error::Io(_)))
+fn report_startup_error(error: &str) {
+    eprintln!("Proof of Thought could not start: {error}");
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    rfd::MessageDialog::new()
+        .set_title("Proof of Thought could not start")
+        .set_description(error)
+        .set_level(rfd::MessageLevel::Error)
+        .show();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let daemon = ensure_daemon().expect("thought daemon");
+    let daemon = match ensure_daemon() {
+        Ok(daemon) => daemon,
+        Err(error) => {
+            report_startup_error(&error);
+            return;
+        }
+    };
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(daemon)

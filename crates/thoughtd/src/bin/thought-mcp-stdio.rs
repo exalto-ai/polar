@@ -4,7 +4,8 @@
 //! Doing that literally would give every client its own `thoughtd`, and several
 //! processes writing one SQLite store is a corruption bug waiting to happen. So
 //! the real server is HTTP on loopback and this shim is what clients spawn: it
-//! finds the daemon, starts one only if none is running, and proxies.
+//! finds the daemon, safely starts a replacement for stale discovery, and
+//! proxies.
 
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
@@ -57,34 +58,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Use the published daemon if it answers; otherwise start one.
+/// Reuse the published instance when its identity and bearer both work.
+/// Otherwise start a candidate. The daemon's lifetime locks, not PID guesses
+/// or discovery-file presence, decide whether that child may own the home and
+/// store and atomically replace stale discovery.
 fn connect() -> Result<Daemon, Box<dyn std::error::Error>> {
-    if let Some(daemon) = discovery::read()
-        && alive(&daemon)
-    {
-        return Ok(daemon);
+    if let Some(daemon) = discovery::read() {
+        if discovery::authenticated_reachable(&daemon) {
+            return Ok(daemon);
+        }
+    } else if discovery::discovery_path().exists() {
+        return Err(format!(
+            "the thought daemon discovery record uses an incompatible or invalid format; quit any older Proof of Thought or thoughtd process, then remove {}",
+            discovery::discovery_path().display()
+        )
+        .into());
     }
-    spawn()
-}
 
-/// A stale discovery file outlives the process that wrote it, so ask.
-///
-/// The question is "is something answering on that port", not "did it like my
-/// request". An HTTP error status *is* an answer — rejecting an uninitialized
-/// `ping` is exactly what a healthy MCP server should do — so only a transport
-/// failure counts as absent. Treating a status code as death made the shim
-/// spawn a second daemon every time and then time out waiting for it.
-fn alive(daemon: &Daemon) -> bool {
-    let sent = ureq::post(&daemon.url)
-        .header("Authorization", &format!("Bearer {}", daemon.token))
-        .header("Accept", "application/json, text/event-stream")
-        .send_json(serde_json::json!({
-            "jsonrpc": "2.0", "id": 0, "method": "ping"
-        }));
-    !matches!(
-        sent,
-        Err(ureq::Error::ConnectionFailed | ureq::Error::Io(_))
-    )
+    spawn()
 }
 
 fn spawn() -> Result<Daemon, Box<dyn std::error::Error>> {
@@ -104,13 +95,13 @@ fn spawn() -> Result<Daemon, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Some(daemon) = discovery::read()
-            && alive(&daemon)
+            && discovery::authenticated_reachable(&daemon)
         {
             return Ok(daemon);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    Err("daemon did not become reachable within 10s".into())
+    Err("daemon did not become reachable within 10s; another process may own the workspace".into())
 }
 
 /// One JSON-RPC message across, one response back.

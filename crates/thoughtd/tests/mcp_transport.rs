@@ -8,6 +8,7 @@ mod harness;
 use harness::Daemon;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use thoughtd::discovery::{self, Daemon as PublishedDaemon};
 
 #[test]
 fn an_agent_drives_the_daemon_over_mcp() {
@@ -101,6 +102,100 @@ fn the_endpoint_refuses_an_unauthenticated_client() {
     match response {
         Err(ureq::Error::StatusCode(401)) => {}
         other => panic!("expected 401, got {other:?}"),
+    }
+}
+
+#[test]
+fn discovery_probe_verifies_the_published_bearer_token() {
+    let daemon = Daemon::start();
+    let published = PublishedDaemon {
+        url: daemon.url.clone(),
+        protocol_version: discovery::PROTOCOL_VERSION,
+        instance_id: daemon.instance_id.clone(),
+        token: daemon.token.clone(),
+    };
+    assert!(discovery::authenticated_reachable(&published));
+
+    let mut wrong_instance = published.clone();
+    wrong_instance.instance_id = discovery::random_token().unwrap();
+    assert!(
+        !discovery::authenticated_reachable(&wrong_instance),
+        "a stale port must not receive the published bearer"
+    );
+
+    let mut wrong_token = published;
+    wrong_token.token.push_str("-wrong");
+    assert!(
+        !discovery::authenticated_reachable(&wrong_token),
+        "an unrelated or stale bearer credential must not validate the endpoint"
+    );
+}
+
+#[test]
+fn the_stdio_shim_refuses_to_replace_a_daemon_that_rejects_its_token() {
+    let daemon = Daemon::start();
+    let published = daemon.home.path().join("daemon.json");
+    let mut wrong: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&published).expect("discovery is readable"))
+            .expect("discovery is json");
+    wrong["token"] = "not-the-daemon-token".into();
+    std::fs::write(&published, serde_json::to_vec_pretty(&wrong).unwrap()).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
+        .env("THOUGHT_HOME", daemon.home.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn stdio shim");
+    assert!(
+        !output.status.success(),
+        "the shim must not replace a published daemon"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("incompatible or invalid format"),
+        "the failure must explain how to resolve invalid discovery: {stderr}"
+    );
+
+    let original_daemon = PublishedDaemon {
+        url: daemon.url.clone(),
+        protocol_version: discovery::PROTOCOL_VERSION,
+        instance_id: daemon.instance_id.clone(),
+        token: daemon.token.clone(),
+    };
+    assert!(
+        discovery::authenticated_reachable(&original_daemon),
+        "the shim must leave the existing process running"
+    );
+}
+
+#[test]
+fn the_stdio_shim_replaces_stale_current_discovery() {
+    let mut daemon = Daemon::start();
+    let published = daemon.home.path().join("daemon.json");
+    let old_instance = daemon.instance_id.clone();
+    daemon.stop_abruptly();
+    assert!(published.exists(), "abrupt exit must leave stale discovery");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
+        .env("THOUGHT_HOME", daemon.home.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn stdio shim");
+    assert!(
+        output.status.success(),
+        "shim did not recover stale discovery: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let current: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&published).unwrap()).unwrap();
+    assert_ne!(
+        current["instance_id"].as_str(),
+        Some(old_instance.as_str()),
+        "the new lock owner must publish a fresh instance"
+    );
+    if let Some(pid) = current["pid"].as_u64() {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
     }
 }
 
