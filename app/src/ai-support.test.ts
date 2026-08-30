@@ -6,8 +6,24 @@ beforeEach(() => {
     <button id="ai-support-toggle" aria-expanded="false"></button>
     <aside id="ai-support-sidebar" hidden>
       <button id="ai-sidebar-close"></button>
-      <pre id="stdio-command"></pre>
-      <button id="copy-command"></button>
+      <button id="reviewer-add"></button>
+      <p id="reviewer-error" hidden></p>
+      <p id="reviewer-empty"></p>
+      <ul id="reviewer-list"></ul>
+      <form id="reviewer-form" hidden>
+        <h3 id="reviewer-form-title"></h3>
+        <select id="reviewer-client"><option value="codex">Codex</option></select>
+        <input id="reviewer-label" />
+        <select id="reviewer-scope"><option value="current">Current</option><option value="all">All</option></select>
+        <p id="reviewer-current"></p>
+        <button id="reviewer-cancel" type="button"></button>
+      </form>
+      <section id="reviewer-setup" hidden>
+        <p id="reviewer-setup-text"></p>
+        <pre id="reviewer-setup-command"></pre>
+        <button id="reviewer-copy"></button>
+        <button id="reviewer-setup-done"></button>
+      </section>
     </aside>
   `;
 });
@@ -41,20 +57,10 @@ describe("AI support sidebar", () => {
     controller.destroy();
   });
 
-  it("copies the current connection command", async () => {
-    const copyText = vi.fn().mockResolvedValue(undefined);
-    const controller = installAiSupport(document, { copyText });
-    const button = document.querySelector<HTMLButtonElement>("#copy-command")!;
-
-    controller.setConnectionCommand("thought-mcp-stdio");
-    expect(document.querySelector("#stdio-command")?.textContent).toBe(
-      "thought-mcp-stdio",
-    );
-    expect(button.disabled).toBe(false);
-    button.click();
-    await Promise.resolve();
-
-    expect(copyText).toHaveBeenCalledWith("thought-mcp-stdio");
+  it("accepts the native reviewer executable without exposing a token", () => {
+    const controller = installAiSupport(document);
+    controller.setConnectionCommand("/Applications/Proof of Thought/thought-mcp-stdio");
+    expect(document.body.textContent).not.toContain("Bearer");
     controller.destroy();
   });
 });

@@ -120,6 +120,21 @@ impl Daemon {
             .expect("editor response is json")
     }
 
+    pub fn create_reviewer(&self) -> String {
+        let response = self.editor_post(
+            "/editor/reviewer-connections",
+            serde_json::json!({
+                "client": "codex",
+                "display_label": "Transport reviewer",
+                "access": {"document_scope": "all", "document_id": null}
+            }),
+        );
+        response["connection"]["id"]
+            .as_str()
+            .expect("reviewer id")
+            .to_string()
+    }
+
     pub fn rpc(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
         self.id.set(self.id.get() + 1);
         let mut body = serde_json::json!({

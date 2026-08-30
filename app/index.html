@@ -39,13 +39,54 @@
         <header class="ai-sidebar-header">
           <div>
             <span class="eyebrow">AI support</span>
-            <h2 id="ai-support-title">Connect an agent</h2>
+            <h2 id="ai-support-title">Reviewers</h2>
           </div>
           <button class="icon-button" id="ai-sidebar-close" type="button" aria-label="Close AI support">×</button>
         </header>
-        <p class="ai-sidebar-note">Point any MCP client at this command. It finds the running daemon, or starts one.</p>
-        <pre id="stdio-command"></pre>
-        <button class="ghost" id="copy-command" type="button" disabled>Copy</button>
+        <p class="ai-sidebar-note">Give each AI reviewer only the documents it needs.</p>
+        <div class="reviewer-heading">
+          <span class="eyebrow">Saved connections</span>
+          <button class="ghost" id="reviewer-add" type="button">Add</button>
+        </div>
+        <p id="reviewer-error" class="reviewer-error" role="alert" hidden></p>
+        <p id="reviewer-empty" class="ai-sidebar-note">No reviewers yet.</p>
+        <ul id="reviewer-list" class="reviewer-list"></ul>
+
+        <form id="reviewer-form" class="reviewer-form" hidden>
+          <h3 id="reviewer-form-title">Add reviewer</h3>
+          <label>AI app
+            <select id="reviewer-client">
+              <option value="chatgpt">ChatGPT desktop</option>
+              <option value="codex">Codex</option>
+              <option value="claude-code">Claude Code</option>
+            </select>
+          </label>
+          <label>Name
+            <input id="reviewer-label" maxlength="80" required autocomplete="off" />
+          </label>
+          <label>Documents
+            <select id="reviewer-scope">
+              <option value="current">Current document</option>
+              <option value="all">All documents</option>
+            </select>
+          </label>
+          <p id="reviewer-current" class="ai-sidebar-note"></p>
+          <p class="ai-sidebar-note">This access works with no window open. Your AI app may send document text to its provider.</p>
+          <div class="reviewer-actions">
+            <button id="reviewer-cancel" type="button">Cancel</button>
+            <button class="ghost" type="submit">Save</button>
+          </div>
+        </form>
+
+        <section id="reviewer-setup" class="reviewer-setup" hidden>
+          <h3>Connect reviewer</h3>
+          <p id="reviewer-setup-text" class="ai-sidebar-note"></p>
+          <pre id="reviewer-setup-command"></pre>
+          <div class="reviewer-actions">
+            <button class="ghost" id="reviewer-copy" type="button">Copy setup</button>
+            <button id="reviewer-setup-done" type="button">Done</button>
+          </div>
+        </section>
       </aside>
     </div>
 

@@ -1,5 +1,6 @@
 //! Shared between the daemon and the stdio shim.
 
+pub mod connections;
 pub mod discovery;
 pub mod logging;
 
