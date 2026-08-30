@@ -23,14 +23,15 @@ Yjs update is a no-op and can be acknowledged safely. The editor stays read-only
 sync frame is applied, so a range never describes an unhydrated placeholder document.
 
 This is a product trust boundary, not authentication of a human. The native app bearer guards
-editor access. Each configured reviewer has a separate read-only credential and document scope.
+editor access. Each configured reviewer has a separate scoped credential and document scope.
 That credential identifies the configured Proof of Thought ingress, not the app, model, provider,
 person, or conversation behind it. Owner-only files are not a sandbox against hostile software
 already running as the same OS user.
 
 Creating, importing, trashing, restoring, and managing reviewers use the daemon's narrow
-`/editor` routes. Reviewer MCP calls are read-only in this change. Their configured connection ID
-is durable attribution; model text remains reported and unverified.
+`/editor` routes. Reviewer MCP calls can read and propose suggestions, but cannot directly change
+content. Their configured connection ID is durable attribution; model text remains reported and
+unverified.
 
 ## Storage
 
@@ -67,3 +68,15 @@ and recovery states, and imply verification that a local bearer token cannot pro
 
 Later evidence or trace features may refer to a source event. They do not need a second lineage
 ledger.
+
+## Current sources view
+
+The AI support sidebar reads `document_lineage` directly and groups sources already present in
+the response. It shows labels, assurance, and alignment. It does not expose percentages, build a
+separate consumer ledger, or replay event history in the browser.
+
+Each response includes a SHA-256 revision of the normalized Markdown projection. The native
+window computes the same revision from its visible editor tree and displays sources only when the
+two match. Pending saves, invalid editor trees, and stale responses fail closed. This binds the
+labels to the wording and formatting on screen; it is not a signature, timestamp, or proof of
+origin.

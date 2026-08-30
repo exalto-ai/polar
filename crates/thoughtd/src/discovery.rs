@@ -6,8 +6,10 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Discovery and local transport format understood by this daemon build.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Discovery and local sync protocol understood by this daemon build.
+///
+/// Version 2 binds current-source responses to normalized visible wording.
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const IDENTITY_PATH: &str = "/health/identity";
 pub const MCP_HEALTH_PATH: &str = "/health/mcp";
 const HEALTH_SERVICE: &str = "ai.exalto.thoughtd";

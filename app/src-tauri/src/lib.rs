@@ -132,6 +132,23 @@ fn serialize_document(document: thought_schema::Node) -> Result<String, String> 
     Ok(thought_markdown::to_markdown(&document))
 }
 
+/// Bind a daemon response to the exact wording and formatting in this window.
+#[tauri::command]
+fn document_wording_revision(document: thought_schema::Node) -> Result<String, String> {
+    let document = thought_schema::normalize(&document);
+    thought_schema::Schema::v0()
+        .validate(&document)
+        .map_err(|errors| {
+            let details = errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!("document proof cannot inspect the visible editor tree: {details}")
+        })?;
+    Ok(thought_markdown::current_wording_revision(&document))
+}
+
 fn safe_suggested_name(suggested_name: &str) -> String {
     let cleaned: String = suggested_name
         .chars()
@@ -484,7 +501,8 @@ pub fn run() {
             connection,
             new_window,
             import_markdown,
-            export_markdown
+            export_markdown,
+            document_wording_revision
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -493,7 +511,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        atomic_write, cascade_axis, document_window_path, safe_suggested_name, serialize_document,
+        atomic_write, cascade_axis, document_window_path, document_wording_revision,
+        safe_suggested_name, serialize_document,
     };
     use thought_schema::{Mark, Node};
 
@@ -523,7 +542,24 @@ mod tests {
     #[test]
     fn export_refuses_an_invalid_editor_tree() {
         let invalid = Node::element("doc", vec![Node::element("mystery", vec![])]);
-        assert!(serialize_document(invalid).is_err());
+        assert!(serialize_document(invalid.clone()).is_err());
+        assert!(document_wording_revision(invalid).is_err());
+    }
+
+    #[test]
+    fn proof_wording_revision_uses_the_shared_markdown_projection() {
+        let document = Node::element(
+            "doc",
+            vec![Node::element(
+                "paragraph",
+                vec![Node::text("One careful sentence.", vec![])],
+            )],
+        );
+
+        assert_eq!(
+            document_wording_revision(document.clone()).unwrap(),
+            thought_markdown::current_wording_revision(&document)
+        );
     }
 
     #[test]

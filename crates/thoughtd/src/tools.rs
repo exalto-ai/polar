@@ -279,7 +279,10 @@ impl Thought {
     }
 
     #[tool(
-        description = "Current text lineage, grouped by source, with UTF-16 spans for each block."
+        description = "Current wording contribution by source, bound to a normalized visible-\
+                       wording revision. V1 does not carry editor range anchors, so duplicate \
+                       equal text from different sources can be ambiguous; the response \
+                       identifies its alignment basis."
     )]
     fn document_lineage(
         &self,
