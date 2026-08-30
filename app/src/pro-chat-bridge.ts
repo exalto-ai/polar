@@ -68,6 +68,7 @@ export type ProChatTurn = {
   input_tokens: number | null;
   output_tokens: number | null;
   wording_revision: string;
+  selected_text: string | null;
 };
 
 export type ProChatSuggestionPosition =
@@ -101,6 +102,7 @@ export type ProChatStartRequest = {
   thinking: ProChatThinking;
   message: string | null;
   retry_turn_id: string | null;
+  selected_text: string | null;
   disclosure_version: number;
 };
 
@@ -149,7 +151,7 @@ export type ProChatBridge = {
   ): Promise<ProChatHistory>;
 };
 
-export const PRO_CHAT_DISCLOSURE_VERSION = 2;
+export const PRO_CHAT_DISCLOSURE_VERSION = 3;
 
 /**
  * Provider credentials stay native. The webview supplies the current live

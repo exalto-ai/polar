@@ -50,6 +50,7 @@ describe("Pro chat bridge", () => {
       thinking: "medium",
       message: "Visible message",
       retry_turn_id: null,
+      selected_text: null,
       disclosure_version: PRO_CHAT_DISCLOSURE_VERSION,
     };
     const onEvent = vi.fn();
@@ -115,6 +116,7 @@ describe("Pro chat bridge", () => {
       thinking: "default",
       message: "Hello",
       retry_turn_id: null,
+      selected_text: null,
       disclosure_version: PRO_CHAT_DISCLOSURE_VERSION,
     };
 

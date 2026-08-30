@@ -61,6 +61,7 @@ describe("AI support sidebar", () => {
       id: "doc-1",
       title: "Draft",
       snapshot: () => ({}),
+      selectedText: () => null,
       suggestionPosition: () => ({ kind: "end" } as const),
       waitUntilSaved: () => Promise.resolve(true),
     };
