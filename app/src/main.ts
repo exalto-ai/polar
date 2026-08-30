@@ -20,7 +20,7 @@ import {
 } from "./files";
 import { ACCEL_LABEL, accel, relabelShortcutHints } from "./keys";
 import { Mcp, type DocumentSummary } from "./mcp";
-import { colorFor, playfulName, seedFrom } from "./names";
+import { colorFor, FALLBACK_PRESENCE_COLOR, playfulName, seedFrom } from "./names";
 import { installProvenanceRails, type Rails } from "./provenance";
 import { SyncProvider, type AgentPresence, type ProviderStatus } from "./provider";
 import {
@@ -278,7 +278,7 @@ function renderPresence(awareness: Awareness, self: number) {
     const name = user?.name ?? "Someone";
     const chip = document.createElement("span");
     chip.className = "who";
-    chip.style.setProperty("--who", user?.color ?? "#888");
+    chip.style.setProperty("--who", user?.color ?? FALLBACK_PRESENCE_COLOR);
     // Initials of both words, so two peers are told apart at a glance.
     chip.textContent = initials(name);
     chip.title = `${name} — click to find their cursor`;
@@ -513,7 +513,7 @@ function renderConnectionPeers() {
     ...peers.map(([id, state]) => {
       const user = (state as { user?: { name: string; color: string } }).user;
       return row(
-        user?.color ?? "#888",
+        user?.color ?? FALLBACK_PRESENCE_COLOR,
         user?.name ?? "Someone",
         id === doc.clientID ? "this window" : "connected",
       );

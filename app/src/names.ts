@@ -42,6 +42,7 @@ export function playfulName(seed: number): string {
 }
 
 const PALETTE = ["#4c8dff", "#e0a44a", "#b98cff", "#5ac88f", "#ff7a6b", "#3fb8b0"];
+export const FALLBACK_PRESENCE_COLOR = "#888";
 
 export function colorFor(seed: number): string {
   return PALETTE[scramble(seed) % PALETTE.length];
