@@ -73,6 +73,12 @@ fn cases() -> Vec<(&'static str, Frame)> {
             },
         ),
         (
+            "ack",
+            Frame::Ack {
+                doc_id: "doc-2".into(),
+            },
+        ),
+        (
             // A non-ASCII id: the length prefix counts bytes, not characters,
             // and a decoder that slices by character position breaks here.
             "unicode-doc-id",
@@ -116,6 +122,7 @@ fn describe(frame: &Frame) -> serde_json::Value {
         Frame::Awareness { doc_id, payload } => ("awareness", doc_id, payload.clone()),
         Frame::Error { doc_id, message } => ("error", doc_id, message.as_bytes().to_vec()),
         Frame::Presence { doc_id, actor } => ("presence", doc_id, actor.as_bytes().to_vec()),
+        Frame::Ack { doc_id } => ("ack", doc_id, vec![]),
     };
     serde_json::json!({ "kind": kind, "doc_id": doc_id, "body": body })
 }
