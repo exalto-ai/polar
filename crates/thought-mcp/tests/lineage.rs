@@ -4,6 +4,39 @@ use thought_provenance::{Alignment, Assurance, Ingress};
 use thought_schema::Node;
 
 #[test]
+fn lineage_response_is_bound_to_the_current_wording() {
+    let workspace = Workspace::open_in_memory().unwrap();
+    let actor = ActorRef::human("writer");
+    let created = workspace
+        .create_document_from_markdown("", "First draft.", &actor)
+        .unwrap();
+    let before = workspace
+        .document_lineage(&created.doc_id)
+        .unwrap()
+        .current_wording_revision;
+
+    workspace
+        .replace_text(
+            &created.doc_id,
+            &created.blocks[0].block_id,
+            &TextEdit {
+                find: "First",
+                replace: "Second",
+                occurrence: Some(1),
+            },
+            None,
+            &actor,
+        )
+        .unwrap();
+    let after = workspace
+        .document_lineage(&created.doc_id)
+        .unwrap()
+        .current_wording_revision;
+
+    assert_ne!(before, after);
+}
+
+#[test]
 fn a_small_edit_only_claims_the_text_it_added() {
     let workspace = Workspace::open_in_memory().unwrap();
     let human = ActorRef::human("writer");

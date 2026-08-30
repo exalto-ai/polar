@@ -185,6 +185,7 @@ export type LineageSource = {
 
 export type DocumentLineage = {
   doc_id: string;
+  current_wording_revision: string;
   summary: {
     total_graphemes: number;
     total_non_whitespace_graphemes: number;

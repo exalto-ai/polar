@@ -9,10 +9,10 @@ use std::time::Duration;
 
 /// Discovery and local sync protocol understood by this daemon build.
 ///
-/// Version 4 adds durable reviewer identities and removes shared external MCP
-/// write authority. Legacy sourced updates remain accepted as the unanchored
-/// provenance fallback.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// Version 5 binds current-source responses to normalized visible wording.
+/// Version 4 added durable reviewer identities and removed shared external MCP
+/// write authority.
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const IDENTITY_PATH: &str = "/health/identity";
 pub const MCP_HEALTH_PATH: &str = "/health/mcp";
 const HEALTH_SERVICE: &str = "ai.exalto.thoughtd";
