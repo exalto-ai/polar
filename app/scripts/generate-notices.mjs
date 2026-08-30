@@ -1,0 +1,185 @@
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const projectRoot = resolve(appRoot, "..");
+const outputPath = resolve(projectRoot, "THIRD_PARTY_NOTICES.md");
+
+function clean(text) {
+  return String(text)
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .trim();
+}
+
+function compare(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function repositoryUrl(value) {
+  if (typeof value === "string") return value;
+  if (value && typeof value.url === "string") return value.url;
+  return "";
+}
+
+function addText(groups, license, packageName, text) {
+  const hash = createHash("sha256").update(text).digest("hex");
+  const group = groups.get(hash) ?? {
+    licenses: new Set(),
+    packages: new Set(),
+    text,
+  };
+  group.licenses.add(license);
+  group.packages.add(packageName);
+  groups.set(hash, group);
+}
+
+function renderTextGroups(groups) {
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      licenses: [...group.licenses].sort(compare),
+      packages: [...group.packages].sort(compare),
+    }))
+    .sort((left, right) => compare(left.packages[0], right.packages[0]))
+    .map(
+      ({ licenses, packages, text }) =>
+        `### ${licenses.join(" / ")}\n\nUsed by: ${packages.map((name) => `\`${name}\``).join(", ")}\n\n${text}`,
+    )
+    .join("\n\n");
+}
+
+function rustNotices() {
+  const report = JSON.parse(
+    execFileSync(
+      "cargo",
+      [
+        "about",
+        "generate",
+        "--manifest-path",
+        "app/src-tauri/Cargo.toml",
+        "--config",
+        "third_party/about.toml",
+        "--frozen",
+        "--fail",
+        "--format",
+        "json",
+      ],
+      { cwd: projectRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+    ),
+  );
+  const inventory = new Map();
+  const texts = new Map();
+
+  for (const license of report.licenses) {
+    const text = clean(license.text ?? "");
+    if (!text) throw new Error(`Missing Rust license text: ${license.name}`);
+
+    for (const { crate } of license.used_by) {
+      const name = `${crate.name}@${crate.version}`;
+      const source = repositoryUrl(crate.repository);
+      inventory.set(
+        name,
+        `- \`${name}\` — ${crate.license ?? license.name}${source ? ` — ${source}` : ""}`,
+      );
+      addText(texts, license.name, name, text);
+    }
+  }
+
+  return `## Rust dependencies
+
+Generated with \`cargo-about\` from the locked native-app graph. The native app depends on the
+daemon, so this graph covers the window and both bundled sidecars.
+
+### Inventory
+
+${[...inventory].sort(([left], [right]) => compare(left, right)).map(([, line]) => line).join("\n")}
+
+### License texts
+
+${renderTextGroups(texts)}`;
+}
+
+async function npmNotices() {
+  const packages = JSON.parse(
+    execFileSync("npm", ["query", ".prod, #vite", "--json"], {
+      cwd: appRoot,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    }),
+  ).filter(({ location }) => location);
+  const inventory = [];
+  const texts = new Map();
+
+  for (const details of packages.sort((left, right) =>
+    compare(`${left.name}@${left.version}`, `${right.name}@${right.version}`),
+  )) {
+    const name = `${details.name}@${details.version}`;
+    const license = String(details.license ?? "UNKNOWN");
+    if (license.includes("UNKNOWN")) throw new Error(`Unknown npm license: ${name}`);
+    if (details.dev && details.name !== "vite") {
+      throw new Error(`Unexpected development dependency in notices: ${name}`);
+    }
+
+    const licenseFiles = readdirSync(details.path, { withFileTypes: true })
+      .filter(
+        (entry) =>
+          entry.isFile() &&
+          /^(?:licen[cs]e|copying|copyright|notice|patents?)(?:[-_.].*)?$/iu.test(entry.name),
+      )
+      .map((entry) => entry.name)
+      .sort();
+    if (licenseFiles.length === 0) throw new Error(`Missing npm license file: ${name}`);
+
+    const source = repositoryUrl(details.repository);
+    const role = details.dev ? "build output" : "runtime";
+    inventory.push(`- \`${name}\` — ${license} — ${role}${source ? ` — ${source}` : ""}`);
+
+    for (const file of licenseFiles) {
+      const text = clean(readFileSync(resolve(details.path, file), "utf8"));
+      addText(texts, license, name, text);
+    }
+  }
+
+  return `## Webview dependencies\n\n### Inventory\n\n${inventory.join("\n")}\n\n### License texts\n\n${renderTextGroups(texts)}`;
+}
+
+async function generate() {
+  const manual = clean(readFileSync(resolve(projectRoot, "third_party/LUCIDE.md"), "utf8"));
+  return `# Third-party notices
+
+<!-- Generated by app/scripts/generate-notices.mjs. Do not edit directly. -->
+
+This file covers copied assets and the locked production dependencies shipped in Proof of Thought.
+
+${manual}
+
+${clean(rustNotices())}
+
+${await npmNotices()}
+`;
+}
+
+const generated = await generate();
+if (process.argv[2] === "--check") {
+  if (process.argv.length !== 3) throw new Error("Usage: generate-notices.mjs [--check]");
+  const current = readFileSync(outputPath, "utf8");
+  if (current !== generated) {
+    const currentLines = current.split("\n");
+    const generatedLines = generated.split("\n");
+    const line = generatedLines.findIndex((value, index) => value !== currentLines[index]);
+    throw new Error(
+      `THIRD_PARTY_NOTICES.md is stale at line ${line + 1}. ` +
+        "Run npm run notices --prefix app.",
+    );
+  }
+} else {
+  if (process.argv.length !== 2) throw new Error("Usage: generate-notices.mjs [--check]");
+  writeFileSync(outputPath, generated);
+}
