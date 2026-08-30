@@ -18,6 +18,7 @@ export const REMOTE = Symbol("remote");
 const BACKGROUND_FLUSH_MS = 50;
 
 export type ProviderStatus = "connecting" | "connected" | "offline";
+export type SaveStatus = "connecting" | "saved" | "saving" | "offline" | "error";
 
 export type AgentPresence = {
   actor_id: string;
@@ -26,6 +27,59 @@ export type AgentPresence = {
   session: string | null;
 };
 
+/**
+ * Acknowledgements are positional, so the update already sent must remain
+ * unchanged until its ACK arrives. All later updates can be merged into one
+ * tail, which keeps the queue at two entries even during a long editing burst.
+ */
+class OutboundQueue {
+  private inFlight: Uint8Array | null = null;
+  private queued: Uint8Array | null = null;
+
+  get length(): number {
+    return Number(this.inFlight !== null) + Number(this.queued !== null);
+  }
+
+  get hasPending(): boolean {
+    return this.inFlight !== null || this.queued !== null;
+  }
+
+  enqueue(update: Uint8Array) {
+    this.queued = this.merge(this.queued, update.slice());
+  }
+
+  /** Move the sole unsent update into the in-flight position. */
+  beginSend(): Uint8Array | null {
+    if (this.inFlight !== null || this.queued === null) return null;
+    this.inFlight = this.queued;
+    this.queued = null;
+    return this.inFlight;
+  }
+
+  /** Consume exactly the head that the peer has durably acknowledged. */
+  acknowledge(): boolean {
+    if (this.inFlight === null) return false;
+    this.inFlight = null;
+    return true;
+  }
+
+  /**
+   * Once the socket is gone, no ACK from it can be accepted. The old head and
+   * tail are both unsent work for the next connection and can become one update.
+   */
+  retryInFlight() {
+    if (this.inFlight === null) return;
+    this.queued = this.merge(this.inFlight, this.queued);
+    this.inFlight = null;
+  }
+
+  private merge(left: Uint8Array | null, right: Uint8Array | null): Uint8Array | null {
+    if (left === null) return right;
+    if (right === null) return left;
+    return Y.mergeUpdates([left, right]);
+  }
+}
+
 export class SyncProvider {
   private socket: WebSocket | null = null;
   private inbound: Uint8Array[] = [];
@@ -33,7 +87,14 @@ export class SyncProvider {
   private timer: number | null = null;
   private composing = false;
   private reconnectDelay = 250;
+  private reconnectTimer: number | null = null;
   private closed = false;
+  /** Local updates stay here until the daemon confirms its SQLite commit. */
+  private readonly outbound = new OutboundQueue();
+  /** An Error freezes the queue until a fresh connection can retry in order. */
+  private saveError = false;
+  private saveStatus: SaveStatus = "connecting";
+  private readonly saveListeners = new Set<(status: SaveStatus) => void>();
 
   constructor(
     private readonly url: string,
@@ -49,7 +110,25 @@ export class SyncProvider {
   }
 
   connect() {
+    if (this.closed) return;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (
+      this.socket &&
+      (this.socket.readyState === WebSocket.CONNECTING ||
+        this.socket.readyState === WebSocket.OPEN)
+    ) {
+      return;
+    }
+
     this.onStatus("connecting");
+    this.setSaveStatus("connecting");
+    // A new connection retries all unacknowledged work as one Yjs update. This
+    // is safe when only the ACK was lost because Yjs updates are idempotent.
+    this.outbound.retryInFlight();
+    this.saveError = false;
     // The browser WebSocket API cannot set headers, so the token rides as a
     // subprotocol. It is header-borne and never part of the URL, which would
     // otherwise put a bearer credential into logs and history.
@@ -58,13 +137,20 @@ export class SyncProvider {
     this.socket = socket;
 
     socket.onopen = () => {
-      this.reconnectDelay = 250;
+      if (this.closed || socket !== this.socket) {
+        socket.close();
+        return;
+      }
+      if (!this.outbound.hasPending) this.reconnectDelay = 250;
       this.onStatus("connected");
       // Announce what we already have; the daemon replies with the difference.
       socket.send(encode(Tag.Subscribe, this.docId, Y.encodeStateVector(this.doc)));
+      this.flushOutbound();
+      if (!this.outbound.hasPending) this.setSaveStatus("saved");
     };
 
     socket.onmessage = (event) => {
+      if (this.closed || socket !== this.socket) return;
       const frame = decode(new Uint8Array(event.data as ArrayBuffer));
       if (!frame || frame.docId !== this.docId) return;
 
@@ -84,18 +170,43 @@ export class SyncProvider {
             // connection over.
           }
           break;
+        case Tag.Ack:
+          this.acknowledgeUpdate();
+          break;
         case Tag.Error:
           console.error("sync error:", new TextDecoder().decode(frame.body));
+          // Updates are sent one at a time, so this error belongs to the current
+          // head of the queue. Keep it there and ignore later ACKs until a fresh
+          // connection retries it.
+          this.saveError = true;
+          this.setSaveStatus("error");
+          // Retry the same queue head on a fresh connection. Persistence
+          // errors can be transient, but repeated failures back off so a full
+          // disk cannot turn into a tight reconnect loop.
+          this.reconnectDelay = Math.max(this.reconnectDelay, 1_000);
+          socket.close();
           break;
       }
     };
 
     socket.onclose = () => {
-      this.onStatus("offline");
+      if (socket !== this.socket) return;
+      const retryingSaveError = this.saveError;
+      this.socket = null;
+      this.outbound.retryInFlight();
+      this.saveError = false;
       if (this.closed) return;
+      this.onStatus("offline");
+      // An acknowledgement may have been lost with the socket. Resending is
+      // safe because Yjs updates are idempotent, and the daemon acknowledges a
+      // no-op once it confirms that update is already persisted.
+      if (!retryingSaveError) this.setSaveStatus("offline");
       // Back off, but stay responsive: the daemon restarting is a normal event,
       // not an outage.
-      setTimeout(() => this.connect(), this.reconnectDelay);
+      this.reconnectTimer = window.setTimeout(() => {
+        this.reconnectTimer = null;
+        this.connect();
+      }, this.reconnectDelay);
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, 5000);
     };
   }
@@ -110,18 +221,79 @@ export class SyncProvider {
     if (!composing) this.schedule();
   }
 
+  /**
+   * Observe whether local changes have reached durable storage. The current
+   * value is delivered immediately so a toolbar does not need a separate
+   * getter or guess at initial state.
+   */
+  subscribeSaveStatus(listener: (status: SaveStatus) => void): () => void {
+    this.saveListeners.add(listener);
+    listener(this.saveStatus);
+    return () => this.saveListeners.delete(listener);
+  }
+
+  /** True until every local update has a durable daemon acknowledgement. */
+  get hasPendingChanges(): boolean {
+    return this.outbound.hasPending;
+  }
+
+  /**
+   * Wait for pending local work to reach SQLite, without waiting forever when
+   * the daemon is unavailable. `false` means the caller must keep this provider
+   * alive or ask before navigating away.
+   */
+  waitUntilSaved(timeoutMs = 2_000): Promise<boolean> {
+    if (!this.hasPendingChanges) return Promise.resolve(true);
+    if (this.closed) return Promise.resolve(false);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timeout: number | null = null;
+      let unsubscribe = () => {};
+      const finish = (saved: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (timeout !== null) clearTimeout(timeout);
+        unsubscribe();
+        resolve(saved);
+      };
+
+      unsubscribe = this.subscribeSaveStatus(() => {
+        if (!this.hasPendingChanges) finish(true);
+        else if (this.closed) finish(false);
+      });
+      if (!settled) {
+        timeout = window.setTimeout(() => finish(false), Math.max(0, timeoutMs));
+      }
+    });
+  }
+
   destroy() {
     this.closed = true;
     this.doc.off("update", this.onLocalUpdate);
     this.awareness.off("update", this.onAwarenessChange);
     if (this.frame !== null) cancelAnimationFrame(this.frame);
     if (this.timer !== null) clearTimeout(this.timer);
-    this.socket?.close();
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const socket = this.socket;
+    this.socket = null;
+    socket?.close();
+    // Wake save guards even if the visible state was already Offline.
+    this.setSaveStatus(this.hasPendingChanges ? "offline" : "saved", true);
   }
 
   private onLocalUpdate = (update: Uint8Array, origin: unknown) => {
     if (origin === REMOTE) return;
-    this.send(encode(Tag.Update, this.docId, update));
+    this.outbound.enqueue(update);
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.flushOutbound();
+    } else if (
+      this.saveStatus !== "connecting" &&
+      this.saveStatus !== "error"
+    ) {
+      this.setSaveStatus("offline");
+    }
   };
 
   private onAwarenessChange = (
@@ -135,6 +307,41 @@ export class SyncProvider {
 
   private send(bytes: Uint8Array) {
     if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(bytes);
+  }
+
+  private flushOutbound() {
+    const socket = this.socket;
+    if (
+      socket?.readyState !== WebSocket.OPEN ||
+      this.saveError ||
+      !this.outbound.hasPending
+    ) {
+      return;
+    }
+
+    const update = this.outbound.beginSend();
+    if (update === null) return;
+    socket.send(encode(Tag.Update, this.docId, update));
+    this.setSaveStatus("saving");
+  }
+
+  private acknowledgeUpdate() {
+    // An ACK after an Error cannot be correlated safely. Freeze until reconnect
+    // instead of letting it consume the failed update and shift the FIFO.
+    if (this.saveError || !this.outbound.acknowledge()) return;
+    this.reconnectDelay = 250;
+
+    if (!this.outbound.hasPending) {
+      this.setSaveStatus("saved");
+    } else {
+      this.flushOutbound();
+    }
+  }
+
+  private setSaveStatus(status: SaveStatus, force = false) {
+    if (!force && status === this.saveStatus) return;
+    this.saveStatus = status;
+    for (const listener of this.saveListeners) listener(status);
   }
 
   private queue(update: Uint8Array) {
@@ -181,5 +388,10 @@ export class SyncProvider {
   /** Pending inbound updates. Exposed so tests can observe the buffer. */
   get pending() {
     return this.inbound.length;
+  }
+
+  /** Pending outbound queue entries. The in-flight head counts as one. */
+  get pendingOutbound() {
+    return this.outbound.length;
   }
 }

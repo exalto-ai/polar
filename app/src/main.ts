@@ -54,6 +54,7 @@ let open: {
   rails: Rails;
 } | null = null;
 let openDocId = "";
+let closingAfterAutosave = false;
 
 /**
  * Say something went wrong, where the person is already looking.
@@ -233,11 +234,22 @@ function renderPresence(awareness: Awareness, self: number) {
   els.presence.replaceChildren(...agents, ...windows);
 }
 
+async function canLeaveCurrentDocument(): Promise<boolean> {
+  if (!open?.provider.hasPendingChanges) return true;
+  if (await open.provider.waitUntilSaved()) return true;
+  notify(
+    "This document still has changes waiting to autosave. Reconnect before switching.",
+    "error",
+  );
+  return false;
+}
+
 async function openDocument(docId: string): Promise<boolean> {
   if (open && openDocId === docId) {
     open.editor.commands.focus();
     return true;
   }
+  if (!(await canLeaveCurrentDocument())) return false;
   open?.rails.destroy();
   open?.provider.destroy();
   open?.editor.destroy();
@@ -550,6 +562,7 @@ async function trashSelected() {
   }
 
   const wasOpen = row.doc_id === openDocId;
+  if (wasOpen && !(await canLeaveCurrentDocument())) return;
   try {
     await mcp.setDocumentDeleted(row.doc_id, true);
     notify(`Moved "${row.title || "Untitled"}" to the trash · ${ACCEL_LABEL}⇧⌫ to find it`);
@@ -571,7 +584,8 @@ async function trashSelected() {
 
 async function createDocumentInNewWindow(title: string) {
   // Browser development has no native window API and falls back to replacing
-  // its preview editor after the document has been created.
+  // its preview editor, so it still needs the same durability guard.
+  if (!isTauri() && !(await canLeaveCurrentDocument())) return;
   try {
     const created = await mcp.createDocument(title);
     els.scrim.hidden = true;
@@ -757,6 +771,7 @@ async function boot() {
     // failure must not turn Reload into a different document.
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
   }
+  await installNativeCloseGuard();
 }
 
 /** Only under Tauri; in a dev browser there is no native window to title. */
@@ -769,6 +784,44 @@ function isTauri(): boolean {
     (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__,
   );
 }
+
+async function installNativeCloseGuard(): Promise<void> {
+  const nativeWindow = getCurrentWindow();
+  if (!nativeWindow) return;
+  await nativeWindow.onCloseRequested(async (event) => {
+    const provider = open?.provider;
+    if (!provider?.hasPendingChanges) return;
+
+    // Native close requests are cancellable only synchronously. Keep the
+    // window alive until the daemon confirms that SQLite has the latest edit.
+    event.preventDefault();
+    if (closingAfterAutosave) return;
+    closingAfterAutosave = true;
+    try {
+      const saved = await provider.waitUntilSaved();
+      if (!saved || open?.provider !== provider || provider.hasPendingChanges) {
+        notify(
+          "Window kept open because changes are still waiting to autosave.",
+          "error",
+        );
+        return;
+      }
+
+      // `destroy` skips a second close-request event after the durability
+      // barrier has passed.
+      await nativeWindow.destroy();
+    } catch (error) {
+      notify(`Could not close window: ${reason(error)}`, "error");
+    } finally {
+      closingAfterAutosave = false;
+    }
+  });
+}
+
+window.addEventListener("beforeunload", (event) => {
+  if (!open?.provider.hasPendingChanges) return;
+  event.preventDefault();
+});
 
 boot().catch((error) => {
   document.title = "Could not reach the daemon";

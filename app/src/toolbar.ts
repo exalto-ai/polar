@@ -1,5 +1,6 @@
 import type { Editor } from "@tiptap/core";
 import { ICONS, icon } from "./icons";
+import type { SaveStatus } from "./provider";
 
 export const ZOOM_LEVELS = [75, 90, 100, 110, 125, 150, 175, 200] as const;
 export const FONT_SIZES = [12, 14, 16, 17, 18, 20, 24, 28, 32, 40, 48, 56, 64] as const;
@@ -130,6 +131,7 @@ export type ToolbarOptions = {
   newDocument: () => void | Promise<void>;
   importMarkdown: () => void | Promise<void>;
   exportMarkdown: () => void | Promise<void>;
+  subscribeSaveStatus: (listener: (status: SaveStatus) => void) => () => void;
 };
 
 /**
@@ -194,6 +196,35 @@ export function installToolbar(
     true,
   );
 
+  const saveStatus = document.createElement("span");
+  saveStatus.className = "save-status";
+  const saveAlert = document.createElement("span");
+  saveAlert.className = "sr-only";
+  saveAlert.setAttribute("role", "status");
+  saveAlert.setAttribute("aria-live", "polite");
+  saveAlert.setAttribute("aria-atomic", "true");
+
+  const renderSaveStatus = (status: SaveStatus) => {
+    const labels: Record<SaveStatus, string> = {
+      connecting: "Connecting…",
+      saved: "Autosaved",
+      saving: "Saving…",
+      offline: "Offline",
+      error: "Save failed",
+    };
+    const titles: Record<SaveStatus, string> = {
+      connecting: "Connecting to autosave",
+      saved: "All changes are autosaved",
+      saving: "Autosaving changes",
+      offline: "Changes will autosave after reconnecting",
+      error: "Autosave failed; changes remain queued",
+    };
+    saveStatus.dataset.state = status;
+    saveStatus.textContent = labels[status];
+    saveStatus.title = titles[status];
+    saveAlert.textContent = status === "offline" || status === "error" ? titles[status] : "";
+  };
+
   toolbar.append(
     newDocument,
     importMarkdown,
@@ -207,6 +238,9 @@ export function installToolbar(
     bold,
     italic,
     link,
+    divider(),
+    saveStatus,
+    saveAlert,
   );
   editorElement.before(toolbar);
 
@@ -257,11 +291,13 @@ export function installToolbar(
 
   editor.on("selectionUpdate", update);
   editor.on("transaction", update);
+  const unsubscribeSaveStatus = actions.subscribeSaveStatus(renderSaveStatus);
   update();
 
   return () => {
     editor.off("selectionUpdate", update);
     editor.off("transaction", update);
+    unsubscribeSaveStatus();
     toolbar.remove();
   };
 }

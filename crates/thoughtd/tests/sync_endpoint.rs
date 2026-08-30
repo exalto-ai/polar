@@ -48,6 +48,20 @@ async fn recv(socket: &mut Socket) -> Frame {
     }
 }
 
+async fn recv_ack(socket: &mut Socket, doc_id: &str) {
+    loop {
+        match recv(socket).await {
+            Frame::Ack { doc_id: acked } if acked == doc_id => return,
+            Frame::Error { message, .. } => {
+                panic!("update failed instead of being acked: {message}")
+            }
+            // Broadcasts can be interleaved with replies because the workspace
+            // observer fans out the committed update to every subscriber.
+            _ => continue,
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_peer_syncs_then_receives_another_peers_edit() {
     let daemon = Daemon::start();
@@ -100,14 +114,26 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
             )),
         )
         .expect("replace");
+    let delta = local.diff_since(&before);
     send(
         &mut a,
         Frame::Update {
             doc_id: doc_id.clone(),
-            update: local.diff_since(&before),
+            update: delta.clone(),
         },
     )
     .await;
+
+    // ACK is sent only after `apply_peer_update` completes its SQLite commit.
+    recv_ack(&mut a, &doc_id).await;
+    let view = daemon.read_document(&doc_id);
+    assert!(
+        view["markdown"]
+            .as_str()
+            .expect("markdown")
+            .contains("typed in the window"),
+        "ACK arrived before the edit reached SQLite"
+    );
 
     // B is told, without having asked.
     match recv(&mut b).await {
@@ -119,15 +145,17 @@ async fn a_peer_syncs_then_receives_another_peers_edit() {
         "typed in the window"
     );
 
-    // And it reached the store, so an agent reading over MCP sees it.
-    let view = daemon.read_document(&doc_id);
-    assert!(
-        view["markdown"]
-            .as_str()
-            .expect("markdown")
-            .contains("typed in the window"),
-        "the edit never reached SQLite"
-    );
+    // A reconnect may resend an update whose ACK was lost. It still receives
+    // an ACK after the daemon confirms the same update is already persisted.
+    send(
+        &mut a,
+        Frame::Update {
+            doc_id: doc_id.clone(),
+            update: delta,
+        },
+    )
+    .await;
+    recv_ack(&mut a, &doc_id).await;
 }
 
 #[tokio::test]
