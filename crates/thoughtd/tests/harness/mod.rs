@@ -14,6 +14,7 @@ pub struct Daemon {
     child: Child,
     pub url: String,
     pub token: String,
+    pub instance_id: String,
     pub home: tempfile::TempDir,
     agent: ureq::Agent,
     session: std::cell::RefCell<Option<String>>,
@@ -76,6 +77,10 @@ impl Daemon {
             child,
             url: config["url"].as_str().expect("url").to_string(),
             token: config["token"].as_str().expect("token").to_string(),
+            instance_id: config["instance_id"]
+                .as_str()
+                .expect("instance_id")
+                .to_string(),
             home,
             // No idle pooling: a keep-alive socket the server has since closed
             // fails on write with ECONNRESET, which would read as a product bug
@@ -88,6 +93,11 @@ impl Daemon {
             session: std::cell::RefCell::new(None),
             id: std::cell::Cell::new(0),
         }
+    }
+
+    pub fn stop_abruptly(&mut self) {
+        self.child.kill().expect("kill daemon");
+        self.child.wait().expect("wait for daemon");
     }
 
     pub fn sync_url(&self) -> String {

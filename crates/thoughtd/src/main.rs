@@ -24,6 +24,25 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use std::sync::Arc;
 use thought_mcp::Workspace;
 
+#[cfg(unix)]
+async fn shutdown_signal() {
+    let Ok(mut terminate) =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    else {
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = std::env::args()
@@ -39,8 +58,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _logs = logging::init(&discovery::home());
     tracing::info!(store = %db_path.display(), "starting");
 
+    // These must precede `Workspace::open`. The home lock makes discovery
+    // single-writer; the store lock also covers two homes aimed at one custom
+    // database. Lock files may remain after a crash because ownership is the
+    // process-held OS lock, not file presence.
+    let _home_lock = discovery::try_lock_home()?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "another thought daemon already owns this home",
+        )
+    })?;
+    let _store_lock = discovery::try_lock_store(&db_path)?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "another thought daemon already owns this store",
+        )
+    })?;
+
     let workspace = Arc::new(Workspace::open(&db_path)?);
     let token = discovery::random_token()?;
+    let instance_id = loop {
+        let candidate = discovery::random_token()?;
+        if candidate != token {
+            break candidate;
+        }
+    };
 
     let service_workspace = workspace.clone();
     let service = StreamableHttpService::new(
@@ -49,9 +91,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         StreamableHttpServerConfig::default(),
     );
 
+    let health_instance = instance_id.clone();
     let expected = token.clone();
     let sync_state = sync::SyncState::new(workspace.clone());
-    let app = axum::Router::new()
+    let protected = axum::Router::new()
+        .route(
+            discovery::MCP_HEALTH_PATH,
+            axum::routing::get(move || {
+                let instance_id = health_instance.clone();
+                async move { axum::Json(discovery::HealthResponse::mcp(&instance_id)) }
+            }),
+        )
         .nest_service("/mcp", service)
         // The editor connects here and speaks the same protocol the relay will
         // (M2.1): one protocol, two transports.
@@ -90,7 +140,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             },
-        ))
+        ));
+
+    let public_instance = instance_id.clone();
+    let app = axum::Router::new()
+        .route(
+            discovery::IDENTITY_PATH,
+            axum::routing::get(move || {
+                let instance_id = public_instance.clone();
+                async move { axum::Json(discovery::IdentityResponse::current(&instance_id)) }
+            }),
+        )
+        .merge(protected)
         // CORS, outermost so it runs before auth.
         //
         // The webview is cross-origin whichever way it loads — tauri://localhost
@@ -148,7 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
 
-    let discovery_path = discovery::write(port, &token, &db_path)?;
+    let discovery_path = discovery::write(port, &token, &instance_id, &db_path)?;
     // The readiness line stays on stderr verbatim: the app and the test harness
     // both wait for it, and a logger's prefixes would change what they match.
     eprintln!("thoughtd listening on http://127.0.0.1:{port}/mcp");
@@ -162,9 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // port that is either dead or, worse, someone else's.
     let cleanup = discovery_path.clone();
     let result = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await;
     tracing::info!("shutting down");
     let _ = std::fs::remove_file(&cleanup);
