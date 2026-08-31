@@ -15,6 +15,26 @@ Configured reviewers can propose a change. They cannot edit document content dir
 There is no second suggestion table or replay ledger. Reusing a reviewer's `request_id` for
 the same document returns the first proposal.
 
+## Connecting a reviewer
+
+The Connected app panel creates a separately scoped reviewer credential, then shows setup for
+the selected client:
+
+- ChatGPT desktop: add a STDIO server under Settings → MCP servers, then restart and check `/mcp`.
+- Codex: run the generated `codex mcp add` command, then check `/mcp`.
+- Claude Desktop: merge the generated JSON entry into `claude_desktop_config.json`, fully quit,
+  reopen, then click + in a chat → Connectors or inspect Developer settings.
+- Claude Code: run the generated `claude mcp add --transport stdio --scope user` command, then
+  check `/mcp`.
+
+The copied value contains a stable connection ID, never its credential. ChatGPT on the web does
+not read the local desktop configuration. ChatGPT desktop and Codex share local MCP configuration
+on the same Mac. Claude Desktop and Claude Code have separate setup paths.
+
+`Not used yet` means the credential has not authenticated a request since it was created or reset.
+`Last used` is historical local activity, not live presence. A displayed model is explicitly
+reported by the client and is not provider-verified.
+
 ## Patch shapes
 
 `suggest_change` accepts one of:

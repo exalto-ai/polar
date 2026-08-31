@@ -945,7 +945,8 @@ impl Store {
     ) -> Result<Option<ReviewerConnectionRow>, SqlError> {
         let changed = self.conn.execute(
             "UPDATE reviewer_connections
-             SET credential_hash = ?3, revision = revision + 1, updated_at = ?4
+             SET credential_hash = ?3, revision = revision + 1, updated_at = ?4,
+                 last_seen_at = NULL, reported_model = NULL
              WHERE id = ?1 AND revision = ?2 AND revoked_at IS NULL",
             params![id, expected_revision, credential_hash, updated_at],
         )?;

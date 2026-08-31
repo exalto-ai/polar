@@ -45,6 +45,10 @@ fn an_agent_drives_the_daemon_over_mcp() {
         "create_document",
         "read_document",
         "replace_block",
+        "insert_blocks",
+        "replace_text",
+        "set_document_deleted",
+        "delete_block",
         "search",
     ] {
         assert!(
@@ -292,7 +296,34 @@ fn the_stdio_shim_starts_a_daemon_and_proxies_to_it() {
         .iter()
         .map(|t| t["name"].as_str().unwrap_or_default().to_string())
         .collect();
-    assert!(tools.contains(&"read_document".to_string()));
+    for expected in [
+        "list_documents",
+        "read_document",
+        "list_suggestions",
+        "suggest_change",
+        "document_actors",
+        "block_provenance",
+        "document_lineage",
+        "search",
+    ] {
+        assert!(
+            tools.contains(&expected.to_string()),
+            "reviewer is missing {expected}: {tools:?}"
+        );
+    }
+    for forbidden in [
+        "create_document",
+        "replace_block",
+        "insert_blocks",
+        "replace_text",
+        "set_document_deleted",
+        "delete_block",
+    ] {
+        assert!(
+            !tools.contains(&forbidden.to_string()),
+            "reviewer was offered forbidden tool {forbidden}: {tools:?}"
+        );
+    }
 
     // The shim started a daemon that published itself under THOUGHT_HOME.
     let published = home.path().join("daemon.json");

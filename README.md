@@ -70,6 +70,10 @@ connection's separate credential from an owner-only file and never prints it. It
 published daemon or starts one when discovery is stale. Process-lifetime locks decide which
 daemon may publish and open SQLite; file presence and PIDs do not.
 
+The sidebar provides setup for ChatGPT desktop, Codex, Claude Desktop, and Claude Code. Connected
+reviewers see only read and suggestion tools. Their last-used time and reported model are status
+hints, not verified identity or live presence.
+
 ## Shape
 
 A Rust daemon owns the CRDT and the SQLite store. The Tauri UI is a client, MCP agents are

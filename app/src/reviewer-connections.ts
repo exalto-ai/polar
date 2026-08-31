@@ -1,7 +1,9 @@
 import {
   reviewerClientName,
   reviewerSetupCommand,
+  reviewerSetupCopyLabel,
   reviewerSetupInstructions,
+  reviewerSetupServerName,
   type ReviewerClient,
 } from "./reviewer-setup";
 import { writeClipboardText } from "./clipboard";
@@ -70,6 +72,7 @@ export function installReviewerConnections(
   options: Options = {},
 ): ReviewerController {
   const add = required<HTMLButtonElement>(root, "#reviewer-add");
+  const checkStatus = required<HTMLButtonElement>(root, "#reviewer-refresh");
   const list = required<HTMLUListElement>(root, "#reviewer-list");
   const empty = required<HTMLElement>(root, "#reviewer-empty");
   const error = required<HTMLElement>(root, "#reviewer-error");
@@ -82,6 +85,7 @@ export function installReviewerConnections(
   const cancel = required<HTMLButtonElement>(root, "#reviewer-cancel");
   const setup = required<HTMLElement>(root, "#reviewer-setup");
   const setupText = required<HTMLElement>(root, "#reviewer-setup-text");
+  const setupName = required<HTMLElement>(root, "#reviewer-setup-name");
   const setupCommand = required<HTMLElement>(root, "#reviewer-setup-command");
   const copy = required<HTMLButtonElement>(root, "#reviewer-copy");
   const setupDone = required<HTMLButtonElement>(root, "#reviewer-setup-done");
@@ -137,7 +141,9 @@ export function installReviewerConnections(
   function showSetup(connection: ReviewerConnection) {
     const command = reviewerSetupCommand(connection.client, executable, connection.id);
     setupText.textContent = reviewerSetupInstructions(connection.client);
+    setupName.textContent = `Server name: ${reviewerSetupServerName(connection.id) ?? "Unavailable"}`;
     setupCommand.textContent = command ?? "Setup is unavailable in this build.";
+    copy.textContent = reviewerSetupCopyLabel(connection.client);
     copy.disabled = !command;
     form.hidden = true;
     setup.hidden = false;
@@ -160,10 +166,12 @@ export function installReviewerConnections(
         const details = document.createElement("div");
         const title = document.createElement("strong");
         const meta = document.createElement("small");
+        const activity = document.createElement("small");
         const actions = document.createElement("div");
         title.textContent = connection.display_label;
         meta.textContent = `${reviewerClientName(connection.client)} · ${connection.access.document_scope === "all" ? "All documents" : "Current document"}`;
-        details.append(title, meta);
+        activity.textContent = reviewerActivity(connection);
+        details.append(title, meta, activity);
         actions.className = "reviewer-actions";
         actions.append(
           button("Setup", () => showSetup(connection)),
@@ -193,6 +201,7 @@ export function installReviewerConnections(
 
   async function reset(connection: ReviewerConnection) {
     if (!api || !confirmAction(`Reset ${connection.display_label}? Existing sessions will stop.`)) return;
+    generation += 1;
     try {
       const updated = await api.resetReviewerConnection(connection.id, connection.revision);
       connections = connections.map((value) => (value.id === updated.id ? updated : value));
@@ -205,6 +214,7 @@ export function installReviewerConnections(
 
   async function revoke(connection: ReviewerConnection) {
     if (!api || !confirmAction(`Remove access for ${connection.display_label}?`)) return;
+    generation += 1;
     try {
       const updated = await api.revokeReviewerConnection(connection.id, connection.revision);
       connections = connections.map((value) => (value.id === updated.id ? updated : value));
@@ -215,6 +225,7 @@ export function installReviewerConnections(
   }
 
   listen(add, "click", () => openForm(null));
+  listen(checkStatus, "click", () => void refresh());
   listen(cancel, "click", () => {
     form.hidden = true;
     editing = null;
@@ -229,6 +240,7 @@ export function installReviewerConnections(
   listen(form, "submit", (event) => {
     event.preventDefault();
     if (!api) return;
+    generation += 1;
     const input = {
       display_label: label.value,
       access: accessFromForm(),
@@ -279,4 +291,24 @@ export function installReviewerConnections(
       for (const dispose of disposers.splice(0)) dispose();
     },
   };
+}
+
+export function reviewerActivity(
+  connection: Pick<ReviewerConnection, "last_seen_at" | "reported_model">,
+  now = Date.now(),
+): string {
+  const model = connection.reported_model?.trim();
+  const modelText = model ? ` · ${model} (reported)` : "";
+  if (connection.last_seen_at === null) return `Not used yet${modelText}`;
+  const elapsed = Math.max(0, now - connection.last_seen_at);
+  if (elapsed < 60_000) return `Last used just now${modelText}`;
+  if (elapsed < 3_600_000) {
+    const minutes = Math.floor(elapsed / 60_000);
+    return `Last used ${minutes} min ago${modelText}`;
+  }
+  const date = new Date(connection.last_seen_at).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+  return `Last used ${date}${modelText}`;
 }
