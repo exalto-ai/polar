@@ -12,6 +12,11 @@ class StaleSession extends Error {
   }
 }
 
+// A daemon restart can invalidate the current session and, in the same burst,
+// its first replacement. Stop after covering that race so an unhealthy daemon
+// cannot keep a window RPC in an unbounded handshake loop.
+const MAX_SESSION_RECOVERIES = 2;
+
 export class Mcp {
   private session: string | null = null;
   private handshakePromise: Promise<string> | null = null;
@@ -31,14 +36,9 @@ export class Mcp {
    * the window keeps a dead session and every later call fails.
   */
   private async rpc(method: string, params: unknown): Promise<any> {
-    const sentSession = await this.ensureSession();
-    try {
-      return (await this.send(method, params, sentSession)).result;
-    } catch (error) {
-      if (!(error instanceof StaleSession)) throw error;
-      const replacementSession = await this.recoverSession(error.sentSession);
-      return (await this.send(method, params, replacementSession)).result;
-    }
+    return this.withSessionRecovery(async (session) =>
+      (await this.send(method, params, session)).result
+    );
   }
 
   private async send(
@@ -81,7 +81,29 @@ export class Mcp {
   }
 
   async connect() {
-    await this.ensureSession();
+    await this.withSessionRecovery(async () => undefined);
+  }
+
+  private async withSessionRecovery<T>(
+    operation: (session: string) => Promise<T>,
+  ): Promise<T> {
+    let staleSession: string | null = null;
+    for (let recoveries = 0; ; recoveries += 1) {
+      try {
+        const session = staleSession === null
+          ? await this.ensureSession()
+          : await this.recoverSession(staleSession);
+        staleSession = null;
+        return await operation(session);
+      } catch (error) {
+        if (!(error instanceof StaleSession)) throw error;
+        if (recoveries >= MAX_SESSION_RECOVERIES) {
+          this.forgetSession(error.sentSession);
+          throw error;
+        }
+        staleSession = error.sentSession;
+      }
+    }
   }
 
   private async ensureSession(): Promise<string> {
@@ -107,10 +129,12 @@ export class Mcp {
     // Another request may already have replaced the exact session that failed.
     // Never clear that newer session or start a competing handshake.
     if (this.session !== null && this.session !== sentSession) return this.session;
-    if (this.session === sentSession) {
-      this.session = null;
-    }
+    this.forgetSession(sentSession);
     return this.ensureSession();
+  }
+
+  private forgetSession(sentSession: string) {
+    if (this.session === sentSession) this.session = null;
   }
 
   private async handshake(): Promise<string> {

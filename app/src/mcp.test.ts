@@ -77,6 +77,117 @@ describe("MCP session recovery", () => {
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
+  it("recovers when ensureSession expires before its initialized notification", async () => {
+    const sessions = ["expired-handshake", "stable-session"];
+    let initializeCount = 0;
+    const initializedSessions: Array<string | undefined> = [];
+    const toolSessions: Array<string | undefined> = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      const headers = init?.headers as Record<string, string>;
+      if (body.method === "initialize") {
+        const session = sessions[initializeCount];
+        initializeCount += 1;
+        return rpcResponse(
+          { protocolVersion: "2025-06-18" },
+          { "mcp-session-id": session },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        const session = headers["Mcp-Session-Id"];
+        initializedSessions.push(session);
+        return new Response("", { status: session === "expired-handshake" ? 404 : 202 });
+      }
+      const session = headers["Mcp-Session-Id"];
+      toolSessions.push(session);
+      return rpcResponse({ documents: [] });
+    });
+    const client = new Mcp(
+      "http://127.0.0.1:4317/mcp",
+      "secret-token",
+      fetcher as unknown as typeof fetch,
+    );
+    await expect(client.listDocuments()).resolves.toEqual([]);
+
+    expect(initializeCount).toBe(2);
+    expect(initializedSessions).toEqual([
+      "expired-handshake",
+      "stable-session",
+    ]);
+    expect(toolSessions).toEqual(["stable-session"]);
+  });
+
+  it("recovers when the first replacement expires on the retried RPC", async () => {
+    const sessions = ["old-session", "first-replacement", "stable-session"];
+    let initializeCount = 0;
+    const toolSessions: Array<string | undefined> = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      const headers = init?.headers as Record<string, string>;
+      if (body.method === "initialize") {
+        const session = sessions[initializeCount];
+        initializeCount += 1;
+        return rpcResponse(
+          { protocolVersion: "2025-06-18" },
+          { "mcp-session-id": session },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response("", { status: 202 });
+      }
+      const session = headers["Mcp-Session-Id"];
+      toolSessions.push(session);
+      if (session !== "stable-session") return new Response("", { status: 404 });
+      return rpcResponse({ documents: [] });
+    });
+    const client = new Mcp(
+      "http://127.0.0.1:4317/mcp",
+      "secret-token",
+      fetcher as unknown as typeof fetch,
+    );
+    await client.connect();
+
+    await expect(client.listDocuments()).resolves.toEqual([]);
+
+    expect(initializeCount).toBe(3);
+    expect(toolSessions).toEqual([
+      "old-session",
+      "first-replacement",
+      "stable-session",
+    ]);
+  });
+
+  it("stops after two consecutive replacement sessions also expire", async () => {
+    let initializeCount = 0;
+    let toolCount = 0;
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.method === "initialize") {
+        initializeCount += 1;
+        return rpcResponse(
+          { protocolVersion: "2025-06-18" },
+          { "mcp-session-id": `session-${initializeCount}` },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response("", { status: 202 });
+      }
+      toolCount += 1;
+      return new Response("", { status: 404 });
+    });
+    const client = new Mcp(
+      "http://127.0.0.1:4317/mcp",
+      "secret-token",
+      fetcher as unknown as typeof fetch,
+    );
+    await client.connect();
+
+    await expect(client.listDocuments()).rejects.toThrow("the MCP session is stale");
+
+    expect(initializeCount).toBe(3);
+    expect(toolCount).toBe(3);
+  });
+
   it("keeps a captured session while a concurrent replacement is initializing", async () => {
     let initializeCount = 0;
     let releasePausedOld!: () => void;
