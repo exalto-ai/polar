@@ -860,6 +860,7 @@ async function boot() {
   }
 
   await openDocument(targetId);
+  aiSupport.showOnboardingIfNeeded();
   if (requested) {
     // Keep the pin through all fallible startup work. A transient read or sync
     // failure must not turn Reload into a different document.

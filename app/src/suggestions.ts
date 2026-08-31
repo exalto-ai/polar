@@ -207,7 +207,7 @@ export function installSuggestionReview(
     button.disabled = busy.has(suggestion.suggestion_id);
     button.textContent = busy.has(suggestion.suggestion_id)
       ? "Saving…"
-      : kind === "accept" ? "Accept change" : "Reject";
+      : kind === "accept" ? "Accept" : "Reject";
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();

@@ -1,6 +1,7 @@
 import {
   reviewerClientName,
   reviewerSetupCommand,
+  reviewerSetupInstructions,
   type ReviewerClient,
 } from "./reviewer-setup";
 import { writeClipboardText } from "./clipboard";
@@ -135,7 +136,7 @@ export function installReviewerConnections(
 
   function showSetup(connection: ReviewerConnection) {
     const command = reviewerSetupCommand(connection.client, executable, connection.id);
-    setupText.textContent = `Add ${connection.display_label} to ${reviewerClientName(connection.client)}.`;
+    setupText.textContent = reviewerSetupInstructions(connection.client);
     setupCommand.textContent = command ?? "Setup is unavailable in this build.";
     copy.disabled = !command;
     form.hidden = true;

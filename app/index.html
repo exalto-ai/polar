@@ -39,11 +39,85 @@
         <header class="ai-sidebar-header">
           <div>
             <span class="eyebrow">AI support</span>
-            <h2 id="ai-support-title">Connections</h2>
+            <h2 id="ai-support-title">Choose how to work</h2>
           </div>
           <button class="icon-button" id="ai-sidebar-close" type="button" aria-label="Close AI support">×</button>
         </header>
-        <section class="pro-chat" id="pro-chat" aria-labelledby="pro-chat-title">
+
+        <nav class="ai-mode-switcher" aria-label="AI support mode">
+          <button type="button" data-ai-mode="connected">Connected app</button>
+          <button type="button" data-ai-mode="builtin">Built-in AI</button>
+          <button type="button" data-ai-mode="basic">Basic</button>
+        </nav>
+        <p class="ai-mode-description" id="ai-mode-description"></p>
+
+        <section class="ai-mode-panel ai-connect-panel" id="ai-connect-panel" hidden>
+          <div class="ai-mode-intro">
+            <span class="eyebrow">Recommended</span>
+            <h3>Use an AI app you already have</h3>
+            <p>Connect ChatGPT desktop, Codex, or Claude Code. The reviewer can read this document and propose precise changes without copy and paste.</p>
+            <div class="suggestion-example" aria-label="Connected reviewer workflow">
+              <span>Reviewer suggestion</span>
+              <strong>Review each change in the document</strong>
+              <div><span>Accept</span><span>Reject</span></div>
+            </div>
+            <p class="ai-sidebar-note">Suggestions do not change your wording until you accept them. Proof of Thought records the app and model as reported by the connected tool, not as provider-verified identity. Connecting adds no separate API charge. Claude Desktop setup comes next.</p>
+          </div>
+
+          <div class="reviewer-heading">
+            <span class="eyebrow">Saved connections</span>
+            <button class="ghost" id="reviewer-add" type="button">Add reviewer</button>
+          </div>
+          <p id="reviewer-error" class="reviewer-error" role="alert" hidden></p>
+          <p id="reviewer-empty" class="ai-sidebar-note">No connected reviewers yet.</p>
+          <ul id="reviewer-list" class="reviewer-list"></ul>
+
+          <form id="reviewer-form" class="reviewer-form" hidden>
+            <h3 id="reviewer-form-title">Add reviewer</h3>
+            <label>AI app
+              <select id="reviewer-client">
+                <option value="chatgpt">ChatGPT desktop</option>
+                <option value="codex">Codex</option>
+                <option value="claude-code">Claude Code</option>
+              </select>
+            </label>
+            <label>Name
+              <input id="reviewer-label" maxlength="80" required autocomplete="off" />
+            </label>
+            <label>Documents
+              <select id="reviewer-scope">
+                <option value="current">Current document</option>
+                <option value="all">All documents</option>
+              </select>
+            </label>
+            <p id="reviewer-current" class="ai-sidebar-note"></p>
+            <p class="ai-sidebar-note">This reviewer can read the selected documents and propose changes for you to accept or reject. Your AI app may send document text to its provider.</p>
+            <div class="reviewer-actions">
+              <button id="reviewer-cancel" type="button">Cancel</button>
+              <button class="ghost" type="submit">Save</button>
+            </div>
+          </form>
+
+          <section id="reviewer-setup" class="reviewer-setup" hidden>
+            <h3>Connect reviewer</h3>
+            <p id="reviewer-setup-text" class="ai-sidebar-note"></p>
+            <pre id="reviewer-setup-command"></pre>
+            <div class="reviewer-actions">
+              <button class="ghost" id="reviewer-copy" type="button">Copy setup</button>
+              <button id="reviewer-setup-done" type="button">Done</button>
+            </div>
+          </section>
+        </section>
+
+        <section class="ai-mode-panel ai-pro-panel" id="ai-pro-panel" hidden>
+          <div class="ai-mode-intro">
+            <span class="eyebrow">Pro</span>
+            <h3>Use built-in AI</h3>
+            <p>Chat with the current document, attach reference files, choose a model and thinking level, then send useful wording to the editor as a reviewable suggestion.</p>
+            <p class="ai-sidebar-note">Provider API charges apply. Proof of Thought records the selected provider, model, thinking setting, and visible exchange. Accepted wording is still labeled as reported AI output.</p>
+          </div>
+
+          <section class="pro-chat" id="pro-chat" aria-labelledby="pro-chat-title">
           <div class="pro-chat-heading">
             <div>
               <span class="eyebrow">Built-in chat</span>
@@ -95,16 +169,8 @@
             <textarea id="pro-chat-input" maxlength="16384" rows="3" placeholder="Ask about the current document…"></textarea>
             <button class="ghost" id="pro-chat-send" type="submit" disabled>Send</button>
           </form>
-        </section>
-        <section class="current-sources" aria-labelledby="current-sources-title">
-          <span class="eyebrow">Current text</span>
-          <h3 id="current-sources-title">Recorded sources</h3>
-          <p id="current-source-status" aria-live="polite">Open a document to see its sources.</p>
-          <button class="text-button" id="current-source-retry" type="button" hidden>Try again</button>
-          <ul id="current-source-list" hidden></ul>
-          <p class="ai-sidebar-note" id="current-source-note" hidden>These labels describe how surviving text entered this document. They do not prove who composed pasted, imported, or tool-reported text.</p>
-        </section>
-        <section class="provider-settings" id="provider-settings" aria-labelledby="provider-settings-title">
+          </section>
+          <section class="provider-settings" id="provider-settings" aria-labelledby="provider-settings-title">
           <span class="eyebrow">Built-in chat</span>
           <h3 id="provider-settings-title">Provider keys</h3>
           <p class="ai-sidebar-note">Keys stay in your Mac login Keychain. Adding one sends no document text.</p>
@@ -125,52 +191,64 @@
               </div>
             </li>
           </ul>
+          </section>
         </section>
-        <p class="ai-sidebar-note">Give each AI reviewer only the documents it needs.</p>
-        <div class="reviewer-heading">
-          <span class="eyebrow">Saved connections</span>
-          <button class="ghost" id="reviewer-add" type="button">Add</button>
-        </div>
-        <p id="reviewer-error" class="reviewer-error" role="alert" hidden></p>
-        <p id="reviewer-empty" class="ai-sidebar-note">No reviewers yet.</p>
-        <ul id="reviewer-list" class="reviewer-list"></ul>
 
-        <form id="reviewer-form" class="reviewer-form" hidden>
-          <h3 id="reviewer-form-title">Add reviewer</h3>
-          <label>AI app
-            <select id="reviewer-client">
-              <option value="chatgpt">ChatGPT desktop</option>
-              <option value="codex">Codex</option>
-              <option value="claude-code">Claude Code</option>
-            </select>
-          </label>
-          <label>Name
-            <input id="reviewer-label" maxlength="80" required autocomplete="off" />
-          </label>
-          <label>Documents
-            <select id="reviewer-scope">
-              <option value="current">Current document</option>
-              <option value="all">All documents</option>
-            </select>
-          </label>
-          <p id="reviewer-current" class="ai-sidebar-note"></p>
-          <p class="ai-sidebar-note">This access works with no window open. Your AI app may send document text to its provider.</p>
-          <div class="reviewer-actions">
-            <button id="reviewer-cancel" type="button">Cancel</button>
-            <button class="ghost" type="submit">Save</button>
+        <section class="ai-mode-panel ai-basic-panel" id="ai-basic-panel" hidden>
+          <div class="ai-mode-intro">
+            <span class="eyebrow">Basic</span>
+            <h3>Use local recording</h3>
+            <p>Proof of Thought records the deltas it observes and shows source labels only when the input path is known.</p>
+            <p class="ai-sidebar-note">The editor makes no built-in AI request in this mode. Local typing, paste, and toolbar actions are currently grouped as editor-entered changes. Previously configured external reviewers keep their access until you remove them in Connected app.</p>
           </div>
-        </form>
+        </section>
 
-        <section id="reviewer-setup" class="reviewer-setup" hidden>
-          <h3>Connect reviewer</h3>
-          <p id="reviewer-setup-text" class="ai-sidebar-note"></p>
-          <pre id="reviewer-setup-command"></pre>
-          <div class="reviewer-actions">
-            <button class="ghost" id="reviewer-copy" type="button">Copy setup</button>
-            <button id="reviewer-setup-done" type="button">Done</button>
-          </div>
+        <section class="current-sources" aria-labelledby="current-sources-title">
+          <span class="eyebrow">Current text</span>
+          <h3 id="current-sources-title">Recorded sources</h3>
+          <p id="current-source-status" aria-live="polite">Open a document to see its sources.</p>
+          <button class="text-button" id="current-source-retry" type="button" hidden>Try again</button>
+          <ul id="current-source-list" hidden></ul>
+          <p class="ai-sidebar-note" id="current-source-note" hidden>These labels describe how surviving text entered this document. They do not prove who composed pasted, imported, or tool-reported text.</p>
         </section>
       </aside>
+    </div>
+
+    <div class="ai-onboarding-backdrop" id="ai-onboarding" hidden>
+      <section class="ai-onboarding" role="dialog" aria-modal="true" aria-labelledby="ai-onboarding-title" aria-describedby="ai-onboarding-description">
+        <button class="icon-button onboarding-close" id="ai-onboarding-close" type="button" aria-label="Close setup">×</button>
+        <span class="eyebrow">Welcome to Proof of Thought</span>
+        <h1 id="ai-onboarding-title" tabindex="-1">How would you like to work?</h1>
+        <p class="onboarding-intro" id="ai-onboarding-description">Choose a simple starting point. You can switch modes anytime without changing your documents or their history.</p>
+
+        <div class="onboarding-options">
+          <button class="onboarding-card recommended" type="button" data-ai-mode="connected">
+            <span class="card-topline"><span>Connect an AI app</span><span class="recommendation">Recommended</span></span>
+            <strong>Keep using ChatGPT or Claude</strong>
+            <span>Connect a desktop AI app so it can read the document and propose exact edits. Each suggestion appears in the editor with Accept and Reject.</span>
+            <small>No extra Proof of Thought API charge. App and model identity are self-reported through the local tool connection.</small>
+          </button>
+
+          <button class="onboarding-card pro-card" type="button" data-ai-mode="builtin">
+            <span class="card-topline"><span>Use an API key</span><span class="mode-label">Pro</span></span>
+            <strong>Chat inside Proof of Thought</strong>
+            <span>Use persistent chat, file attachments, model choice, and thinking controls. Send useful answers to the editor as reviewable suggestions.</span>
+            <small>OpenAI or Anthropic API usage is billed by that provider. Accepted wording is currently labeled as reported AI output.</small>
+          </button>
+
+          <button class="onboarding-card" type="button" data-ai-mode="basic">
+            <span class="card-topline"><span>Local recording</span><span class="mode-label">Basic</span></span>
+            <strong>Do not set up built-in AI</strong>
+            <span>Record observed editor changes without enabling built-in chat. Source labels appear only where Proof of Thought has anchored evidence.</span>
+            <small>Typing, paste, and toolbar actions are currently grouped as editor-entered. This choice does not disconnect existing reviewers; remove them in Connected app.</small>
+          </button>
+        </div>
+
+        <details class="onboarding-disclosure">
+          <summary>How AI labels work</summary>
+          <p><strong>Reported</strong> means Proof of Thought saw AI wording arrive through a local tool connection or built-in chat. Connected app and model names come from that client. Built-in chat records the selected provider and model, but neither path authenticates provider or model identity in the current build. The label never says the content is correct.</p>
+        </details>
+      </section>
     </div>
 
     <!-- Errors used to have nowhere to go: a failed call left the status dot

@@ -15,6 +15,19 @@ export function reviewerClientName(client: ReviewerClient): string {
   return names[client];
 }
 
+export function reviewerSetupInstructions(client: ReviewerClient): string {
+  if (client === "chatgpt") {
+    return "In ChatGPT desktop, open Settings → MCP servers → Add server. Choose STDIO, paste the command below, save, then restart. ChatGPT on the web does not use this local setup.";
+  }
+  if (client === "codex") {
+    return "Run the command below once in Terminal, then use /mcp in Codex to check the connection.";
+  }
+  if (client === "claude-code") {
+    return "Run the command below once in Terminal, then use /mcp in Claude Code to check the connection.";
+  }
+  return "Claude Desktop setup is unavailable in this build.";
+}
+
 /** The setup text contains a connection ID, never its credential. */
 export function reviewerSetupCommand(
   client: ReviewerClient,

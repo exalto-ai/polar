@@ -926,9 +926,17 @@ the same `search` the agents use, so there is one search implementation rather t
 optional right sidebar holds agent and proof controls without interrupting startup or changing
 how a document opens.
 
+After the first document opens successfully, a one-time chooser presents Connected app,
+Built-in AI, and Basic recording as plain-language starting paths. The choice only selects which
+sidebar panel is shown. It never grants, revokes, or changes reviewer access, and saved external
+connections remain active until they are removed. Connected reviewer proposals and built-in chat
+wording both use the existing Accept/Reject suggestion flow by default.
+
 **Cost:** the sidebar reduces horizontal editing space while open and adds a focus region that
 must leave keyboard and assistive-technology navigation while closed. It is presentation only;
-the daemon and CRDT remain the document authority.
+the daemon and CRDT remain the document authority. The stored path preference can become stale,
+so every panel must describe current capabilities rather than treating the preference as access
+state.
 
 System sans throughout, sized and spaced for long-form writing. The editor and window use
 the fixed deep-blue `#0c1622` ground shared with the app icon. A compact, centered toolbar
