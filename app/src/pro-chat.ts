@@ -34,6 +34,7 @@ type LocalMessage = ChatMessage & {
   meta?: string;
   incomplete?: boolean;
   response?: SendChatResponse;
+  suggestionRequestId?: string;
   suggested?: boolean;
 };
 
@@ -325,9 +326,10 @@ export function installProChat(
       if (destroyed || generation !== requestGeneration || currentDocument?.id !== document.id) {
         return;
       }
+      message.suggestionRequestId ??= createRequestId();
       await options.suggestResponse({
         documentId: document.id,
-        requestId: createRequestId(),
+        requestId: message.suggestionRequestId,
         provider: response.provider,
         requestedModel: response.requested_model,
         reportedModel: response.reported_model,

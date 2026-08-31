@@ -124,6 +124,78 @@ describe("built-in chat", () => {
     controller.destroy();
   });
 
+  it("reuses an assistant response request ID when suggesting is retried", async () => {
+    const bridge: ProChatBridge = {
+      models: vi.fn().mockResolvedValue({
+        provider: "openai",
+        models: [{ id: "gpt-test", display_name: "GPT Test" }],
+      }),
+      send: vi.fn().mockResolvedValue({
+        text: "A clearer ending",
+        provider: "openai",
+        requested_model: "gpt-test",
+        reported_model: "gpt-test-2026",
+        wording_revision: "revision-1",
+        complete: true,
+      }),
+    };
+    const createRequestId = vi.fn()
+      .mockReturnValueOnce("suggestion-one")
+      .mockReturnValueOnce("suggestion-two");
+    const suggestResponse = vi.fn()
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce(undefined);
+    const controller = installProChat(document, {
+      bridge,
+      createRequestId,
+      suggestResponse,
+    });
+    controller.setActive(true);
+    controller.setDocument({
+      id: "private-document-id",
+      title: "Draft",
+      snapshot: () => ({ type: "doc", content: [] }),
+      suggestionPosition: () => ({ kind: "end" }),
+      waitUntilSaved: async () => true,
+      selectedText: () => null,
+    });
+
+    const provider = document.querySelector<HTMLSelectElement>("#pro-chat-provider")!;
+    provider.value = "openai";
+    provider.dispatchEvent(new Event("change"));
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLSelectElement>("#pro-chat-model")!.value)
+        .toBe("gpt-test");
+    });
+    const consent = document.querySelector<HTMLInputElement>("#pro-chat-consent")!;
+    consent.checked = true;
+    consent.dispatchEvent(new Event("change"));
+    const input = document.querySelector<HTMLTextAreaElement>("#pro-chat-input")!;
+    input.value = "Improve the ending";
+    input.dispatchEvent(new Event("input"));
+    document.querySelector<HTMLFormElement>("#pro-chat-form")!
+      .dispatchEvent(new Event("submit", { cancelable: true }));
+    await vi.waitFor(() => {
+      expect(document.querySelector("#pro-chat-messages")?.textContent)
+        .toContain("A clearer ending");
+    });
+
+    document.querySelector<HTMLButtonElement>(".pro-chat-suggest")!.click();
+    await vi.waitFor(() => {
+      expect(document.querySelector("#pro-chat-error")?.textContent)
+        .toContain("response lost");
+    });
+    document.querySelector<HTMLButtonElement>(".pro-chat-suggest")!.click();
+    await vi.waitFor(() => expect(suggestResponse).toHaveBeenCalledTimes(2));
+
+    expect(suggestResponse.mock.calls.map(([request]) => request.requestId))
+      .toEqual(["suggestion-one", "suggestion-one"]);
+    expect(createRequestId).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("#pro-chat-messages")?.textContent)
+      .toContain("Suggested");
+    controller.destroy();
+  });
+
   it("drops in-memory chat when the document changes", async () => {
     const bridge: ProChatBridge = {
       models: vi.fn().mockResolvedValue({
