@@ -141,7 +141,7 @@ export class Mcp {
     const initialized = await this.send("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
-      clientInfo: { name: "thought", version: "0.1.0" },
+      clientInfo: { name: "thought", version: "0.1.1" },
     }, null);
     if (initialized.sessionId === null) {
       throw new Error("MCP initialize response did not establish a session");
