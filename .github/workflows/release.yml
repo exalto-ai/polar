@@ -329,6 +329,7 @@ jobs:
     permissions:
       contents: write
     env:
+      GH_REPO: ${{ github.repository }}
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
     steps:
