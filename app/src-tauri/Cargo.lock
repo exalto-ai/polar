@@ -4355,6 +4355,7 @@ name = "thought"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -4369,6 +4370,7 @@ dependencies = [
  "tempfile",
  "thought-markdown",
  "thought-schema",
+ "thought-store",
  "thoughtd",
  "ureq",
  "zeroize",
@@ -4441,6 +4443,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures",
+ "libc",
  "rmcp",
  "schemars 1.2.2",
  "serde",
@@ -4448,6 +4451,7 @@ dependencies = [
  "sha2",
  "thought-core",
  "thought-mcp",
+ "thought-store",
  "tokio",
  "tracing",
  "tracing-appender",

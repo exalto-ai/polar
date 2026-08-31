@@ -66,18 +66,53 @@ fn connection_id() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn connect() -> Result<Daemon, Box<dyn std::error::Error>> {
+    require_published_store_compatibility()?;
+    if discovery::discovery_path().exists() {
+        discovery::remove_definitively_stale_discovery()
+            .map_err(|error| format!("could not remove stale daemon discovery: {error}"))?;
+    }
     if let Some(daemon) = discovery::read() {
         if discovery::authenticated_reachable(&daemon) {
             return Ok(daemon);
         }
     } else if discovery::discovery_path().exists() {
-        return Err(format!(
-            "the daemon discovery record is invalid; quit Proof of Thought, then remove {}",
-            discovery::discovery_path().display()
-        )
-        .into());
+        let message = if discovery::read_published().is_some() {
+            "the daemon discovery record is invalid or belongs to an older running Proof of Thought daemon; open the current app once to diagnose it or complete its verified upgrade, and keep the discovery record with its store"
+                .to_string()
+        } else {
+            format!(
+                "the daemon discovery record is invalid; open Proof of Thought to diagnose it, and keep it with the published store instead of removing either file alone ({})",
+                discovery::discovery_path().display()
+            )
+        };
+        return Err(message.into());
     }
     spawn()
+}
+
+fn require_published_store_compatibility() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(published) = discovery::read_published() else {
+        return Ok(());
+    };
+    if published.store != discovery::default_db_path()
+        || !(1..=discovery::PROTOCOL_VERSION).contains(&published.protocol_version)
+    {
+        return Ok(());
+    }
+    match thought_store::inspect_compatibility(&published.store)? {
+        thought_store::StoreCompatibility::Current => Ok(()),
+        thought_store::StoreCompatibility::Missing => Err(format!(
+            "the published thought store is missing; Proof of Thought left {} untouched because stopping its daemon could discard an unlinked store",
+            discovery::discovery_path().display(),
+        )
+        .into()),
+        thought_store::StoreCompatibility::Unsupported => Err(format!(
+            "the published thought store uses an unsupported format; Proof of Thought left {} and {} untouched, and neither file should be removed without an explicit backup or migration",
+            published.store.display(),
+            discovery::discovery_path().display(),
+        )
+        .into()),
+    }
 }
 
 fn spawn() -> Result<Daemon, Box<dyn std::error::Error>> {
