@@ -324,9 +324,22 @@ absent. A plain stdio MCP server would let each agent client spawn its own daemo
 processes writing one SQLite store.
 
 **Cost:** startup performs a public instance check followed by an authenticated loopback
-probe, and the daemon holds process-lifetime home and store locks. Current stale discovery
-is replaced only by the new lock owner. An incompatible pre-lock discovery format still
-fails closed rather than risking a second authority during the transition.
+probe, and the daemon holds process-lifetime home and store locks. Discovery protocol
+numbers remain monotonic across released builds. During the protocol-9 to protocol-10
+transition, the daemon holds both deployed home-lock names as well as the store lock.
+Startup removes a dead known record only after conclusive process and lock checks. Store
+compatibility is checked before dead-record cleanup, at both live-process signal boundaries,
+and again while the store lock is held immediately before the final discovery unlink. It
+retires a live known predecessor only after that check plus the unchanged record, exact public
+service and version, listener-owning PID, and bundled executable all agree twice immediately
+before a graceful interrupt. The accepted unversioned store adopts format version 7 in one
+transaction. Versions 1 through 6 came from closed preview branches, so they are not released
+migration sources and remain untouched. Malformed, unknown, future, or ambiguous publishers
+still fail closed.
+Automatic cleanup and retirement are limited to the default store because the desktop app
+cannot safely infer how to relaunch a custom-store publisher. This makes ordinary upgrades
+automatic at the cost of platform-specific process and socket checks, while custom-store
+upgrades still require explicit operator action.
 
 ### AD-11 — ⌘Z is scoped to your own edits; agent runs get "Revert this run"
 Undoing a collaborator's edit is the classic violation and agents get no exception. But agent

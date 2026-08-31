@@ -56,3 +56,33 @@ jobs:
         working-directory: app
       - run: npm test
         working-directory: app
+
+  tauri:
+    # The desktop crate is intentionally outside the Rust workspace. A macOS
+    # gate exercises the process, socket, and sidecar checks used by upgrades.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+
+      - run: npm ci --prefix app
+      - run: npm run build --prefix app
+      - name: Stage host sidecars for Tauri
+        run: ./scripts/stage-sidecars.sh "$(rustc -vV | awk '/^host:/ { print $2 }')"
+      - run: cargo fmt --manifest-path app/src-tauri/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path app/src-tauri/Cargo.toml --all-targets --locked
+      - run: cargo test --manifest-path app/src-tauri/Cargo.toml --locked

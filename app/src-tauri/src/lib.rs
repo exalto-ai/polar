@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{
     io::{Read, Write},
+    path::Path,
     sync::atomic::{AtomicU64, Ordering},
 };
 use tauri_plugin_dialog::DialogExt;
@@ -403,24 +404,245 @@ fn new_window(
     Ok(label)
 }
 
-/// Reuse the published instance when its identity and bearer both work.
-/// Otherwise start a candidate: lifetime home and store locks decide whether
-/// that child may replace stale discovery, so clients never infer ownership
-/// from a PID or the presence of a file.
-fn ensure_daemon() -> Result<Daemon, String> {
-    if let Some(daemon) = discovery::read() {
-        if discovery::authenticated_reachable(&daemon) {
-            return Ok(daemon);
+fn replaceable_prior_protocol(protocol_version: u32) -> bool {
+    (1..discovery::PROTOCOL_VERSION).contains(&protocol_version)
+}
+
+fn replaceable_prior_daemon_at(
+    published: &discovery::PublishedDaemon,
+    expected_store: &Path,
+) -> bool {
+    replaceable_prior_protocol(published.protocol_version) && published.store == expected_store
+}
+
+fn replaceable_prior_daemon(published: &discovery::PublishedDaemon) -> bool {
+    replaceable_prior_daemon_at(published, &discovery::default_db_path())
+}
+
+fn published_store_is_upgradeable(
+    published: &discovery::PublishedDaemon,
+    expected_store: &Path,
+    discovery_path: &Path,
+) -> Result<bool, String> {
+    if published.store != expected_store {
+        return Ok(false);
+    }
+    match published.store.try_exists() {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "The published thought store is missing. Proof of Thought left the running daemon and {} untouched because stopping it could discard an unlinked store.",
+                discovery_path.display(),
+            ));
         }
-    } else if discovery::discovery_path().exists() {
+        Err(error) => {
+            return Err(format!(
+                "Proof of Thought could not verify the published store path without changing it, so it left the daemon and {} untouched: {error}",
+                discovery_path.display(),
+            ));
+        }
+    }
+    match thought_store::inspect_compatibility(&published.store) {
+        Ok(thought_store::StoreCompatibility::Current) => Ok(true),
+        Ok(thought_store::StoreCompatibility::Missing) => Err(format!(
+            "The published thought store disappeared while Proof of Thought was checking it. The daemon and {} were left untouched.",
+            discovery_path.display(),
+        )),
+        Ok(thought_store::StoreCompatibility::Unsupported) => Err(format!(
+            "The published thought store uses a format this build cannot safely upgrade. Proof of Thought left the daemon and both files untouched. Do not remove {} by itself. Install a build with a supported migration, or back up and remove both {} and {} only if you intend to discard this test data.",
+            discovery_path.display(),
+            published.store.display(),
+            discovery_path.display(),
+        )),
+        Err(error) => Err(format!(
+            "Proof of Thought could not inspect the published store without changing it, so it left the daemon and both files untouched: {error}. Keep {} and {} together until the store can be inspected safely.",
+            published.store.display(),
+            discovery_path.display(),
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn interrupt_process(pid: u32) -> std::io::Result<()> {
+    let pid = libc::pid_t::try_from(pid)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid daemon PID"))?;
+    if unsafe { libc::kill(pid, libc::SIGINT) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn interrupt_process(_: u32) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "verified daemon replacement is unavailable on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn process_already_gone(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn process_already_gone(_: &std::io::Error) -> bool {
+    false
+}
+
+/// Stop a known predecessor only after the unchanged record, exact public
+/// identity, listener owner, and bundled executable all agree twice. A stale
+/// or reused PID alone is never authority to signal a process.
+fn retire_verified_prior_daemon(
+    published: &discovery::PublishedDaemon,
+    expected_executable: &Path,
+) -> Result<bool, String> {
+    retire_verified_prior_daemon_at(
+        published,
+        expected_executable,
+        &discovery::discovery_path(),
+        &discovery::default_db_path(),
+    )
+}
+
+fn retire_verified_prior_daemon_at(
+    published: &discovery::PublishedDaemon,
+    expected_executable: &Path,
+    discovery_path: &Path,
+    expected_store: &Path,
+) -> Result<bool, String> {
+    if !replaceable_prior_daemon_at(published, expected_store) {
+        return Ok(false);
+    }
+
+    let verified = || -> Result<bool, String> {
+        Ok(
+            published_store_is_upgradeable(published, expected_store, discovery_path)?
+                && discovery::published_record_unchanged_at(discovery_path, published)
+                && discovery::published_identity_reachable(published)
+                && discovery::process_owns_published_listener(published.pid, &published.url)
+                && discovery::process_is_expected_daemon(published.pid, expected_executable),
+        )
+    };
+    if !verified()? {
+        return Ok(false);
+    }
+
+    // Repeat every observation at the signal boundary to narrow PID reuse and
+    // discovery replacement races. Any disagreement leaves the process alone.
+    if !verified()? {
+        return Ok(false);
+    }
+    if let Err(error) = interrupt_process(published.pid)
+        && !process_already_gone(&error)
+    {
         return Err(format!(
-            "The thought daemon discovery record uses an incompatible or invalid format. Quit any older Proof of Thought or thoughtd process, then remove {}.",
-            discovery::discovery_path().display()
+            "could not stop the verified prior thought daemon: {error}"
         ));
     }
 
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let endpoint_gone = !discovery::published_identity_reachable(published);
+        let process_gone = discovery::published_process_definitively_absent(published.pid);
+        if endpoint_gone && process_gone {
+            if !discovery_path.exists()
+                || !discovery::published_record_unchanged_at(discovery_path, published)
+            {
+                return Ok(true);
+            }
+            if discovery::remove_published_if_definitively_stale_at(discovery_path, published)
+                .map_err(|error| format!("could not remove retired daemon discovery: {error}"))?
+            {
+                return Ok(true);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    Err("the verified prior thought daemon did not stop within 5 seconds".into())
+}
+
+/// Reuse a current daemon, clean a conclusively dead known record, or retire a
+/// fully verified predecessor during an app upgrade. Malformed, unknown, and
+/// future publishers remain untouched and fail closed.
+fn ensure_daemon() -> Result<Daemon, String> {
     let thoughtd =
         find_binary("thoughtd").ok_or_else(|| "could not find the thoughtd binary".to_string())?;
+    let discovery_path = discovery::discovery_path();
+    let default_store = discovery::default_db_path();
+
+    // Store compatibility is part of discovery authority. Check it before a
+    // dead-row cleanup as well as at both live-process signal boundaries, so
+    // removing discovery can never bypass a fail-closed schema decision.
+    if let Some(published) = discovery::read_published()
+        && (1..=discovery::PROTOCOL_VERSION).contains(&published.protocol_version)
+        && published.store == default_store
+    {
+        published_store_is_upgradeable(&published, &default_store, &discovery_path)?;
+    }
+
+    if discovery::discovery_path().exists()
+        && discovery::remove_definitively_stale_discovery()
+            .map_err(|error| format!("could not remove stale daemon discovery: {error}"))?
+    {
+        return ensure_daemon();
+    }
+
+    if discovery::read().is_some() {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while let Some(daemon) = discovery::read() {
+            if discovery::authenticated_reachable(&daemon) {
+                return Ok(daemon);
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "A thought daemon is already published but did not accept its discovery capability. Quit any running Proof of Thought or thoughtd process, then remove {} if the problem persists.",
+                    discovery_path.display()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    if discovery_path.exists() {
+        let mut retirement_error = None;
+        if let Some(published) = discovery::read_published()
+            && replaceable_prior_daemon(&published)
+        {
+            match retire_verified_prior_daemon(&published, &thoughtd) {
+                Ok(true) => return ensure_daemon(),
+                Ok(false) => {}
+                Err(error) => retirement_error = Some(error),
+            }
+        }
+
+        // Another app may have completed retirement and atomically published
+        // the current daemon while this launch was classifying the old row.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(daemon) = discovery::read()
+                && discovery::authenticated_reachable(&daemon)
+            {
+                return Ok(daemon);
+            }
+            if !discovery_path.exists() {
+                return ensure_daemon();
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if let Some(error) = retirement_error {
+            return Err(error);
+        }
+        return Err(format!(
+            "The thought daemon discovery record is malformed, unknown, or could not be safely verified for automatic upgrade. Quit any running Proof of Thought or thoughtd process, then reopen the current app. If the problem persists, keep {} and its database together and use a backed-up app-data reset. Do not remove the discovery record by itself.",
+            discovery_path.display()
+        ));
+    }
 
     Command::new(&thoughtd)
         .stdin(Stdio::null())
@@ -523,9 +745,143 @@ pub fn run() {
 mod tests {
     use super::{
         atomic_write, cascade_axis, document_window_path, document_wording_revision,
+        replaceable_prior_daemon, replaceable_prior_protocol, retire_verified_prior_daemon_at,
         safe_suggested_name, serialize_document,
     };
+    use std::io::{Read as _, Write as _};
     use thought_schema::{Mark, Node};
+
+    const PRIOR_DAEMON_CHILD: &str = "THOUGHT_PRIOR_DAEMON_CHILD";
+    const PRIOR_DISCOVERY_PATH: &str = "THOUGHT_PRIOR_DISCOVERY_PATH";
+
+    #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+    struct PriorDaemonGuard {
+        child: Option<std::process::Child>,
+    }
+
+    #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+    impl PriorDaemonGuard {
+        fn stop(mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+    impl Drop for PriorDaemonGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+    fn spawn_prior_daemon(
+        directory: &std::path::Path,
+        discovery_path: &std::path::Path,
+    ) -> (
+        PriorDaemonGuard,
+        thoughtd::discovery::PublishedDaemon,
+        std::path::PathBuf,
+    ) {
+        let executable = std::env::current_exe().unwrap();
+        let child = std::process::Command::new(&executable)
+            .args(["--exact", "tests::prior_daemon_child", "--nocapture"])
+            .env(PRIOR_DAEMON_CHILD, "1")
+            .env(PRIOR_DISCOVERY_PATH, discovery_path)
+            .env("THOUGHT_HOME", directory)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let guard = PriorDaemonGuard { child: Some(child) };
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let published = loop {
+            if let Some(published) = thoughtd::discovery::read_published_at(discovery_path) {
+                break published;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "prior daemon did not publish discovery"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(published.pid, pid);
+        assert_eq!(published.protocol_version, 9);
+        (guard, published, executable)
+    }
+
+    #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+    fn create_version_six_store(path: &std::path::Path) {
+        drop(thought_store::Store::open(path).unwrap());
+        let mut database = std::fs::read(path).unwrap();
+        assert!(database.starts_with(b"SQLite format 3\0"));
+        database[60..64].copy_from_slice(&6_u32.to_be_bytes());
+        std::fs::write(path, database).unwrap();
+        assert_eq!(
+            thought_store::inspect_compatibility(path).unwrap(),
+            thought_store::StoreCompatibility::Unsupported
+        );
+    }
+
+    #[test]
+    fn prior_daemon_child() {
+        if std::env::var_os(PRIOR_DAEMON_CHILD).is_none() {
+            return;
+        }
+        let discovery = std::path::PathBuf::from(
+            std::env::var_os(PRIOR_DISCOVERY_PATH).expect("prior discovery path"),
+        );
+        let store = discovery.with_file_name("thought.db");
+        let _home_lock = thoughtd::discovery::try_lock_home()
+            .unwrap()
+            .expect("prior daemon owns its home");
+        let _store_lock = thoughtd::discovery::try_lock_store(&store)
+            .unwrap()
+            .expect("prior daemon owns its store");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = serde_json::json!({
+            "protocol_version": 9,
+            "pid": std::process::id(),
+            "port": port,
+            "url": format!("http://127.0.0.1:{port}/mcp"),
+            "store": store,
+            "token": "old-mcp",
+            "editor_token": "old-editor",
+            "provider_token": "old-provider"
+        });
+        std::fs::write(&discovery, serde_json::to_vec(&body).unwrap()).unwrap();
+
+        loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let response = serde_json::json!({
+                "service": "ai.exalto.thoughtd",
+                "protocol_version": 9
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            )
+            .unwrap();
+        }
+    }
 
     #[test]
     fn export_projection_preserves_title_and_font_size_metadata() {
@@ -614,5 +970,214 @@ mod tests {
             "complete new contents"
         );
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn only_known_predecessor_protocols_are_replaceable() {
+        assert!(replaceable_prior_protocol(1));
+        assert!(replaceable_prior_protocol(2));
+        assert!(replaceable_prior_protocol(9));
+        assert!(!replaceable_prior_protocol(0));
+        assert!(!replaceable_prior_protocol(
+            thoughtd::discovery::PROTOCOL_VERSION
+        ));
+        assert!(!replaceable_prior_protocol(
+            thoughtd::discovery::PROTOCOL_VERSION + 1
+        ));
+    }
+
+    #[test]
+    fn custom_store_predecessor_is_not_automatically_replaced() {
+        let directory = tempfile::tempdir().unwrap();
+        let discovery_path = directory.path().join("daemon.json");
+        let custom_store = directory.path().join("custom.db");
+        let body = serde_json::json!({
+            "protocol_version": 9,
+            "pid": std::process::id(),
+            "port": 4567,
+            "url": "http://127.0.0.1:4567/mcp",
+            "store": custom_store,
+            "token": "old-mcp",
+            "editor_token": "old-editor",
+            "provider_token": "old-provider"
+        });
+        std::fs::write(&discovery_path, serde_json::to_vec(&body).unwrap()).unwrap();
+        let published = thoughtd::discovery::read_published_at(&discovery_path).unwrap();
+
+        assert!(!replaceable_prior_daemon(&published));
+    }
+
+    #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn protocol_nine_with_version_six_store_is_not_signalled_or_modified() {
+        let directory = tempfile::tempdir().unwrap();
+        let discovery_path = directory.path().join("daemon.json");
+        let store_path = directory.path().join("thought.db");
+        create_version_six_store(&store_path);
+        let store_before = std::fs::read(&store_path).unwrap();
+        let (child, published, executable) = spawn_prior_daemon(directory.path(), &discovery_path);
+        let discovery_before = std::fs::read(&discovery_path).unwrap();
+
+        let result =
+            retire_verified_prior_daemon_at(&published, &executable, &discovery_path, &store_path);
+
+        assert!(
+            result.is_err(),
+            "unsupported store unexpectedly retired: {result:?}"
+        );
+        assert!(thoughtd::discovery::process_is_expected_daemon(
+            published.pid,
+            &executable
+        ));
+        assert!(thoughtd::discovery::published_identity_reachable(
+            &published
+        ));
+        assert_eq!(std::fs::read(&discovery_path).unwrap(), discovery_before);
+        assert_eq!(std::fs::read(&store_path).unwrap(), store_before);
+
+        child.stop();
+    }
+
+    #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn protocol_nine_with_missing_store_is_not_signalled_or_recreated() {
+        let directory = tempfile::tempdir().unwrap();
+        let discovery_path = directory.path().join("daemon.json");
+        let store_path = directory.path().join("thought.db");
+        let (child, published, executable) = spawn_prior_daemon(directory.path(), &discovery_path);
+        assert!(!store_path.exists());
+        let discovery_before = std::fs::read(&discovery_path).unwrap();
+
+        let result =
+            retire_verified_prior_daemon_at(&published, &executable, &discovery_path, &store_path);
+
+        assert!(
+            result.is_err(),
+            "missing store unexpectedly retired: {result:?}"
+        );
+        assert!(thoughtd::discovery::process_is_expected_daemon(
+            published.pid,
+            &executable
+        ));
+        assert!(thoughtd::discovery::published_identity_reachable(
+            &published
+        ));
+        assert_eq!(std::fs::read(&discovery_path).unwrap(), discovery_before);
+        assert!(!store_path.exists());
+
+        child.stop();
+    }
+
+    #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn verified_protocol_nine_daemon_is_retired_without_touching_its_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let discovery_path = directory.path().join("daemon.json");
+        let store_path = directory.path().join("thought.db");
+        drop(thought_store::Store::open(&store_path).unwrap());
+        let store_before = std::fs::read(&store_path).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(&executable)
+            .args(["--exact", "tests::prior_daemon_child", "--nocapture"])
+            .env(PRIOR_DAEMON_CHILD, "1")
+            .env(PRIOR_DISCOVERY_PATH, &discovery_path)
+            .env("THOUGHT_HOME", directory.path())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let published = loop {
+            if let Some(published) = thoughtd::discovery::read_published_at(&discovery_path) {
+                break published;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("prior daemon did not publish discovery");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(published.pid, pid);
+        assert_eq!(published.protocol_version, 9);
+
+        let wrong_executable = tempfile::NamedTempFile::new().unwrap();
+        assert_eq!(
+            retire_verified_prior_daemon_at(
+                &published,
+                wrong_executable.path(),
+                &discovery_path,
+                &store_path,
+            ),
+            Ok(false)
+        );
+        assert!(thoughtd::discovery::process_is_expected_daemon(
+            pid,
+            &executable
+        ));
+
+        let original_discovery = std::fs::read(&discovery_path).unwrap();
+        let mut changed_secret: serde_json::Value =
+            serde_json::from_slice(&original_discovery).unwrap();
+        changed_secret["token"] = "different-secret-same-public-metadata".into();
+        std::fs::write(
+            &discovery_path,
+            serde_json::to_vec(&changed_secret).unwrap(),
+        )
+        .unwrap();
+        assert!(!thoughtd::discovery::published_record_unchanged_at(
+            &discovery_path,
+            &published
+        ));
+        assert_eq!(
+            retire_verified_prior_daemon_at(&published, &executable, &discovery_path, &store_path,),
+            Ok(false)
+        );
+        assert!(thoughtd::discovery::process_is_expected_daemon(
+            pid,
+            &executable
+        ));
+        std::fs::write(&discovery_path, original_discovery).unwrap();
+
+        let waiter = std::thread::spawn(move || child.wait());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let retire = |barrier: std::sync::Arc<std::sync::Barrier>| {
+            let published = published.clone();
+            let executable = executable.clone();
+            let discovery_path = discovery_path.clone();
+            let store_path = store_path.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                retire_verified_prior_daemon_at(
+                    &published,
+                    &executable,
+                    &discovery_path,
+                    &store_path,
+                )
+            })
+        };
+        let first = retire(barrier.clone());
+        let second = retire(barrier.clone());
+        barrier.wait();
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        if first.is_err()
+            || second.is_err()
+            || !matches!((&first, &second), (Ok(true), _) | (_, Ok(true)))
+        {
+            unsafe {
+                libc::kill(libc::pid_t::try_from(pid).unwrap(), libc::SIGKILL);
+            }
+        }
+        let _ = waiter.join().unwrap();
+
+        assert!(first.is_ok(), "first upgrader failed: {first:?}");
+        assert!(second.is_ok(), "second upgrader failed: {second:?}");
+        assert!(
+            matches!((&first, &second), (Ok(true), _) | (_, Ok(true))),
+            "one upgrader must retire the predecessor: {first:?}, {second:?}"
+        );
+        assert!(!discovery_path.exists());
+        assert_eq!(std::fs::read(&store_path).unwrap(), store_before);
     }
 }
