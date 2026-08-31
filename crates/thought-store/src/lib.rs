@@ -7,13 +7,42 @@
 //! the op log exists for *provenance* and is never compacted away, because the
 //! activity feed and per-run revert read it (AD-13).
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use std::collections::HashSet;
 use std::path::Path;
 
 mod schema;
 
 pub use rusqlite::Error as SqlError;
+
+/// A read-only startup decision. Only accepted version 0 and exact current
+/// version 7 stores may be opened by this build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreCompatibility {
+    Missing,
+    Current,
+    Unsupported,
+}
+
+/// Inspect an existing store without creating it or running persistent
+/// pragmas or schema DDL. A missing path is reported separately so callers
+/// deciding whether to stop a published daemon cannot treat absence as safe.
+pub fn inspect_compatibility(path: impl AsRef<Path>) -> Result<StoreCompatibility, SqlError> {
+    let path = path.as_ref();
+    if !path
+        .try_exists()
+        .map_err(|_| SqlError::InvalidPath(path.to_path_buf()))?
+    {
+        return Ok(StoreCompatibility::Missing);
+    }
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    classify_connection(&connection)
+}
 
 /// Who wrote an update. Kept out of the CRDT because Yjs cannot carry it
 /// (AD-1), and retrofitting it later would leave all prior history anonymous
@@ -208,6 +237,75 @@ pub struct Store {
     conn: Connection,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct SchemaObject {
+    object_type: String,
+    name: String,
+    table_name: String,
+    sql: Option<String>,
+}
+
+fn schema_objects(connection: &Connection) -> Result<Vec<SchemaObject>, SqlError> {
+    let mut statement = connection.prepare(
+        "SELECT type, name, tbl_name, sql
+         FROM sqlite_schema
+         WHERE name NOT GLOB 'sqlite_*'
+         ORDER BY type, name, tbl_name",
+    )?;
+    statement
+        .query_map([], |row| {
+            Ok(SchemaObject {
+                object_type: row.get(0)?,
+                name: row.get(1)?,
+                table_name: row.get(2)?,
+                sql: row.get(3)?,
+            })
+        })?
+        .collect()
+}
+
+fn expected_schema_objects() -> Result<Vec<SchemaObject>, SqlError> {
+    let reference = Connection::open_in_memory()?;
+    reference.execute_batch(schema::SCHEMA)?;
+    schema_objects(&reference)
+}
+
+fn schema_is_adoptable_v0(connection: &Connection) -> Result<bool, SqlError> {
+    let actual = schema_objects(connection)?;
+    Ok(actual.is_empty() || actual == expected_schema_objects()?)
+}
+
+fn schema_is_current(connection: &Connection) -> Result<bool, SqlError> {
+    Ok(schema_objects(connection)? == expected_schema_objects()?)
+}
+
+fn classify_connection(connection: &Connection) -> Result<StoreCompatibility, SqlError> {
+    let version =
+        connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+    match version {
+        0 if schema_is_adoptable_v0(connection)? => Ok(StoreCompatibility::Current),
+        schema::CURRENT_VERSION if schema_is_current(connection)? => {
+            Ok(StoreCompatibility::Current)
+        }
+        _ => Ok(StoreCompatibility::Unsupported),
+    }
+}
+
+fn validate_foreign_keys(connection: &Connection) -> Result<(), SqlError> {
+    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
+    if statement.exists([])? {
+        return Err(schema_error("thought store foreign-key validation failed"));
+    }
+    Ok(())
+}
+
+fn schema_error(message: &str) -> SqlError {
+    SqlError::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_SCHEMA),
+        Some(message.to_string()),
+    )
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Store, SqlError> {
         Store::wrap(Connection::open(path)?)
@@ -217,7 +315,29 @@ impl Store {
         Store::wrap(Connection::open_in_memory()?)
     }
 
-    fn wrap(conn: Connection) -> Result<Store, SqlError> {
+    fn wrap(mut conn: Connection) -> Result<Store, SqlError> {
+        let compatibility = classify_connection(&conn)?;
+        if compatibility == StoreCompatibility::Unsupported {
+            return Err(schema_error("unsupported thought store schema version"));
+        }
+        let version = conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+        if version == 0 {
+            conn.pragma_update(None, "foreign_keys", true)?;
+            let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let locked_version =
+                transaction.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+            if locked_version != 0 || !schema_is_adoptable_v0(&transaction)? {
+                return Err(schema_error("thought store changed during schema adoption"));
+            }
+            transaction.execute_batch(schema::SCHEMA)?;
+            if !schema_is_current(&transaction)? {
+                return Err(schema_error("thought store schema adoption failed"));
+            }
+            validate_foreign_keys(&transaction)?;
+            transaction.pragma_update(None, "user_version", schema::CURRENT_VERSION)?;
+            transaction.commit()?;
+        }
+
         // WAL so a reader never blocks the writer. NORMAL trades a fsync per
         // commit for the small risk of losing the last few updates on power
         // loss — acceptable because the relay and the peer replicas hold them
@@ -225,13 +345,7 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let store = Store { conn };
-        store.migrate()?;
-        Ok(store)
-    }
-
-    fn migrate(&self) -> Result<(), SqlError> {
-        self.conn.execute_batch(schema::SCHEMA)
+        Ok(Store { conn })
     }
 
     pub fn upsert_actor(&self, actor: &Actor) -> Result<(), SqlError> {
