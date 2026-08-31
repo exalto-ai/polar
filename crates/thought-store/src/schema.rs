@@ -1,5 +1,10 @@
 //! The store's DDL, kept verbatim so it can be diffed against the ADR.
 
+/// Versions 1 through 6 belonged to closed preview branches. The accepted
+/// unversioned schema adopts version 7 so future released migrations remain
+/// monotonic and cannot be confused with those previews.
+pub const CURRENT_VERSION: i64 = 7;
+
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS documents (
   id          TEXT PRIMARY KEY,
