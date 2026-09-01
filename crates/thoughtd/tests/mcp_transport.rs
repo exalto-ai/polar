@@ -474,6 +474,7 @@ fn the_stdio_shim_recovers_after_idle_session_cleanup_without_restoring_edit_acc
         .args(["--connection", &fixture.connection_id])
         .env("THOUGHT_HOME", home.path())
         .env("THOUGHT_TEST_MCP_IDLE_MS", "150")
+        .env_remove("THOUGHT_TEST_MCP_KEEPALIVE_MS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -584,6 +585,118 @@ fn the_stdio_shim_recovers_after_idle_session_cleanup_without_restoring_edit_acc
 
     drop(stdin);
     assert!(shim.wait().expect("wait for shim").success());
+    if let Some(pid) = discovery["pid"].as_u64() {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+}
+
+#[test]
+fn the_stdio_shim_keepalive_preserves_the_same_session_grant_while_the_client_is_open() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let fixture = configure_reviewer(home.path());
+    let mut shim = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
+        .args(["--connection", &fixture.connection_id])
+        .env("THOUGHT_HOME", home.path())
+        .env("THOUGHT_TEST_MCP_IDLE_MS", "800")
+        .env("THOUGHT_TEST_MCP_KEEPALIVE_MS", "50")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn shim");
+    let mut stdin = shim.stdin.take().expect("piped stdin");
+    let mut stdout = BufReader::new(shim.stdout.take().expect("piped stdout"));
+
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "keepalive-test", "version": "1"}}
+        }),
+    );
+    assert_eq!(read_stdio_response(&mut stdout)["id"], 1);
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
+        }),
+    );
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "request_direct_edit", "arguments": {
+                "doc_id": fixture.doc_id, "agent": "reviewer", "model": "reported-model"
+            }}
+        }),
+    );
+    let requested = tool_json(&read_stdio_response(&mut stdout));
+    let request_id = requested["request"]["request_id"].as_str().unwrap();
+
+    let published = home.path().join("daemon.json");
+    let discovery: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&published).unwrap()).unwrap();
+    let editor_token = discovery["token"].as_str().unwrap();
+    let approve_url = discovery["url"].as_str().unwrap().replace(
+        "/mcp",
+        &format!(
+            "/editor/documents/{}/direct-edit-requests/{request_id}/approve",
+            fixture.doc_id
+        ),
+    );
+    ureq::post(&approve_url)
+        .header("Authorization", &format!("Bearer {editor_token}"))
+        .send_empty()
+        .expect("editor approved direct edit");
+
+    // This is more than twice the daemon's shortened idle threshold. Only
+    // standard MCP ping traffic from the still-open stdio bridge can preserve
+    // this exact session and its grant across the quiet period.
+    std::thread::sleep(std::time::Duration::from_millis(1_800));
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "replace_block", "arguments": {
+                "doc_id": fixture.doc_id, "block_id": fixture.block_id,
+                "markdown": "The live session kept its grant", "version": fixture.version,
+                "agent": "reviewer", "model": "reported-model"
+            }}
+        }),
+    );
+    let edited = read_stdio_response(&mut stdout);
+    assert!(
+        edited.get("result").is_some(),
+        "live session lost its direct-edit grant: {edited}"
+    );
+
+    let access_url = discovery["url"]
+        .as_str()
+        .unwrap()
+        .replace("/mcp", "/editor/direct-edit-access");
+    let active_grants = || {
+        let mut response = ureq::get(&access_url)
+            .header("Authorization", &format!("Bearer {editor_token}"))
+            .call()
+            .expect("editor read direct edit access");
+        let access: serde_json::Value = response.body_mut().read_json().unwrap();
+        access["grants"].as_array().unwrap().len()
+    };
+    assert_eq!(active_grants(), 1);
+
+    // An abrupt process exit cannot send DELETE, but it does stop the pings.
+    // rmcp's unchanged idle cleanup then closes this session and revokes its
+    // grant within the shortened test threshold.
+    shim.kill().expect("kill shim");
+    drop(stdin);
+    let _ = shim.wait().expect("wait for killed shim");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while active_grants() != 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(active_grants(), 0, "crashed shim left its grant active");
+
     if let Some(pid) = discovery["pid"].as_u64() {
         let _ = Command::new("kill").arg(pid.to_string()).status();
     }

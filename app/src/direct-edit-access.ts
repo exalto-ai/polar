@@ -93,9 +93,10 @@ function compactDocumentId(value: string): string {
 }
 
 /**
- * Own the editor-only approval surface for session-scoped direct editing.
- * Suggestions remain the default. A grant is visible globally and ends when
- * its authenticated AI session ends or the user revokes it.
+ * Own the editor-only approval surface for connection-lifetime direct editing.
+ * Suggestions remain the default. A grant is visible globally, remains bound
+ * to one authenticated daemon session, and ends when that connection closes or
+ * the user revokes it.
  */
 export function installDirectEditAccess(
   root: Document,

@@ -75,7 +75,7 @@ beforeEach(() => {
     <aside id="ai-support-sidebar">
       <section id="direct-edit-active" hidden>
         <h3>Direct editing on</h3>
-        <p>Direct edits do not have Accept or Reject. Suggestions still do.</p>
+        <p>These AI connections can edit immediately while they remain open. Direct edits do not have Accept or Reject. Suggestions still do.</p>
         <p id="direct-edit-active-error" role="alert" hidden></p>
         <ul id="direct-edit-grant-list"></ul>
       </section>
@@ -84,7 +84,7 @@ beforeEach(() => {
       <section role="alertdialog" tabindex="-1">
         <h2 id="direct-edit-prompt-title"></h2>
         <p id="direct-edit-prompt-meta"></p>
-        <p id="direct-edit-prompt-description">This connection wants to edit this document directly while it remains connected. Its app, model, and identity are reported, not verified.</p>
+        <p id="direct-edit-prompt-description">This connection wants to edit this document directly while it remains open. Its app, model, and identity are reported, not verified.</p>
         <p id="direct-edit-prompt-default">Keep suggestions leaves the current workflow unchanged: every proposed change appears with Accept and Reject.</p>
         <p id="direct-edit-prompt-error" role="alert" hidden></p>
         <button id="direct-edit-keep-suggestions"></button>

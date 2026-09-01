@@ -71,10 +71,10 @@ replicate to every window and survive restart.
 
 A reviewer may separately call `request_direct_edit` for one document. Nothing changes while the
 request is pending. If the user approves it in the native editor, that configured connection may
-use the block-level edit tools immediately for that document until the daemon-issued MCP session
-ends. The grant cannot create, trash, or restore documents, does not transfer to a replacement
-session, and does not remove `suggest_change`. A transport without a daemon session stays
-suggestion-only.
+use the block-level edit tools immediately for that document while the daemon-issued MCP session
+remains connected. The configured stdio shim keeps that session alive through idle periods. The
+grant cannot create, trash, or restore documents, does not transfer to a replacement session, and
+does not remove `suggest_change`. A transport without a daemon session stays suggestion-only.
 
 ### AD-6 — Actor identity now, authentication later
 
@@ -277,7 +277,7 @@ delete_block(doc_id, block_id, version)
 replace_text(doc_id, block_id, find, replace, occurrence?, version)
 ```
 
-Configured reviewers can request temporary direct access with:
+Configured reviewers can request connection-lifetime direct access with:
 
 ```
 request_direct_edit(doc_id, model?)
@@ -476,15 +476,20 @@ window briefly hides current sources while a local edit is still saving.
 The bundled editor writes through the daemon's observed editor routes. Durable reviewer
 credentials can read and propose. Direct editing is a separate, explicit, session-scoped capability,
 bound to one credential, daemon-issued MCP session, and document. The user may revoke it, and it
-ends on connection change, normal session close, or bounded liveness cleanup after an abrupt or
-inactive transport. It never transfers to a replacement session. Reviewers still cannot create,
-trash, or restore documents. Built-in provider chat remains suggestion-only.
+has no countdown. It lasts while the configured AI connection remains open, including periods with
+no tool calls, and ends on connection change, normal session close, or bounded liveness cleanup
+after an abrupt disappearance. It never transfers to a replacement session. Reviewers still cannot
+create, trash, or restore documents. Built-in provider chat remains suggestion-only.
 
 **Cost:** immediate reviewer edits bypass Accept/Reject until the user revokes access or that MCP
-session ends. A clean stdio shutdown closes its daemon session promptly. The transport also closes
-a session after about five minutes without MCP traffic, which bounds cleanup after an abrupt exit
-but means an open, inactive client must request direct access again when it resumes. Newer
-stateless MCP transports provide no session identity and therefore cannot receive this capability.
+session ends. The configured stdio shim quietly sends standard MCP pings so an open, idle client
+keeps the same session and grant. A clean shutdown closes its daemon session promptly. If the client
+or shim disappears unexpectedly, keepalives stop and daemon cleanup revokes the grant within
+roughly five minutes of the last activity. Direct HTTP clients must manage their own ping lifecycle.
+An alive but hung client with an open stdio pipe may retain the grant until manual revocation,
+connection reset or removal, daemon restart, or eventual close. This is the explicit cost of using
+connection lifetime rather than a short grant timer. Newer stateless MCP transports provide no
+session identity and therefore cannot receive this capability.
 
 ### AD-20 — One product name and one machine namespace
 
@@ -512,10 +517,11 @@ credential, document, daemon-issued MCP session, and active grant. Create and do
 tools remain unavailable to reviewer connections.
 
 The connection screen shows the last time a credential was used and any model name the client
-reported. This is historical activity, not live presence, and neither field verifies the app,
-provider, or model. ChatGPT desktop, Codex, Claude Desktop, and Claude Code each get setup text for
-their own configuration format. Claude Desktop receives JSON to merge into its existing config;
-the other clients receive one copyable command.
+reported. Last-used time is historical connection activity and may include the stdio bridge's
+standard MCP keepalive. It is not a document edit, model action, or verified live presence, and
+neither field verifies the app, provider, or model. ChatGPT desktop, Codex, Claude Desktop, and
+Claude Code each get setup text for their own configuration format. Claude Desktop receives JSON
+to merge into its existing config; the other clients receive one copyable command.
 
 This authenticates one configured local Proof of Thought ingress. It does not authenticate the
 calling app, provider, model, person, or conversation; those remain reported claims under AD-6.

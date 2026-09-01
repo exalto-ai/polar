@@ -1,7 +1,7 @@
 # Reviewer suggestions
 
 Configured reviewers propose changes by default. They can edit document content immediately only
-while the user has granted temporary direct access for that document and MCP session.
+while the user has granted direct access for that document and connected MCP session.
 
 ## Flow
 
@@ -33,10 +33,11 @@ not read the local desktop configuration. ChatGPT desktop and Codex share local 
 on the same Mac. Claude Desktop and Claude Code have separate setup paths.
 
 `Not used yet` means the credential has not authenticated a request since it was created or reset.
-`Last used` is historical local activity, not live presence. A displayed model is explicitly
-reported by the client and is not provider-verified.
+`Last used` is historical local connection activity and may include the stdio bridge's standard
+MCP keepalive. It is not a document edit, model action, or verified live presence. A displayed
+model is explicitly reported by the client and is not provider-verified.
 
-## Temporary direct editing
+## Connection-lifetime direct editing
 
 Suggestions remain the default. A configured reviewer can call `request_direct_edit` for one
 document, and the request appears in the native editor. While it is pending, denied, or expired,
@@ -49,13 +50,20 @@ block ids, pass through the daemon's normal authorization and version checks, an
 reported MCP activity. The app, provider, model, person, and conversation remain self-reported,
 not verified.
 
-The grant is in-memory, session-scoped, and narrower than the durable reviewer credential. It ends
-when the user revokes it, the connection is changed, reset, or removed, or the MCP session closes.
-It does not transfer to a replacement session. A clean stdio shutdown closes the daemon session
-promptly. The transport also closes a session after about five minutes without MCP traffic. This
-bounds cleanup if a client disappears, but an open, inactive client must request direct access
-again after it reconnects. Transports that do not provide a daemon-issued session identity stay
-suggestion-only.
+The grant is in-memory, session-scoped, and narrower than the durable reviewer credential. It has
+no countdown and lasts while that configured AI connection remains open, including periods with
+no tool calls. It ends when the user revokes it, the connection is changed, reset, or removed, or
+the MCP session closes. It does not transfer to a replacement session. The configured stdio shim
+quietly keeps an open session alive. A normal shutdown closes the daemon session and revokes the
+grant promptly. If the client or shim disappears without closing, keepalives stop and bounded
+daemon cleanup revokes the grant within roughly five minutes of the last activity. Direct HTTP
+clients must manage their own standard MCP ping lifecycle. Transports that do not provide a
+daemon-issued session identity stay suggestion-only.
+
+Connection lifetime is deliberately observable and revocable in the editor. An alive but hung AI
+client whose stdio connection remains open can keep receiving successful keepalive responses and
+therefore retain its grant. The user can revoke that grant at any time. Connection reset, removal,
+daemon restart, or an eventual close also ends it.
 
 Reviewer tool discovery includes the guarded block-edit tools so clients that cache their tool
 list can use them after approval. Their presence is not a grant. The daemon checks the active

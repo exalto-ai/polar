@@ -47,7 +47,7 @@
         <section class="direct-edit-active" id="direct-edit-active" aria-labelledby="direct-edit-active-title" aria-live="polite" hidden>
           <span class="eyebrow">Direct access</span>
           <h3 id="direct-edit-active-title">Direct editing on</h3>
-          <p>These AI connections can edit immediately while they remain connected. Direct edits do not have Accept or Reject. Suggestions still do.</p>
+          <p>These AI connections can edit immediately while they remain open. Direct edits do not have Accept or Reject. Suggestions still do.</p>
           <p class="reviewer-error" id="direct-edit-active-error" role="alert" hidden></p>
           <ul id="direct-edit-grant-list"></ul>
         </section>
@@ -79,6 +79,7 @@
               <button class="ghost" id="reviewer-add" type="button">Add reviewer</button>
             </div>
           </div>
+          <p class="ai-sidebar-note">Last used can include a quiet connection check. It does not mean the AI edited this document.</p>
           <p id="reviewer-error" class="reviewer-error" role="alert" hidden></p>
           <p id="reviewer-empty" class="ai-sidebar-note">No connected reviewers yet.</p>
           <ul id="reviewer-list" class="reviewer-list"></ul>
@@ -269,7 +270,7 @@
         <span class="eyebrow">Direct editing request</span>
         <h2 id="direct-edit-prompt-title"></h2>
         <p class="direct-edit-prompt-meta" id="direct-edit-prompt-meta"></p>
-        <p id="direct-edit-prompt-description">This connection wants to edit this document directly while it remains connected. Its app, model, and identity are reported, not verified.</p>
+        <p id="direct-edit-prompt-description">This connection wants to edit this document directly while it remains open. Its app, model, and identity are reported, not verified.</p>
         <p id="direct-edit-prompt-default">Keep suggestions leaves the current workflow unchanged: every proposed change appears with Accept and Reject.</p>
         <p class="reviewer-error" id="direct-edit-prompt-error" role="alert" hidden></p>
         <div class="direct-edit-actions">
