@@ -59,15 +59,22 @@ choice, not a storage one.
 No attempt to model rich text as rows. SQLite holds binary Yjs update frames, periodic
 compacted snapshots, actor records, and an FTS index over the markdown projection.
 
-### AD-5 — Agent changes are block-addressed and reviewer changes are suggestions
+### AD-5: Agent changes are block-addressed and reviewer changes default to suggestions
 
 There is deliberately **no `update_document(id, full_markdown)` tool**. Whole-document
 replacement produces a diff touching every block, destroys concurrent human edits, and
 makes attribution meaningless. Agent tools address blocks by ID and edit ranges (§4).
 
-Configured reviewers cannot call the direct-write tools. They can submit one normalized,
-block-addressed patch with `suggest_change`; the local editor accepts or rejects it.
-Suggestions live in the document CRDT so they replicate to every window and survive restart.
+Configured reviewers submit one normalized, block-addressed patch with `suggest_change` by
+default; the local editor accepts or rejects it. Suggestions live in the document CRDT so they
+replicate to every window and survive restart.
+
+A reviewer may separately call `request_direct_edit` for one document. Nothing changes while the
+request is pending. If the user approves it in the native editor, that configured connection may
+use the block-level edit tools immediately for that document until the daemon-issued MCP session
+ends. The grant cannot create, trash, or restore documents, does not transfer to a replacement
+session, and does not remove `suggest_change`. A transport without a daemon session stays
+suggestion-only.
 
 ### AD-6 — Actor identity now, authentication later
 
@@ -259,8 +266,9 @@ much as for the window: "who wrote this paragraph" is a question an agent asks b
 rewriting someone's work. A block with no entry is unattributed, which is not the same as
 belonging to the caller (M2.8).
 
-**Direct write** — unavailable to configured reviewer credentials. Every call takes the
-`version` from the last read.
+**Direct write.** Internal clients can call these tools immediately. Configured reviewers can call
+them only for a document and daemon-issued MCP session with an active user-approved direct-edit
+grant. Every call takes the `version` from the last read.
 
 ```
 replace_block(doc_id, block_id, markdown, version)
@@ -268,6 +276,17 @@ insert_blocks(doc_id, after=block_id|"start", markdown, version)
 delete_block(doc_id, block_id, version)
 replace_text(doc_id, block_id, find, replace, occurrence?, version)
 ```
+
+Configured reviewers can request temporary direct access with:
+
+```
+request_direct_edit(doc_id, model?)
+```
+
+Tool discovery exposes the request and guarded block-edit tools before approval because some MCP
+clients cache their tool list. Their presence is not authorization. Every reviewer edit rechecks
+the connection credential, document scope, daemon-issued session, and current grant. Reviewers
+cannot call document creation or lifecycle tools.
 
 On a stale `version`, the daemon **warns and proceeds** rather than rejecting — the CRDT
 merges correctly regardless; the risk is semantic (the agent reasoned about text that has
@@ -452,15 +471,20 @@ historical questions, and legacy content stays unknown. Exact editor ranges pay 
 the op log answers history; neither justifies inventing missing provenance for the third. The
 window briefly hides current sources while a local edit is still saving.
 
-### AD-15 — The local editor writes directly; configured reviewers propose
+### AD-15: The local editor writes directly; configured reviewers propose by default
 
 The bundled editor writes through the daemon's observed editor routes. Durable reviewer
-credentials can read and propose but cannot directly edit, create, trash, or restore. A
-future direct-write grant must be a separate, expiring session capability if the product
-needs one; it is not a dormant permission flag in the current protocol.
+credentials can read and propose. Direct editing is a separate, explicit, session-scoped capability,
+bound to one credential, daemon-issued MCP session, and document. The user may revoke it, and it
+ends on connection change, normal session close, or bounded liveness cleanup after an abrupt or
+inactive transport. It never transfers to a replacement session. Reviewers still cannot create,
+trash, or restore documents. Built-in provider chat remains suggestion-only.
 
-**Cost:** reviewers always wait for acceptance, including on local unshared documents. This
-is simpler and safer than shipping an unused grant lifecycle in the MVP.
+**Cost:** immediate reviewer edits bypass Accept/Reject until the user revokes access or that MCP
+session ends. A clean stdio shutdown closes its daemon session promptly. The transport also closes
+a session after about five minutes without MCP traffic, which bounds cleanup after an abrupt exit
+but means an open, inactive client must request direct access again when it resumes. Newer
+stateless MCP transports provide no session identity and therefore cannot receive this capability.
 
 ### AD-20 — One product name and one machine namespace
 
@@ -481,9 +505,11 @@ The native app keeps the platform bearer from `daemon.json`. Each configured rev
 different 256-bit credential, stored in an owner-only native file with only its hash in SQLite.
 The copyable setup command contains a stable connection ID, never the credential. Every MCP tool
 rechecks that connection and its current-document or all-document scope. Reviewer credentials
-authorize reads and replicated suggestions, never direct content mutation. Tool discovery is
-filtered by the authenticated principal, so reviewer clients are offered only read and suggestion
-tools. The authorization check remains in every call as the enforcement boundary.
+authorize reads and replicated suggestions by default. Tool discovery also offers the guarded
+direct-edit request and block-edit tools, because clients may cache discovery before the user
+approves a grant. Listing a tool is not authorization: every block edit still rechecks the
+credential, document, daemon-issued MCP session, and active grant. Create and document-lifecycle
+tools remain unavailable to reviewer connections.
 
 The connection screen shows the last time a credential was used and any model name the client
 reported. This is historical activity, not live presence, and neither field verifies the app,
@@ -495,10 +521,16 @@ This authenticates one configured local Proof of Thought ingress. It does not au
 calling app, provider, model, person, or conversation; those remain reported claims under AD-6.
 It is also not an OS sandbox: software already running as the same user can read owner files.
 
+Direct edits keep that same assurance level. They are recorded as immediate MCP edits attributed
+to the configured reviewer and any model it reports, not as provider-verified identity. The grant
+is an authorization boundary for document mutation, not evidence that the reported app or model
+performed it.
+
 **Cost:** credentials need native files and reset/revoke handling. The principal-specific tool
 list cannot use a shared public cache, and historical activity cannot promise a client is still
-connected. Revocation stops subsequent tool checks; an operation already past authorization may
-finish. We accept that narrow race rather than adding heartbeat processes, a lifecycle ledger, or
+connected. Direct grants add ephemeral session state and disconnect cleanup. Revocation stops
+subsequent tool checks; an operation already past authorization may finish. We accept that narrow
+race and bounded cleanup delay rather than adding heartbeat processes, a lifecycle ledger, or
 signing-specific Keychain ACL machinery.
 
 ### AD-22 — Provider keys stay native; validation happens on use

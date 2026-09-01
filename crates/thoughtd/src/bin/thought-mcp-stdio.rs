@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    let mut session: Option<String> = None;
+    let mut session = ProxySession::default();
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -52,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    close_session(&daemon, &credential, session.id.as_deref());
     Ok(())
 }
 
@@ -140,13 +141,60 @@ fn forward(
     daemon: &Daemon,
     credential: &str,
     body: &str,
-    session: &mut Option<String>,
+    session: &mut ProxySession,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    match send_once(daemon, credential, body, session) {
+    session.observe(body);
+    match send_once(daemon, credential, body, &mut session.id) {
         Err(error) if is_transport_failure(&error) => {
-            Ok(send_once(daemon, credential, body, session)?)
+            Ok(send_once(daemon, credential, body, &mut session.id)?)
+        }
+        Err(ureq::Error::StatusCode(404)) if session.initialize.is_some() => {
+            session.reinitialize(daemon, credential)?;
+            Ok(send_once(daemon, credential, body, &mut session.id)?)
         }
         other => Ok(other?),
+    }
+}
+
+#[derive(Default)]
+struct ProxySession {
+    id: Option<String>,
+    initialize: Option<String>,
+    initialized: Option<String>,
+}
+
+impl ProxySession {
+    fn observe(&mut self, body: &str) {
+        let method = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("method")
+                    .and_then(|method| method.as_str())
+                    .map(str::to_string)
+            });
+        match method.as_deref() {
+            Some("initialize") => self.initialize = Some(body.to_string()),
+            Some("notifications/initialized") => self.initialized = Some(body.to_string()),
+            _ => {}
+        }
+    }
+
+    fn reinitialize(
+        &mut self,
+        daemon: &Daemon,
+        credential: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let initialize = self
+            .initialize
+            .as_deref()
+            .ok_or("the MCP client did not provide an initialize request")?;
+        self.id = None;
+        send_once(daemon, credential, initialize, &mut self.id)?;
+        if let Some(initialized) = self.initialized.as_deref() {
+            send_once(daemon, credential, initialized, &mut self.id)?;
+        }
+        Ok(())
     }
 }
 
@@ -182,4 +230,18 @@ fn send_once(
             .filter(|payload| !payload.trim().is_empty())
             .map(str::to_string)
     }))
+}
+
+/// Normal stdio EOF means the client ended this MCP session. Closing it over
+/// streamable HTTP lets the daemon revoke any session-bound direct-edit grant
+/// immediately. Failure is intentionally best-effort: an already-stopped or
+/// unreachable daemon has no surviving in-memory grant to clean up.
+fn close_session(daemon: &Daemon, credential: &str, session_id: Option<&str>) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let _ = ureq::delete(&daemon.url)
+        .header("Authorization", &format!("Bearer {credential}"))
+        .header("Mcp-Session-Id", session_id)
+        .call();
 }

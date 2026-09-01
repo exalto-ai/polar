@@ -29,9 +29,10 @@ person, or conversation behind it. Owner-only files are not a sandbox against ho
 already running as the same OS user.
 
 Creating, importing, trashing, restoring, and managing reviewers use the daemon's narrow
-`/editor` routes. Reviewer MCP calls can read and propose suggestions, but cannot directly change
-content. Their configured connection ID is durable attribution; model text remains reported and
-unverified.
+`/editor` routes. Reviewer MCP calls read and propose suggestions by default. During an explicit,
+temporary grant tied to one document and daemon-issued MCP session, they can also apply immediate
+block-level edits. Immediate edits still have only reported MCP assurance. Their configured
+connection ID is durable attribution; app and model claims remain self-reported and unverified.
 
 ## Storage
 

@@ -840,6 +840,7 @@ async function boot() {
   mcp = new Mcp(connection.mcp_url, connection.token);
   editorApi = new EditorApi(connection.mcp_url, connection.token);
   aiSupport.setReviewerApi(editorApi);
+  aiSupport.setDirectEditApi(editorApi);
   aiSupport.setConnectionCommand(connection.stdio_command);
   await mcp.connect();
 

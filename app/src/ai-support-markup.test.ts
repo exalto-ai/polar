@@ -22,4 +22,15 @@ describe("AI support path copy", () => {
     expect(markup).toContain("Claude Code");
     expect(markup).toContain('value="claude-desktop"');
   });
+
+  it("keeps session-scoped direct editing visible outside every AI mode", () => {
+    expect(markup.indexOf('id="direct-edit-active"')).toBeLessThan(
+      markup.indexOf('class="ai-mode-switcher"'),
+    );
+    expect(markup).toContain("while they remain connected");
+    expect(markup).toContain("Direct edits do not have Accept or Reject. Suggestions still do.");
+    expect(markup).toContain("Keep suggestions");
+    expect(markup).toContain("Allow direct editing");
+    expect(markup).not.toContain("Allow for 15 minutes");
+  });
 });

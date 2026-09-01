@@ -1,6 +1,7 @@
 # Reviewer suggestions
 
-Configured reviewers can propose a change. They cannot edit document content directly.
+Configured reviewers propose changes by default. They can edit document content immediately only
+while the user has granted temporary direct access for that document and MCP session.
 
 ## Flow
 
@@ -34,6 +35,32 @@ on the same Mac. Claude Desktop and Claude Code have separate setup paths.
 `Not used yet` means the credential has not authenticated a request since it was created or reset.
 `Last used` is historical local activity, not live presence. A displayed model is explicitly
 reported by the client and is not provider-verified.
+
+## Temporary direct editing
+
+Suggestions remain the default. A configured reviewer can call `request_direct_edit` for one
+document, and the request appears in the native editor. While it is pending, denied, or expired,
+the reviewer keeps using `suggest_change`.
+
+If the user chooses **Allow direct editing**, the same configured connection may call
+`replace_block`, `insert_blocks`, `replace_text`, and `delete_block` immediately for that document
+and daemon-issued MCP session. Those edits do not wait for Accept/Reject. They still use stable
+block ids, pass through the daemon's normal authorization and version checks, and are attributed as
+reported MCP activity. The app, provider, model, person, and conversation remain self-reported,
+not verified.
+
+The grant is in-memory, session-scoped, and narrower than the durable reviewer credential. It ends
+when the user revokes it, the connection is changed, reset, or removed, or the MCP session closes.
+It does not transfer to a replacement session. A clean stdio shutdown closes the daemon session
+promptly. The transport also closes a session after about five minutes without MCP traffic. This
+bounds cleanup if a client disappears, but an open, inactive client must request direct access
+again after it reconnects. Transports that do not provide a daemon-issued session identity stay
+suggestion-only.
+
+Reviewer tool discovery includes the guarded block-edit tools so clients that cache their tool
+list can use them after approval. Their presence is not a grant. The daemon checks the active
+credential, document, session, and grant on every edit. Reviewer connections can never use this
+flow to create, trash, or restore documents, and built-in provider chat remains suggestion-only.
 
 ## Patch shapes
 

@@ -28,6 +28,10 @@ beforeEach(() => {
       <h2 id="ai-support-title"></h2>
       <button id="ai-sidebar-close"></button>
       <p id="ai-mode-description"></p>
+      <section id="direct-edit-active" hidden>
+        <p id="direct-edit-active-error" hidden></p>
+        <ul id="direct-edit-grant-list"></ul>
+      </section>
       <button data-ai-mode="connected"></button>
       <button data-ai-mode="builtin"></button>
       <button data-ai-mode="basic"></button>
@@ -63,6 +67,15 @@ beforeEach(() => {
         <button data-ai-mode="connected">Connect</button>
         <button data-ai-mode="builtin">Built in</button>
         <button data-ai-mode="basic">Basic</button>
+      </section>
+    </div>
+    <div id="direct-edit-prompt" hidden>
+      <section role="alertdialog" tabindex="-1">
+        <h2 id="direct-edit-prompt-title"></h2>
+        <p id="direct-edit-prompt-meta"></p>
+        <p id="direct-edit-prompt-error" hidden></p>
+        <button id="direct-edit-keep-suggestions"></button>
+        <button id="direct-edit-allow"></button>
       </section>
     </div>
   `;
@@ -221,6 +234,47 @@ describe("AI support paths", () => {
       true,
     );
     expect(document.activeElement).toBe(document.querySelector(".tiptap"));
+    controller.destroy();
+  });
+
+  it("treats a direct-edit approval as an open editor surface", async () => {
+    const storage = memoryStorage();
+    writeAiSupportPath(storage, "connected");
+    const directEditApi = {
+      listDirectEditAccess: vi.fn().mockResolvedValue({
+        requests: [{
+          request_id: "request-one",
+          connection_id: "connection-one",
+          document_id: "doc-one",
+          document_title: "Draft",
+          display_label: "Writing coach",
+          client: "codex" as const,
+          reported_model: null,
+          requested_at: 10,
+          expires_at: 20,
+        }],
+        grants: [],
+      }),
+      approveDirectEdit: vi.fn(),
+      denyDirectEdit: vi.fn(),
+      revokeDirectEdit: vi.fn(),
+    };
+    const controller = installAiSupport(document, { storage, directEditApi });
+    controller.setCurrentDocument({
+      id: "doc-one",
+      title: "Draft",
+      snapshot: () => ({ type: "doc", content: [] }),
+      suggestionPosition: () => ({ kind: "end" }),
+      waitUntilSaved: async () => true,
+      selectedText: () => null,
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector<HTMLElement>("#direct-edit-prompt")!.hidden,
+      ).toBe(false);
+    });
+    expect(controller.isOpen()).toBe(true);
     controller.destroy();
   });
 });

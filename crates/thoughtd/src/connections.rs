@@ -1,5 +1,9 @@
 //! Reviewer credentials and per-tool scope checks.
 
+use crate::direct_edit::{
+    DirectEditAccess, DirectEditDenial, DirectEditGrant, DirectEditKey, DirectEditRegistry,
+    DirectEditRequestOutcome, ReviewerSnapshot,
+};
 use crate::discovery;
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
@@ -7,6 +11,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Instant;
 use thought_mcp::{
     CreateReviewerConnection, ReviewerAccess, ReviewerClient, ReviewerConnection,
     ReviewerConnectionStatus, UpdateReviewerConnection, Workspace,
@@ -168,6 +173,7 @@ pub struct ConnectionRegistry {
     workspace: Arc<Workspace>,
     credentials: CredentialFiles,
     credential_updates: Mutex<()>,
+    direct_edits: DirectEditRegistry,
 }
 
 impl ConnectionRegistry {
@@ -180,6 +186,7 @@ impl ConnectionRegistry {
             workspace,
             credentials,
             credential_updates: Mutex::new(()),
+            direct_edits: DirectEditRegistry::default(),
         }
     }
 
@@ -235,9 +242,13 @@ impl ConnectionRegistry {
         access: ReviewerAccess,
         at: i64,
     ) -> Result<ReviewerConnection, RegistryError> {
+        let _guard = self
+            .credential_updates
+            .lock()
+            .map_err(|_| RegistryError::InvalidInput("connection state is unavailable".into()))?;
         let display_label = valid_label(display_label)?;
         access.validate()?;
-        Ok(self.workspace.update_reviewer_connection(
+        let connection = self.workspace.update_reviewer_connection(
             id,
             &UpdateReviewerConnection {
                 expected_revision,
@@ -245,7 +256,9 @@ impl ConnectionRegistry {
                 access,
                 updated_at: at,
             },
-        )?)
+        )?;
+        let _ = self.direct_edits.revoke_connection(id);
+        Ok(connection)
     }
 
     pub fn reset(
@@ -267,7 +280,10 @@ impl ConnectionRegistry {
             &credential_hash(replacement.as_bytes()),
             at,
         ) {
-            Ok(connection) => Ok(connection),
+            Ok(connection) => {
+                let _ = self.direct_edits.revoke_connection(id);
+                Ok(connection)
+            }
             Err(error) => {
                 let _ = self.credentials.write(id, &previous);
                 Err(error.into())
@@ -288,6 +304,7 @@ impl ConnectionRegistry {
         let connection = self
             .workspace
             .revoke_reviewer_connection(id, expected_revision, at)?;
+        let _ = self.direct_edits.revoke_connection(id);
         let _ = self.credentials.remove(id);
         Ok(connection)
     }
@@ -320,20 +337,22 @@ impl ConnectionRegistry {
         operation: ReviewerOperation,
         document_id: Option<&str>,
     ) -> Result<AuthorizedRequest, RegistryError> {
+        self.authorize_session(principal, operation, document_id, None)
+    }
+
+    pub fn authorize_session(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        operation: ReviewerOperation,
+        document_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<AuthorizedRequest, RegistryError> {
         match principal {
             AuthenticatedPrincipal::Internal => Ok(AuthorizedRequest { connection: None }),
             AuthenticatedPrincipal::Reviewer {
                 connection_id,
                 credential_hash,
             } => {
-                if !matches!(
-                    operation,
-                    ReviewerOperation::Read | ReviewerOperation::Suggest
-                ) {
-                    return Err(RegistryError::PermissionDenied(
-                        "reviewer connections can only read or suggest".into(),
-                    ));
-                }
                 let connection = self
                     .workspace
                     .reviewer_connection_by_credential_hash(credential_hash)?
@@ -350,11 +369,170 @@ impl ConnectionRegistry {
                         "document is outside this reviewer connection".into(),
                     ));
                 }
+                match operation {
+                    ReviewerOperation::Read | ReviewerOperation::Suggest => {}
+                    ReviewerOperation::Edit => {
+                        let document_id = document_id.ok_or_else(|| {
+                            RegistryError::PermissionDenied(
+                                "direct editing requires a document".into(),
+                            )
+                        })?;
+                        let session_id = valid_session_id(session_id)?;
+                        let key = DirectEditKey {
+                            connection_id: connection_id.clone(),
+                            credential_hash: *credential_hash,
+                            session_id: session_id.to_string(),
+                            document_id: document_id.to_string(),
+                        };
+                        if !self
+                            .direct_edits
+                            .is_active(&key, Instant::now())
+                            .map_err(|message| RegistryError::PermissionDenied(message.into()))?
+                        {
+                            return Err(RegistryError::PermissionDenied(
+                                "direct editing requires an active user-approved grant for this document; call request_direct_edit first".into(),
+                            ));
+                        }
+                    }
+                    ReviewerOperation::Create | ReviewerOperation::Trash => {
+                        return Err(RegistryError::PermissionDenied(
+                            "reviewer connections cannot create, trash, or restore documents"
+                                .into(),
+                        ));
+                    }
+                }
                 Ok(AuthorizedRequest {
                     connection: Some(connection),
                 })
             }
         }
+    }
+
+    pub fn request_direct_edit(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        document_id: &str,
+        session_id: &str,
+        reported_model: Option<&str>,
+        at: i64,
+    ) -> Result<DirectEditRequestOutcome, RegistryError> {
+        let _guard = self
+            .credential_updates
+            .lock()
+            .map_err(|_| RegistryError::InvalidInput("connection state is unavailable".into()))?;
+        let authorized = self.authorize_session(
+            principal,
+            ReviewerOperation::Read,
+            Some(document_id),
+            Some(session_id),
+        )?;
+        let connection = authorized.connection().ok_or_else(|| {
+            RegistryError::PermissionDenied(
+                "the native editor does not need a direct-edit grant".into(),
+            )
+        })?;
+        let document_title = safe_document_title(&self.workspace.read_document(document_id)?.title);
+        let model = valid_reported_model(reported_model)?;
+        self.note_reported_model(principal, model.as_deref())?;
+        let key = direct_edit_key(principal, document_id, session_id)?;
+        let request_id = discovery::random_token()?[..20].to_string();
+        self.direct_edits
+            .request(
+                key,
+                ReviewerSnapshot {
+                    display_label: connection.display_label.clone(),
+                    client: connection.client,
+                    reported_model: model,
+                    document_title,
+                },
+                request_id,
+                Instant::now(),
+                at,
+            )
+            .map_err(|message| RegistryError::InvalidInput(message.into()))
+    }
+
+    pub fn direct_edit_access(&self, document_id: &str) -> Result<DirectEditAccess, RegistryError> {
+        self.direct_edits
+            .access(document_id, Instant::now())
+            .map_err(|message| RegistryError::InvalidInput(message.into()))
+    }
+
+    pub fn all_direct_edit_access(&self) -> Result<DirectEditAccess, RegistryError> {
+        self.direct_edits
+            .all_access(Instant::now())
+            .map_err(|message| RegistryError::InvalidInput(message.into()))
+    }
+
+    pub fn approve_direct_edit(
+        &self,
+        document_id: &str,
+        request_id: &str,
+        at: i64,
+    ) -> Result<DirectEditGrant, RegistryError> {
+        let _guard = self
+            .credential_updates
+            .lock()
+            .map_err(|_| RegistryError::InvalidInput("connection state is unavailable".into()))?;
+        let identity = self
+            .direct_edits
+            .pending_identity(document_id, request_id, Instant::now())
+            .map_err(|message| RegistryError::InvalidInput(message.into()))?;
+        let connection = self
+            .workspace
+            .reviewer_connection_by_credential_hash(&identity.credential_hash)?
+            .filter(|connection| connection.id == identity.connection_id)
+            .ok_or_else(|| {
+                RegistryError::PermissionDenied("reviewer connection was reset or removed".into())
+            })?;
+        if !connection.allows_document(document_id) {
+            let _ = self.direct_edits.revoke_connection(&identity.connection_id);
+            return Err(RegistryError::PermissionDenied(
+                "document is outside this reviewer connection".into(),
+            ));
+        }
+        let grant_id = discovery::random_token()?[..20].to_string();
+        self.direct_edits
+            .approve(document_id, request_id, grant_id, Instant::now(), at)
+            .map_err(|message| RegistryError::InvalidInput(message.into()))
+    }
+
+    pub fn deny_direct_edit(
+        &self,
+        document_id: &str,
+        request_id: &str,
+    ) -> Result<DirectEditDenial, RegistryError> {
+        let _guard = self
+            .credential_updates
+            .lock()
+            .map_err(|_| RegistryError::InvalidInput("connection state is unavailable".into()))?;
+        self.direct_edits
+            .deny(document_id, request_id, Instant::now())
+            .map_err(|message| RegistryError::InvalidInput(message.into()))
+    }
+
+    pub fn revoke_direct_edit(
+        &self,
+        document_id: &str,
+        grant_id: &str,
+    ) -> Result<DirectEditGrant, RegistryError> {
+        let _guard = self
+            .credential_updates
+            .lock()
+            .map_err(|_| RegistryError::InvalidInput("connection state is unavailable".into()))?;
+        self.direct_edits
+            .revoke(document_id, grant_id, Instant::now())
+            .map_err(|message| RegistryError::InvalidInput(message.into()))
+    }
+
+    /// Ends every pending request and active grant bound to one daemon-issued
+    /// MCP transport session. The session id is never supplied by a tool
+    /// caller; the streamable HTTP transport owns it.
+    pub fn revoke_mcp_session(&self, session_id: &str) -> Result<(), RegistryError> {
+        let session_id = valid_session_id(Some(session_id))?;
+        self.direct_edits
+            .revoke_session(session_id)
+            .map_err(|message| RegistryError::InvalidInput(message.into()))
     }
 
     pub fn note_reported_model(
@@ -363,16 +541,76 @@ impl ConnectionRegistry {
         model: Option<&str>,
     ) -> Result<(), RegistryError> {
         if let AuthenticatedPrincipal::Reviewer { connection_id, .. } = principal {
-            let model = model.map(str::trim).filter(|value| !value.is_empty());
-            if model.is_some_and(|value| value.len() > 256) {
-                return Err(RegistryError::InvalidInput(
-                    "reported model is too long".into(),
-                ));
-            }
+            let model = valid_reported_model(model)?;
             self.workspace
-                .update_reviewer_reported_model(connection_id, model)?;
+                .update_reviewer_reported_model(connection_id, model.as_deref())?;
         }
         Ok(())
+    }
+}
+
+fn direct_edit_key(
+    principal: &AuthenticatedPrincipal,
+    document_id: &str,
+    session_id: &str,
+) -> Result<DirectEditKey, RegistryError> {
+    let AuthenticatedPrincipal::Reviewer {
+        connection_id,
+        credential_hash,
+    } = principal
+    else {
+        return Err(RegistryError::PermissionDenied(
+            "the native editor does not need a direct-edit grant".into(),
+        ));
+    };
+    let session_id = valid_session_id(Some(session_id))?;
+    Ok(DirectEditKey {
+        connection_id: connection_id.clone(),
+        credential_hash: *credential_hash,
+        session_id: session_id.to_string(),
+        document_id: document_id.to_string(),
+    })
+}
+
+fn valid_session_id(value: Option<&str>) -> Result<&str, RegistryError> {
+    value
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| {
+            RegistryError::PermissionDenied(
+                "direct editing requires the daemon-issued MCP session".into(),
+            )
+        })
+}
+
+fn valid_reported_model(value: Option<&str>) -> Result<Option<String>, RegistryError> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    if value.is_some_and(|value| value.len() > 256 || value.chars().any(char::is_control)) {
+        return Err(RegistryError::InvalidInput(
+            "reported model is invalid".into(),
+        ));
+    }
+    Ok(value.map(str::to_string))
+}
+
+fn safe_document_title(value: &str) -> String {
+    let normalized = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title: String = normalized.chars().take(120).collect();
+    if title.is_empty() {
+        "Untitled".into()
+    } else {
+        title
     }
 }
 
@@ -413,6 +651,16 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_edit_document_titles_are_safe_editor_metadata() {
+        assert_eq!(
+            safe_document_title("  Quarterly\n\0\tplan  "),
+            "Quarterly plan"
+        );
+        assert_eq!(safe_document_title("\0\n"), "Untitled");
+        assert_eq!(safe_document_title(&"x".repeat(121)).chars().count(), 120);
+    }
 
     #[test]
     fn reset_invalidates_the_previous_credential() {
@@ -506,5 +754,173 @@ mod tests {
                 .authorize(&principal, ReviewerOperation::Read, Some(&second.doc_id))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn direct_edit_grant_is_session_bound_and_revoked_by_connection_changes() {
+        let workspace = Arc::new(Workspace::open_in_memory().unwrap());
+        let document = workspace
+            .create_document("Draft", &thought_mcp::ActorRef::editor())
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let credentials = CredentialFiles::new(directory.path());
+        let registry = ConnectionRegistry::new(workspace, credentials.clone());
+        let connection = registry
+            .create(
+                ReviewerClient::Codex,
+                "Reviewer".into(),
+                ReviewerAccess::current(document.doc_id.clone()),
+                10,
+            )
+            .unwrap();
+        let credential = credentials.read(&connection.id).unwrap();
+        let principal = registry.authenticate(&credential, 11).unwrap().unwrap();
+
+        let request = registry
+            .request_direct_edit(
+                &principal,
+                &document.doc_id,
+                "daemon-session-1",
+                Some("reported-model"),
+                12,
+            )
+            .unwrap();
+        let crate::direct_edit::DirectEditRequestOutcome::Pending { request } = request else {
+            panic!("expected a pending request")
+        };
+        assert_eq!(request.document_title, "Draft");
+        registry
+            .approve_direct_edit(&document.doc_id, &request.request_id, 13)
+            .unwrap();
+
+        assert!(
+            registry
+                .authorize_session(
+                    &principal,
+                    ReviewerOperation::Edit,
+                    Some(&document.doc_id),
+                    Some("daemon-session-1"),
+                )
+                .is_ok()
+        );
+        assert!(
+            registry
+                .authorize_session(
+                    &principal,
+                    ReviewerOperation::Edit,
+                    Some(&document.doc_id),
+                    Some("daemon-session-2"),
+                )
+                .is_err()
+        );
+        assert!(
+            registry
+                .authorize_session(
+                    &principal,
+                    ReviewerOperation::Edit,
+                    Some(&document.doc_id),
+                    None,
+                )
+                .is_err()
+        );
+        let forged_principal = match &principal {
+            AuthenticatedPrincipal::Reviewer { connection_id, .. } => {
+                AuthenticatedPrincipal::Reviewer {
+                    connection_id: connection_id.clone(),
+                    credential_hash: [9; 32],
+                }
+            }
+            AuthenticatedPrincipal::Internal => unreachable!(),
+        };
+        assert!(
+            registry
+                .authorize_session(
+                    &forged_principal,
+                    ReviewerOperation::Edit,
+                    Some(&document.doc_id),
+                    Some("daemon-session-1"),
+                )
+                .is_err()
+        );
+        assert!(
+            registry
+                .authorize_session(
+                    &principal,
+                    ReviewerOperation::Create,
+                    None,
+                    Some("daemon-session-1"),
+                )
+                .is_err()
+        );
+
+        let updated = registry
+            .update(
+                &connection.id,
+                connection.revision,
+                "Renamed reviewer".into(),
+                ReviewerAccess::current(document.doc_id.clone()),
+                14,
+            )
+            .unwrap();
+        assert!(
+            registry
+                .authorize_session(
+                    &principal,
+                    ReviewerOperation::Edit,
+                    Some(&document.doc_id),
+                    Some("daemon-session-1"),
+                )
+                .is_err()
+        );
+
+        let request = registry
+            .request_direct_edit(
+                &principal,
+                &document.doc_id,
+                "daemon-session-1",
+                Some("reported-model"),
+                15,
+            )
+            .unwrap();
+        let crate::direct_edit::DirectEditRequestOutcome::Pending { request } = request else {
+            panic!("expected a pending request")
+        };
+        registry
+            .approve_direct_edit(&document.doc_id, &request.request_id, 16)
+            .unwrap();
+        let reset = registry
+            .reset(&connection.id, updated.revision, 17)
+            .unwrap();
+        assert!(registry.all_direct_edit_access().unwrap().grants.is_empty());
+        assert!(
+            registry
+                .authorize_session(
+                    &principal,
+                    ReviewerOperation::Edit,
+                    Some(&document.doc_id),
+                    Some("daemon-session-1"),
+                )
+                .is_err()
+        );
+
+        let replacement = credentials.read(&connection.id).unwrap();
+        let replacement_principal = registry.authenticate(&replacement, 18).unwrap().unwrap();
+        let request = registry
+            .request_direct_edit(
+                &replacement_principal,
+                &document.doc_id,
+                "daemon-session-2",
+                None,
+                19,
+            )
+            .unwrap();
+        let crate::direct_edit::DirectEditRequestOutcome::Pending { request } = request else {
+            panic!("expected a pending request")
+        };
+        registry
+            .approve_direct_edit(&document.doc_id, &request.request_id, 20)
+            .unwrap();
+        registry.revoke(&connection.id, reset.revision, 21).unwrap();
+        assert!(registry.all_direct_edit_access().unwrap().grants.is_empty());
     }
 }

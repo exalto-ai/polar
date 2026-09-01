@@ -1,4 +1,8 @@
 import { writeClipboardText } from "./clipboard";
+import {
+  installDirectEditAccess,
+  type DirectEditApi,
+} from "./direct-edit-access";
 import type { ChatSuggestionInput } from "./editor-api";
 import type { ProProviderBridge } from "./pro-provider-bridge";
 import type { ProChatBridge } from "./pro-chat-bridge";
@@ -26,6 +30,7 @@ type AiSupportOptions = {
   storage?: Storage | null;
   copyText?: (text: string) => Promise<void>;
   reviewerApi?: ReviewerApi | null;
+  directEditApi?: DirectEditApi | null;
   providerBridge?: ProProviderBridge | null;
   chatBridge?: ProChatBridge | null;
   suggestChatResponse?: (input: ChatSuggestionInput) => Promise<unknown>;
@@ -39,6 +44,7 @@ export type AiSupportController = {
   showOnboardingIfNeeded(): boolean;
   setConnectionCommand(command: string): void;
   setReviewerApi(api: ReviewerApi | null): void;
+  setDirectEditApi(api: DirectEditApi | null): void;
   setCurrentDocument(context: ProChatDocument | null): void;
   open(): void;
   close(): void;
@@ -153,6 +159,11 @@ export function installAiSupport(
   let onboardingOpen = false;
   let onboardingReady = false;
   let returnFocus: HTMLElement | null = null;
+  const directEdits = installDirectEditAccess(root, {
+    api: options.directEditApi,
+    canPrompt: () => currentPath !== null && !onboardingOpen,
+    onNotice: options.onNotice,
+  });
 
   function listen<K extends keyof DocumentEventMap>(
     target: Document,
@@ -253,6 +264,7 @@ export function installAiSupport(
     onboardingOpen = false;
     if (fromOnboarding) sidebarOpen = path !== "basic";
     render();
+    void directEdits.refresh();
     if (fromOnboarding) {
       queueMicrotask(() => {
         if (sidebarOpen) closeButton.focus();
@@ -350,15 +362,17 @@ export function installAiSupport(
   render();
 
   return {
-    isOpen: () => sidebarOpen || onboardingOpen,
+    isOpen: () => sidebarOpen || onboardingOpen || directEdits.isPrompting(),
     path: () => currentPath,
     isChoosingPath: () => onboardingOpen,
     showOnboardingIfNeeded,
     setConnectionCommand: reviewers.setExecutable,
     setReviewerApi: reviewers.setApi,
+    setDirectEditApi: directEdits.setApi,
     setCurrentDocument(context) {
       reviewers.setDocument(context);
       chat?.setDocument(context);
+      directEdits.setDocument(context && { id: context.id, title: context.title });
     },
     open,
     close,
@@ -367,6 +381,7 @@ export function installAiSupport(
       reviewers.destroy();
       chat?.destroy();
       providers?.destroy();
+      directEdits.destroy();
       setBackgroundBlocked(false);
       delete root.documentElement.dataset.aiSupportPath;
     },
