@@ -488,16 +488,26 @@ Adding a key performs no provider request. The first chat request is the useful 
 **Cost:** setup cannot promise that a key, model, quota, or billing state will work later. The
 actual request reports that failure, without a separate catalog probe or validation ledger.
 
-### AD-23 — Built-in chat is ephemeral and cannot edit
+### AD-23: Visible chat persists locally and cannot edit
 
 The window sends the current document projection and visible conversation to a selected built-in
-provider only after a clear sharing acknowledgement. Conversations live only in that window and
-are cleared when the document changes or the window closes. Provider responses are plain visible
-text; they do not enter the document or attribution log by themselves.
+provider only after a clear sharing acknowledgement. It stores a bounded visible conversation for
+each document in the WebView's local storage and restores it when that document reopens. This is
+local convenience state, not a native transcript database, synced document state, proof, or
+provenance. New chat removes only the current document's saved conversation.
 
-**Cost:** there is no restart recovery, cross-window history, streaming, Stop, or Retry. A failed
-request may have reached the provider even when the window receives no answer. Reviewable document
-changes remain a separate suggestion operation rather than an implicit power of chat.
+Stored history contains visible messages and the minimum response metadata needed to retry a
+reviewable suggestion safely. It never contains the composer draft, selected focus, or hidden
+reasoning. Storage corruption, denial, or quota failure leaves the live in-window chat usable and
+reports that persistence is unavailable.
+
+Provider responses remain plain visible text; they do not enter the document or attribution log by
+themselves.
+
+**Cost:** local browser storage can be cleared, unavailable, or overwritten by another window, and
+history does not follow the document to another device. There is still no streaming or Stop. A
+failed request may have reached the provider even when the window receives no answer. Reviewable
+document changes remain a separate suggestion operation rather than an implicit power of chat.
 
 ### AD-24 — Chat responses enter documents only through review
 

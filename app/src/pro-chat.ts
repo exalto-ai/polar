@@ -13,6 +13,15 @@ const PROVIDER_NAMES: Record<ProProvider, string> = {
   anthropic: "Anthropic",
 };
 const MAX_FOCUS_BYTES = 32 * 1024;
+const MAX_PERSISTED_MESSAGES = 30;
+const MAX_PERSISTED_RECORD_BYTES = 640 * 1024;
+const MAX_PERSISTED_USER_MESSAGE_BYTES = 16 * 1024;
+const MAX_PERSISTED_ASSISTANT_MESSAGE_BYTES = 64 * 1024;
+const MAX_PERSISTED_IDENTIFIER_BYTES = 512;
+const MAX_SUGGESTION_METADATA_BYTES = 160;
+const MAX_SUGGESTION_REQUEST_ID_BYTES = 128;
+const STORAGE_PREFIX = "thought.pro-chat.v1.";
+const STORAGE_VERSION = 1;
 
 export type ProChatDocument = {
   id: string;
@@ -23,11 +32,14 @@ export type ProChatDocument = {
   selectedText(): string | null;
 };
 
+type ChatStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
 type Options = {
   bridge?: ProChatBridge | null;
   suggestResponse?: (input: ChatSuggestionInput) => Promise<unknown>;
   createRequestId?: () => string;
   onNotice?: (message: string, kind?: "info" | "error") => void;
+  storage?: ChatStorage | null;
 };
 
 type LocalMessage = ChatMessage & {
@@ -36,6 +48,25 @@ type LocalMessage = ChatMessage & {
   response?: SendChatResponse;
   suggestionRequestId?: string;
   suggested?: boolean;
+};
+
+type PersistedResponse = Omit<SendChatResponse, "text">;
+
+type PersistedMessage = ChatMessage & {
+  response?: PersistedResponse;
+  suggestionRequestId?: string;
+  suggested?: true;
+};
+
+type PersistedConversation = {
+  version: typeof STORAGE_VERSION;
+  provider: ProProvider | null;
+  model: string;
+  messages: PersistedMessage[];
+};
+
+type RestoredConversation = Omit<PersistedConversation, "messages"> & {
+  messages: LocalMessage[];
 };
 
 export type ProChatController = {
@@ -56,8 +87,139 @@ function oneLine(error: unknown): string {
     "The provider request failed.";
 }
 
-function provider(value: string): ProProvider | null {
+function provider(value: unknown): ProProvider | null {
   return value === "openai" || value === "anthropic" ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function withinBytes(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && new TextEncoder().encode(value).byteLength <= maximum;
+}
+
+function storedString(value: unknown, maximum: number): value is string {
+  return withinBytes(value, maximum) && value.trim().length > 0 && !value.includes("\0");
+}
+
+function validSuggestionRequestId(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_SUGGESTION_REQUEST_ID_BYTES &&
+    /^[A-Za-z0-9._-]+$/.test(value);
+}
+
+function validSuggestionMetadata(value: unknown): value is string {
+  return storedString(value, MAX_SUGGESTION_METADATA_BYTES) &&
+    !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+}
+
+function response(value: unknown, text: string): SendChatResponse | undefined {
+  if (!isRecord(value)) return undefined;
+  const responseProvider = provider(value.provider);
+  if (
+    responseProvider === null ||
+    !validSuggestionMetadata(value.requested_model) ||
+    !(value.reported_model === null ||
+      validSuggestionMetadata(value.reported_model)) ||
+    !validSuggestionMetadata(value.wording_revision) ||
+    typeof value.complete !== "boolean"
+  ) return undefined;
+  return {
+    text,
+    provider: responseProvider,
+    requested_model: value.requested_model,
+    reported_model: value.reported_model,
+    wording_revision: value.wording_revision,
+    complete: value.complete,
+  };
+}
+
+function localMessage(value: unknown): LocalMessage | null {
+  if (
+    !isRecord(value) || (value.role !== "user" && value.role !== "assistant") ||
+    !storedString(
+      value.text,
+      value.role === "user"
+        ? MAX_PERSISTED_USER_MESSAGE_BYTES
+        : MAX_PERSISTED_ASSISTANT_MESSAGE_BYTES,
+    )
+  ) return null;
+  const savedResponse = response(value.response, value.text);
+  if (value.response !== undefined && savedResponse === undefined) return null;
+  const suggestionRequestId = validSuggestionRequestId(value.suggestionRequestId)
+    ? value.suggestionRequestId
+    : undefined;
+  if (value.suggestionRequestId !== undefined && suggestionRequestId === undefined) return null;
+  if (value.suggested !== undefined && value.suggested !== true) return null;
+  if (
+    (value.role === "assistant" && savedResponse === undefined) ||
+    (savedResponse !== undefined && value.role !== "assistant")
+  ) return null;
+  if (savedResponse && suggestionRequestId === undefined) return null;
+  const hasAssistantOnlyState = value.response !== undefined ||
+    value.suggestionRequestId !== undefined || value.suggested !== undefined;
+  if (
+    (value.role !== "assistant" && hasAssistantOnlyState) ||
+    (value.role === "assistant" && hasAssistantOnlyState && savedResponse === undefined) ||
+    (value.suggested === true && suggestionRequestId === undefined)
+  ) return null;
+  const reportedModel = savedResponse?.reported_model ?? savedResponse?.requested_model;
+  return {
+    role: value.role,
+    text: value.text,
+    response: savedResponse,
+    suggestionRequestId,
+    suggested: value.suggested === true,
+    meta: savedResponse
+      ? `${PROVIDER_NAMES[savedResponse.provider]} · ${reportedModel}`
+      : undefined,
+    incomplete: savedResponse ? !savedResponse.complete : undefined,
+  };
+}
+
+function persistedConversation(value: unknown): RestoredConversation | null {
+  if (
+    !isRecord(value) || value.version !== STORAGE_VERSION ||
+    !Array.isArray(value.messages) || value.messages.length > MAX_PERSISTED_MESSAGES ||
+    !withinBytes(value.model, MAX_PERSISTED_IDENTIFIER_BYTES) || value.model.includes("\0")
+  ) return null;
+  const savedProvider = value.provider === null ? null : provider(value.provider);
+  if (value.provider !== null && savedProvider === null) return null;
+  if (
+    (savedProvider === null && value.model !== "") ||
+    (savedProvider !== null && !storedString(value.model, MAX_PERSISTED_IDENTIFIER_BYTES))
+  ) return null;
+  const savedMessages = value.messages.map(localMessage);
+  if (savedMessages.some((message) => message === null)) return null;
+  if (savedMessages.length % 2 !== 0) return null;
+  if (savedMessages.some((message, index) =>
+    message?.role !== (index % 2 === 0 ? "user" : "assistant"))) return null;
+  return {
+    version: STORAGE_VERSION,
+    provider: savedProvider,
+    model: value.model,
+    messages: savedMessages as LocalMessage[],
+  };
+}
+
+function persistedMessage(message: LocalMessage): PersistedMessage {
+  const saved: PersistedMessage = { role: message.role, text: message.text };
+  if (message.response) {
+    saved.response = {
+      provider: message.response.provider,
+      requested_model: message.response.requested_model,
+      reported_model: message.response.reported_model,
+      wording_revision: message.response.wording_revision,
+      complete: message.response.complete,
+    };
+  }
+  if (message.suggestionRequestId) saved.suggestionRequestId = message.suggestionRequestId;
+  if (message.suggested) saved.suggested = true;
+  return saved;
+}
+
+function storageKey(documentId: string): string {
+  return `${STORAGE_PREFIX}${encodeURIComponent(documentId)}`;
 }
 
 export function installProChat(
@@ -68,6 +230,7 @@ export function installProChat(
   const providerSelect = required<HTMLSelectElement>(panel, "#pro-chat-provider");
   const modelSelect = required<HTMLSelectElement>(panel, "#pro-chat-model");
   const retry = required<HTMLButtonElement>(panel, "#pro-chat-retry");
+  const storageNotice = required<HTMLElement>(panel, "#pro-chat-storage-notice");
   const notice = required<HTMLInputElement>(panel, "#pro-chat-consent");
   const documentLabel = required<HTMLElement>(panel, "#pro-chat-document");
   const messagesElement = required<HTMLOListElement>(panel, "#pro-chat-messages");
@@ -89,10 +252,20 @@ export function installProChat(
   let pendingText: string | null = null;
   let suggesting: LocalMessage | null = null;
   let focusText: string | null = null;
+  let preferredModel = "";
   let active = false;
   let loadingModels = false;
   let destroyed = false;
   let requestGeneration = 0;
+  let storageNoticeShown = false;
+  let storage: ChatStorage | null = null;
+  let storageAccessFailed = false;
+
+  try {
+    storage = options.storage === undefined ? window.localStorage : options.storage;
+  } catch {
+    storageAccessFailed = true;
+  }
 
   function listen<K extends keyof HTMLElementEventMap>(
     target: HTMLElement,
@@ -106,6 +279,81 @@ export function installProChat(
   function setError(message: string | null): void {
     error.textContent = message ?? "";
     error.hidden = message === null;
+  }
+
+  function showStorageNotice(): void {
+    if (storageNoticeShown) return;
+    storageNoticeShown = true;
+    storageNotice.textContent =
+      "Saved chat is unavailable. This chat will continue in this window.";
+    storageNotice.hidden = false;
+  }
+
+  if (storageAccessFailed || storage === null) showStorageNotice();
+
+  function discardStoredConversation(documentId: string): void {
+    if (storage === null) return;
+    try {
+      storage.removeItem(storageKey(documentId));
+    } catch {
+      // The single storage notice below covers both the original failure and
+      // a best-effort cleanup failure. Live chat remains available.
+    }
+  }
+
+  function readConversation(documentId: string): RestoredConversation | null {
+    if (storage === null) return null;
+    try {
+      const raw = storage.getItem(storageKey(documentId));
+      if (raw === null) return null;
+      if (new TextEncoder().encode(raw).byteLength > MAX_PERSISTED_RECORD_BYTES) {
+        discardStoredConversation(documentId);
+        showStorageNotice();
+        return null;
+      }
+      const saved = persistedConversation(JSON.parse(raw));
+      if (saved === null) {
+        discardStoredConversation(documentId);
+        showStorageNotice();
+      }
+      return saved;
+    } catch {
+      discardStoredConversation(documentId);
+      showStorageNotice();
+      return null;
+    }
+  }
+
+  function saveConversation(): void {
+    if (storage === null || currentDocument === null) return;
+    const saved: PersistedConversation = {
+      version: STORAGE_VERSION,
+      provider: provider(providerSelect.value),
+      model: modelSelect.value || preferredModel,
+      messages: messages.map(persistedMessage),
+    };
+    try {
+      const serialized = JSON.stringify(saved);
+      if (
+        persistedConversation(saved) === null ||
+        new TextEncoder().encode(serialized).byteLength > MAX_PERSISTED_RECORD_BYTES
+      ) {
+        showStorageNotice();
+        return;
+      }
+      storage.setItem(storageKey(currentDocument.id), serialized);
+    } catch {
+      showStorageNotice();
+    }
+  }
+
+  function clearSavedConversation(): void {
+    if (storage === null || currentDocument === null) return;
+    try {
+      storage.removeItem(storageKey(currentDocument.id));
+    } catch {
+      showStorageNotice();
+    }
   }
 
   function messageElement(message: LocalMessage, pending = false): HTMLLIElement {
@@ -134,7 +382,8 @@ export function installProChat(
         : suggesting === message
           ? "Suggesting…"
           : "Suggest in document";
-      suggest.disabled = message.suggested === true || suggesting !== null || pendingText !== null;
+      suggest.disabled = message.suggested === true || loadingModels || suggesting !== null ||
+        pendingText !== null;
       suggest.addEventListener("click", () => void suggestMessage(message));
       item.append(suggest);
     }
@@ -150,12 +399,13 @@ export function installProChat(
     messagesElement.hidden = rendered.length === 0;
     empty.hidden = rendered.length !== 0;
     newChat.hidden = messages.length === 0 && pendingText === null;
-    newChat.disabled = pendingText !== null || suggesting !== null;
+    newChat.disabled = loadingModels || pendingText !== null || suggesting !== null;
   }
 
   function renderControls(): void {
     const selectedProvider = provider(providerSelect.value);
     const hasModel = modelSelect.value !== "";
+    const busy = pendingText !== null || suggesting !== null;
     documentLabel.textContent = currentDocument
       ? `Current document: ${currentDocument.title}`
       : "Open a document to start a chat.";
@@ -165,36 +415,41 @@ export function installProChat(
       : focusText.length > 180
         ? `${focusText.slice(0, 177)}…`
         : focusText;
-    captureFocus.disabled = currentDocument === null || pendingText !== null ||
-      suggesting !== null;
-    modelSelect.disabled = selectedProvider === null || loadingModels;
-    retry.disabled = loadingModels || selectedProvider === null || bridge === null;
-    input.disabled = currentDocument === null || pendingText !== null || suggesting !== null ||
-      bridge === null;
+    providerSelect.disabled = busy;
+    captureFocus.disabled = currentDocument === null || busy;
+    modelSelect.disabled = selectedProvider === null || loadingModels || busy;
+    retry.disabled = loadingModels || selectedProvider === null || bridge === null || busy;
+    input.disabled = currentDocument === null || busy || bridge === null;
     send.disabled = currentDocument === null || selectedProvider === null || !hasModel ||
-      !notice.checked || pendingText !== null || suggesting !== null ||
-      input.value.trim() === "" ||
-      bridge === null;
-    panel.setAttribute(
-      "aria-busy",
-      String(loadingModels || pendingText !== null || suggesting !== null),
-    );
+      !notice.checked || busy || input.value.trim() === "" || bridge === null;
+    panel.setAttribute("aria-busy", String(loadingModels || busy));
     send.textContent = pendingText === null ? "Send" : "Sending…";
   }
 
-  function clearConversation(): void {
+  function render(): void {
+    renderMessages();
+    renderControls();
+  }
+
+  function clearTransientState(): void {
     requestGeneration += 1;
-    messages = [];
+    loadingModels = false;
+    retry.hidden = true;
     pendingText = null;
     suggesting = null;
     focusText = null;
     input.value = "";
     setError(null);
-    renderMessages();
-    renderControls();
   }
 
-  function replaceModels(models: ProviderModel[]): void {
+  function newConversation(): void {
+    clearTransientState();
+    messages = [];
+    clearSavedConversation();
+    render();
+  }
+
+  function replaceModels(models: ProviderModel[], preferred = ""): void {
     const options = models.map((model) => {
       const option = root.createElement("option");
       option.value = model.id;
@@ -202,28 +457,35 @@ export function installProChat(
       return option;
     });
     modelSelect.replaceChildren(...options);
-    modelSelect.value = models[0]?.id ?? "";
+    modelSelect.value = models.some(({ id }) => id === preferred)
+      ? preferred
+      : models[0]?.id ?? "";
+    preferredModel = modelSelect.value;
   }
 
   async function loadModels(): Promise<void> {
     const selectedProvider = provider(providerSelect.value);
+    const wantedModel = preferredModel || modelSelect.value;
     const generation = ++requestGeneration;
-    replaceModels([]);
+    replaceModels([], wantedModel);
+    preferredModel = wantedModel;
     retry.hidden = true;
     setError(null);
     if (selectedProvider === null || bridge === null || !active) {
-      renderControls();
+      loadingModels = false;
+      render();
       return;
     }
     loadingModels = true;
-    renderControls();
+    render();
     try {
       const result = await bridge.models(selectedProvider);
       if (destroyed || generation !== requestGeneration) return;
       if (result.provider !== selectedProvider || result.models.length === 0) {
         throw new Error("The provider returned no usable models.");
       }
-      replaceModels(result.models);
+      replaceModels(result.models, wantedModel);
+      saveConversation();
     } catch (cause) {
       if (destroyed || generation !== requestGeneration) return;
       setError(oneLine(cause));
@@ -231,7 +493,7 @@ export function installProChat(
     } finally {
       if (!destroyed && generation === requestGeneration) {
         loadingModels = false;
-        renderControls();
+        render();
       }
     }
   }
@@ -245,6 +507,17 @@ export function installProChat(
       modelSelect.value === "" || !notice.checked || pendingText !== null ||
       suggesting !== null || !message
     ) return;
+    if (messages.length >= MAX_PERSISTED_MESSAGES) {
+      setError("This conversation is full. Start a new chat.");
+      return;
+    }
+    if (
+      message.includes("\0") ||
+      new TextEncoder().encode(message).byteLength > MAX_PERSISTED_USER_MESSAGE_BYTES
+    ) {
+      setError("Messages must be valid text no larger than 16 KiB.");
+      return;
+    }
 
     const model = modelSelect.value;
     const generation = ++requestGeneration;
@@ -252,10 +525,9 @@ export function installProChat(
     pendingText = message;
     input.value = "";
     setError(null);
-    renderMessages();
-    renderControls();
+    render();
     try {
-      const response = await bridge.send({
+      const chatResponse = await bridge.send({
         document_title: document.title,
         document: document.snapshot(),
         provider: selectedProvider,
@@ -268,25 +540,38 @@ export function installProChat(
       if (destroyed || generation !== requestGeneration || currentDocument?.id !== document.id) {
         return;
       }
-      const reportedModel = response.reported_model ?? response.requested_model;
+      if (
+        !chatResponse.text.trim() || chatResponse.text.includes("\0") ||
+        new TextEncoder().encode(chatResponse.text).byteLength >
+          MAX_PERSISTED_ASSISTANT_MESSAGE_BYTES
+      ) throw new Error("The provider returned a response that is too large to use safely.");
+      const reportedModel = chatResponse.reported_model ?? chatResponse.requested_model;
+      const suggestionRequestId = createRequestId();
+      if (!validSuggestionRequestId(suggestionRequestId)) {
+        throw new Error("Proof of Thought could not create a safe suggestion retry identifier.");
+      }
       messages.push(
         { role: "user", text: message },
         {
           role: "assistant",
-          text: response.text,
-          meta: `${PROVIDER_NAMES[response.provider]} · ${reportedModel}`,
-          incomplete: !response.complete,
-          response,
+          text: chatResponse.text,
+          meta: `${PROVIDER_NAMES[chatResponse.provider]} · ${reportedModel}`,
+          incomplete: !chatResponse.complete,
+          response: chatResponse,
+          suggestionRequestId,
         },
       );
       focusText = null;
+      saveConversation();
     } catch (cause) {
-      if (!destroyed && generation === requestGeneration) setError(oneLine(cause));
+      if (!destroyed && generation === requestGeneration) {
+        input.value = message;
+        setError(oneLine(cause));
+      }
     } finally {
       if (!destroyed && generation === requestGeneration) {
         pendingText = null;
-        renderMessages();
-        renderControls();
+        render();
       }
     }
   }
@@ -308,17 +593,16 @@ export function installProChat(
 
   async function suggestMessage(message: LocalMessage): Promise<void> {
     const document = currentDocument;
-    const response = message.response;
+    const chatResponse = message.response;
     if (
-      document === null || response === undefined || !response.complete ||
+      document === null || chatResponse === undefined || !chatResponse.complete ||
       options.suggestResponse === undefined || message.suggested || suggesting !== null ||
-      pendingText !== null
+      pendingText !== null || message.suggestionRequestId === undefined
     ) return;
     const generation = ++requestGeneration;
     suggesting = message;
     setError(null);
-    renderMessages();
-    renderControls();
+    render();
     try {
       if (!(await document.waitUntilSaved())) {
         throw new Error("Wait for this document to finish saving, then try again.");
@@ -326,21 +610,22 @@ export function installProChat(
       if (destroyed || generation !== requestGeneration || currentDocument?.id !== document.id) {
         return;
       }
-      message.suggestionRequestId ??= createRequestId();
+      saveConversation();
       await options.suggestResponse({
         documentId: document.id,
         requestId: message.suggestionRequestId,
-        provider: response.provider,
-        requestedModel: response.requested_model,
-        reportedModel: response.reported_model,
-        assistantText: response.text,
-        wordingRevision: response.wording_revision,
+        provider: chatResponse.provider,
+        requestedModel: chatResponse.requested_model,
+        reportedModel: chatResponse.reported_model,
+        assistantText: chatResponse.text,
+        wordingRevision: chatResponse.wording_revision,
         after: document.suggestionPosition(),
       });
       if (destroyed || generation !== requestGeneration || currentDocument?.id !== document.id) {
         return;
       }
       message.suggested = true;
+      saveConversation();
       options.onNotice?.("Suggestion added for review.");
     } catch (cause) {
       if (!destroyed && generation === requestGeneration) {
@@ -350,16 +635,25 @@ export function installProChat(
     } finally {
       if (!destroyed && generation === requestGeneration) {
         suggesting = null;
-        renderMessages();
-        renderControls();
+        render();
       }
     }
   }
 
   listen(providerSelect, "change", () => {
-    clearConversation();
+    requestGeneration += 1;
+    preferredModel = "";
+    replaceModels([]);
+    focusText = null;
     notice.checked = false;
+    if (provider(providerSelect.value) === null) saveConversation();
+    render();
     void loadModels();
+  });
+  listen(modelSelect, "change", () => {
+    preferredModel = modelSelect.value;
+    saveConversation();
+    renderControls();
   });
   listen(retry, "click", () => void loadModels());
   listen(notice, "change", renderControls);
@@ -373,20 +667,41 @@ export function installProChat(
     event.preventDefault();
     void submit();
   });
-  listen(newChat, "click", clearConversation);
+  listen(newChat, "click", newConversation);
 
-  renderMessages();
-  renderControls();
+  render();
   return {
     setActive(next) {
+      const activated = !active && next;
       active = next;
       renderControls();
+      if (
+        activated && provider(providerSelect.value) !== null &&
+        modelSelect.options.length === 0 && !loadingModels
+      ) void loadModels();
     },
     setDocument(document) {
       const changed = currentDocument?.id !== document?.id;
       currentDocument = document;
-      if (changed) clearConversation();
-      else renderControls();
+      if (!changed) {
+        renderControls();
+        return;
+      }
+      clearTransientState();
+      messages = [];
+      providerSelect.value = "";
+      preferredModel = "";
+      replaceModels([]);
+      if (document) {
+        const saved = readConversation(document.id);
+        if (saved) {
+          providerSelect.value = saved.provider ?? "";
+          preferredModel = saved.model;
+          messages = saved.messages;
+        }
+      }
+      render();
+      if (active && provider(providerSelect.value) !== null) void loadModels();
     },
     destroy() {
       destroyed = true;
