@@ -1,4 +1,5 @@
 import type {
+  ChatAttachment,
   ChatMessage,
   ProChatBridge,
   ProviderModel,
@@ -14,6 +15,10 @@ const PROVIDER_NAMES: Record<ProProvider, string> = {
   anthropic: "Anthropic",
 };
 const MAX_FOCUS_BYTES = 32 * 1024;
+const MAX_ATTACHMENTS = 5;
+const MAX_PDF_BYTES = 10 * 1024 * 1024;
+const MAX_TEXT_BYTES = 512 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_PERSISTED_MESSAGES = 30;
 const MAX_PERSISTED_RECORD_BYTES = 640 * 1024;
 const MAX_PERSISTED_USER_MESSAGE_BYTES = 16 * 1024;
@@ -23,6 +28,13 @@ const MAX_SUGGESTION_METADATA_BYTES = 160;
 const MAX_SUGGESTION_REQUEST_ID_BYTES = 128;
 const STORAGE_PREFIX = "thought.pro-chat.v1.";
 const STORAGE_VERSION = 1;
+const TEXT_FILE_NAME = /\.(?:csv|html?|json|log|markdown|md|toml|txt|xml|ya?ml)$/i;
+const TEXT_MEDIA_TYPES = new Set([
+  "application/json",
+  "application/toml",
+  "application/xml",
+  "application/yaml",
+]);
 
 export type ProChatDocument = {
   id: string;
@@ -48,6 +60,7 @@ type LocalMessage = ChatMessage & {
   incomplete?: boolean;
   response?: SendChatResponse;
   thinking?: ThinkingLevel;
+  attachments?: AttachmentSummary[];
   suggestionRequestId?: string;
   suggested?: boolean;
 };
@@ -57,6 +70,7 @@ type PersistedResponse = Omit<SendChatResponse, "text">;
 type PersistedMessage = ChatMessage & {
   response?: PersistedResponse;
   thinking?: ThinkingLevel;
+  attachments?: AttachmentSummary[];
   suggestionRequestId?: string;
   suggested?: true;
 };
@@ -71,6 +85,13 @@ type PersistedConversation = {
 
 type RestoredConversation = Omit<PersistedConversation, "messages"> & {
   messages: LocalMessage[];
+};
+
+type StagedAttachment = ChatAttachment & { sizeBytes: number };
+type AttachmentSummary = {
+  name: string;
+  media_type: ChatAttachment["media_type"];
+  size_bytes: number;
 };
 
 export type ProChatController = {
@@ -162,6 +183,24 @@ function response(value: unknown, text: string): SendChatResponse | undefined {
   };
 }
 
+function attachmentSummary(value: unknown): AttachmentSummary | null {
+  if (!isRecord(value) || typeof value.name !== "string") return null;
+  let name: string;
+  try {
+    name = attachmentName(value.name);
+  } catch {
+    return null;
+  }
+  if (
+    (value.media_type !== "application/pdf" && value.media_type !== "text/plain") ||
+    typeof value.size_bytes !== "number" || !Number.isSafeInteger(value.size_bytes) ||
+    value.size_bytes <= 0
+  ) return null;
+  const maximum = value.media_type === "application/pdf" ? MAX_PDF_BYTES : MAX_TEXT_BYTES;
+  if (value.size_bytes > maximum) return null;
+  return { name, media_type: value.media_type, size_bytes: value.size_bytes };
+}
+
 function localMessage(value: unknown): LocalMessage | null {
   if (
     !isRecord(value) || (value.role !== "user" && value.role !== "assistant") ||
@@ -179,9 +218,21 @@ function localMessage(value: unknown): LocalMessage | null {
     : undefined;
   if (value.suggestionRequestId !== undefined && suggestionRequestId === undefined) return null;
   if (value.suggested !== undefined && value.suggested !== true) return null;
+  if (value.attachments !== undefined && !Array.isArray(value.attachments)) return null;
+  const attachments = Array.isArray(value.attachments)
+    ? value.attachments.map(attachmentSummary)
+    : [];
   if (
+    attachments.length > MAX_ATTACHMENTS || attachments.some((attachment) => attachment === null)
+  ) return null;
+  const attachmentValues = attachments as AttachmentSummary[];
+  if (
+    new Set(attachmentValues.map(({ name }) => name)).size !== attachmentValues.length ||
+    attachmentValues.reduce((sum, attachment) => sum + attachment.size_bytes, 0) >
+      MAX_TOTAL_ATTACHMENT_BYTES ||
     (value.role === "assistant" && savedResponse === undefined) ||
-    (savedResponse !== undefined && value.role !== "assistant")
+    (savedResponse !== undefined && value.role !== "assistant") ||
+    (attachmentValues.length > 0 && value.role !== "user")
   ) return null;
   const requestedThinking = savedResponse ? thinkingLevel(value.thinking) : null;
   if (savedResponse && requestedThinking === null) return null;
@@ -190,6 +241,7 @@ function localMessage(value: unknown): LocalMessage | null {
     value.suggestionRequestId !== undefined || value.suggested !== undefined;
   if (
     (value.role !== "assistant" && hasAssistantOnlyState) ||
+    (value.role === "assistant" && attachmentValues.length > 0) ||
     (value.role === "assistant" && hasAssistantOnlyState && savedResponse === undefined) ||
     (value.suggested === true && suggestionRequestId === undefined)
   ) return null;
@@ -202,6 +254,7 @@ function localMessage(value: unknown): LocalMessage | null {
     text: value.text,
     response: savedResponse,
     thinking: requestedThinking ?? undefined,
+    attachments: attachmentValues.length > 0 ? attachmentValues : undefined,
     suggestionRequestId,
     suggested: value.suggested === true,
     meta: savedResponse
@@ -251,6 +304,9 @@ function persistedMessage(message: LocalMessage): PersistedMessage {
     };
     saved.thinking = message.thinking ?? "provider_default";
   }
+  if (message.attachments?.length) {
+    saved.attachments = message.attachments.map((attachment) => ({ ...attachment }));
+  }
   if (message.suggestionRequestId) saved.suggestionRequestId = message.suggestionRequestId;
   if (message.suggested) saved.suggested = true;
   return saved;
@@ -258,6 +314,58 @@ function persistedMessage(message: LocalMessage): PersistedMessage {
 
 function storageKey(documentId: string): string {
   return `${STORAGE_PREFIX}${encodeURIComponent(documentId)}`;
+}
+
+function attachmentMediaType(
+  file: File,
+  name: string,
+): ChatAttachment["media_type"] | null {
+  const mediaType = file.type.toLowerCase();
+  if (mediaType === "application/pdf" || name.toLowerCase().endsWith(".pdf")) {
+    return "application/pdf";
+  }
+  if (
+    mediaType.startsWith("text/") || TEXT_MEDIA_TYPES.has(mediaType) ||
+    TEXT_FILE_NAME.test(name)
+  ) return "text/plain";
+  return null;
+}
+
+function attachmentName(value: string): string {
+  const trimmed = value.trim();
+  if (
+    !trimmed || trimmed === "." || trimmed === ".." ||
+    /[\\/\u0000-\u001f\u007f]/.test(trimmed) ||
+    new TextEncoder().encode(trimmed).byteLength > 200
+  ) {
+    throw new Error(
+      "Attachment names must be 200 UTF-8 bytes or fewer and cannot contain paths or control characters.",
+    );
+  }
+  return trimmed;
+}
+
+function displayFileName(value: string): string {
+  return value.replace(/[\r\n\t]+/g, " ").trim().slice(0, 80) || "This file";
+}
+
+function fileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function base64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 32_768) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+  }
+  return btoa(binary);
+}
+
+function isPdf(bytes: Uint8Array): boolean {
+  return bytes.length >= 5 && bytes[0] === 0x25 && bytes[1] === 0x50 &&
+    bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d;
 }
 
 export function installProChat(
@@ -270,7 +378,6 @@ export function installProChat(
   const thinkingSelect = required<HTMLSelectElement>(panel, "#pro-chat-thinking");
   const retry = required<HTMLButtonElement>(panel, "#pro-chat-retry");
   const storageNotice = required<HTMLElement>(panel, "#pro-chat-storage-notice");
-  const notice = required<HTMLInputElement>(panel, "#pro-chat-consent");
   const documentLabel = required<HTMLElement>(panel, "#pro-chat-document");
   const messagesElement = required<HTMLOListElement>(panel, "#pro-chat-messages");
   const empty = required<HTMLElement>(panel, "#pro-chat-empty");
@@ -283,19 +390,25 @@ export function installProChat(
   const focus = required<HTMLElement>(panel, "#pro-chat-focus");
   const focusLabel = required<HTMLElement>(panel, "#pro-chat-focus-text");
   const removeFocus = required<HTMLButtonElement>(panel, "#pro-chat-focus-remove");
+  const attach = required<HTMLButtonElement>(panel, "#pro-chat-attach");
+  const attachmentInput = required<HTMLInputElement>(panel, "#pro-chat-attachment-input");
+  const attachmentList = required<HTMLUListElement>(panel, "#pro-chat-attachments");
   const bridge = options.bridge ?? null;
   const createRequestId = options.createRequestId ?? (() => crypto.randomUUID());
   const disposers: Array<() => void> = [];
   let currentDocument: ProChatDocument | null = null;
   let messages: LocalMessage[] = [];
+  let stagedAttachments: StagedAttachment[] = [];
   let pendingText: string | null = null;
   let suggesting: LocalMessage | null = null;
   let focusText: string | null = null;
   let preferredModel = "";
   let active = false;
   let loadingModels = false;
+  let readingAttachments = false;
   let destroyed = false;
   let requestGeneration = 0;
+  let attachmentGeneration = 0;
   let storageNoticeShown = false;
   let storage: ChatStorage | null = null;
   let storageAccessFailed = false;
@@ -405,6 +518,13 @@ export function installProChat(
     const text = root.createElement("p");
     text.textContent = message.text;
     item.append(label, text);
+    if (message.attachments?.length) {
+      const attachments = root.createElement("small");
+      attachments.className = "pro-chat-message-attachments";
+      attachments.textContent = `Attached: ${message.attachments.map((attachment) =>
+        `${attachment.name} (${fileSize(attachment.size_bytes)})`).join(", ")}`;
+      item.append(attachments);
+    }
     if (message.meta || message.incomplete) {
       const meta = root.createElement("small");
       meta.textContent = [
@@ -423,7 +543,7 @@ export function installProChat(
           ? "Suggesting…"
           : "Suggest in document";
       suggest.disabled = message.suggested === true || loadingModels || suggesting !== null ||
-        pendingText !== null;
+        pendingText !== null || readingAttachments;
       suggest.addEventListener("click", () => void suggestMessage(message));
       item.append(suggest);
     }
@@ -439,13 +559,42 @@ export function installProChat(
     messagesElement.hidden = rendered.length === 0;
     empty.hidden = rendered.length !== 0;
     newChat.hidden = messages.length === 0 && pendingText === null;
-    newChat.disabled = loadingModels || pendingText !== null || suggesting !== null;
+    newChat.disabled = loadingModels || pendingText !== null || suggesting !== null ||
+      readingAttachments;
+  }
+
+  function removeAttachment(index: number): void {
+    stagedAttachments.splice(index, 1);
+    attachmentInput.value = "";
+    setError(null);
+    render();
+  }
+
+  function renderAttachments(): void {
+    const busy = pendingText !== null || suggesting !== null || readingAttachments;
+    const items = stagedAttachments.map((attachment, index) => {
+      const item = root.createElement("li");
+      const name = root.createElement("span");
+      name.textContent = `${attachment.name} · ${fileSize(attachment.sizeBytes)}`;
+      name.title = attachment.name;
+      const remove = root.createElement("button");
+      remove.type = "button";
+      remove.className = "text-button";
+      remove.textContent = "Remove";
+      remove.setAttribute("aria-label", `Remove ${attachment.name}`);
+      remove.disabled = busy;
+      remove.addEventListener("click", () => removeAttachment(index));
+      item.append(name, remove);
+      return item;
+    });
+    attachmentList.replaceChildren(...items);
+    attachmentList.hidden = items.length === 0;
   }
 
   function renderControls(): void {
     const selectedProvider = provider(providerSelect.value);
     const hasModel = modelSelect.value !== "";
-    const busy = pendingText !== null || suggesting !== null;
+    const busy = pendingText !== null || suggesting !== null || readingAttachments;
     documentLabel.textContent = currentDocument
       ? `Current document: ${currentDocument.title}`
       : "Open a document to start a chat.";
@@ -457,19 +606,30 @@ export function installProChat(
         : focusText;
     providerSelect.disabled = busy;
     captureFocus.disabled = currentDocument === null || busy;
+    attach.disabled = currentDocument === null || selectedProvider === null || busy ||
+      stagedAttachments.length >= MAX_ATTACHMENTS;
+    attachmentInput.disabled = attach.disabled;
     modelSelect.disabled = selectedProvider === null || loadingModels || busy;
     thinkingSelect.disabled = selectedProvider === null || !hasModel || loadingModels || busy;
     retry.disabled = loadingModels || selectedProvider === null || bridge === null || busy;
     input.disabled = currentDocument === null || busy || bridge === null;
     send.disabled = currentDocument === null || selectedProvider === null || !hasModel ||
-      !notice.checked || busy || input.value.trim() === "" || bridge === null;
+      busy || input.value.trim() === "" || bridge === null;
     panel.setAttribute("aria-busy", String(loadingModels || busy));
     send.textContent = pendingText === null ? "Send" : "Sending…";
   }
 
   function render(): void {
     renderMessages();
+    renderAttachments();
     renderControls();
+  }
+
+  function clearAttachments(): void {
+    attachmentGeneration += 1;
+    stagedAttachments = [];
+    readingAttachments = false;
+    attachmentInput.value = "";
   }
 
   function clearTransientState(): void {
@@ -480,6 +640,7 @@ export function installProChat(
     suggesting = null;
     focusText = null;
     input.value = "";
+    clearAttachments();
     setError(null);
   }
 
@@ -539,14 +700,102 @@ export function installProChat(
     }
   }
 
+  async function stageFiles(files: readonly File[]): Promise<void> {
+    const documentId = currentDocument?.id;
+    const generation = ++attachmentGeneration;
+    attachmentInput.value = "";
+    if (documentId === undefined || files.length === 0) return;
+    if (stagedAttachments.length + files.length > MAX_ATTACHMENTS) {
+      setError("Attach no more than 5 files to one request.");
+      render();
+      return;
+    }
+    readingAttachments = true;
+    setError(null);
+    render();
+    try {
+      const next: StagedAttachment[] = [];
+      let totalBytes = stagedAttachments.reduce((sum, file) => sum + file.sizeBytes, 0);
+      const names = new Set(stagedAttachments.map(({ name }) => name));
+      for (const file of files) {
+        const name = attachmentName(file.name);
+        if (names.has(name)) {
+          throw new Error(`“${displayFileName(name)}” is already attached.`);
+        }
+        const mediaType = attachmentMediaType(file, name);
+        if (mediaType === null) {
+          throw new Error("Only PDF and UTF-8 text files can be attached.");
+        }
+        const maximum = mediaType === "application/pdf" ? MAX_PDF_BYTES : MAX_TEXT_BYTES;
+        const limit = mediaType === "application/pdf" ? "10 MiB" : "512 KiB";
+        if (file.size <= 0) {
+          throw new Error(`“${displayFileName(name)}” is empty.`);
+        }
+        if (file.size > maximum) {
+          throw new Error(`“${displayFileName(name)}” exceeds the ${limit} limit.`);
+        }
+        if (totalBytes + file.size > MAX_TOTAL_ATTACHMENT_BYTES) {
+          throw new Error("Attachments cannot exceed 20 MiB in total.");
+        }
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        if (
+          destroyed || generation !== attachmentGeneration ||
+          currentDocument?.id !== documentId
+        ) return;
+        if (bytes.byteLength > maximum) {
+          throw new Error(`“${displayFileName(name)}” exceeds the ${limit} limit.`);
+        }
+        if (bytes.byteLength === 0) {
+          throw new Error(`“${displayFileName(name)}” is empty.`);
+        }
+        if (totalBytes + bytes.byteLength > MAX_TOTAL_ATTACHMENT_BYTES) {
+          throw new Error("Attachments cannot exceed 20 MiB in total.");
+        }
+        if (mediaType === "application/pdf" && !isPdf(bytes)) {
+          throw new Error(`“${displayFileName(name)}” is not a valid PDF file.`);
+        }
+        if (mediaType === "text/plain") {
+          try {
+            const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+            if (text.includes("\0")) throw new Error("null byte");
+          } catch {
+            throw new Error(`“${displayFileName(name)}” is not a UTF-8 text file.`);
+          }
+        }
+        next.push({
+          name,
+          media_type: mediaType,
+          content_base64: base64(bytes),
+          sizeBytes: bytes.byteLength,
+        });
+        names.add(name);
+        totalBytes += bytes.byteLength;
+      }
+      stagedAttachments.push(...next);
+    } catch (cause) {
+      if (
+        !destroyed && generation === attachmentGeneration &&
+        currentDocument?.id === documentId
+      ) setError(oneLine(cause));
+    } finally {
+      if (
+        !destroyed && generation === attachmentGeneration &&
+        currentDocument?.id === documentId
+      ) {
+        readingAttachments = false;
+        render();
+      }
+    }
+  }
+
   async function submit(): Promise<void> {
     const selectedProvider = provider(providerSelect.value);
     const document = currentDocument;
     const message = input.value.trim();
     if (
       bridge === null || document === null || selectedProvider === null ||
-      modelSelect.value === "" || !notice.checked || pendingText !== null ||
-      suggesting !== null || !message
+      modelSelect.value === "" || pendingText !== null ||
+      suggesting !== null || readingAttachments || !message
     ) return;
     if (messages.length >= MAX_PERSISTED_MESSAGES) {
       setError("This conversation is full. Start a new chat.");
@@ -564,6 +813,16 @@ export function installProChat(
     const selectedThinking = thinking(thinkingSelect.value);
     const generation = ++requestGeneration;
     const previous = messages.map(({ role, text }) => ({ role, text }));
+    const requestAttachments: ChatAttachment[] = stagedAttachments.map((attachment) => ({
+      name: attachment.name,
+      media_type: attachment.media_type,
+      content_base64: attachment.content_base64,
+    }));
+    const attachmentSummaries: AttachmentSummary[] = stagedAttachments.map((attachment) => ({
+      name: attachment.name,
+      media_type: attachment.media_type,
+      size_bytes: attachment.sizeBytes,
+    }));
     pendingText = message;
     input.value = "";
     setError(null);
@@ -578,7 +837,8 @@ export function installProChat(
         messages: previous,
         message,
         focus_text: focusText,
-        disclosure_version: 1,
+        attachments: requestAttachments,
+        disclosure_version: 2,
       });
       if (destroyed || generation !== requestGeneration || currentDocument?.id !== document.id) {
         return;
@@ -595,7 +855,11 @@ export function installProChat(
         throw new Error("Proof of Thought could not create a safe suggestion retry identifier.");
       }
       messages.push(
-        { role: "user", text: message },
+        {
+          role: "user",
+          text: message,
+          attachments: attachmentSummaries.length > 0 ? attachmentSummaries : undefined,
+        },
         {
           role: "assistant",
           text: chatResponse.text,
@@ -607,6 +871,7 @@ export function installProChat(
         },
       );
       focusText = null;
+      clearAttachments();
       saveConversation();
     } catch (cause) {
       if (!destroyed && generation === requestGeneration) {
@@ -642,7 +907,7 @@ export function installProChat(
     if (
       document === null || chatResponse === undefined || !chatResponse.complete ||
       options.suggestResponse === undefined || message.suggested || suggesting !== null ||
-      pendingText !== null || message.suggestionRequestId === undefined
+      pendingText !== null || readingAttachments || message.suggestionRequestId === undefined
     ) return;
     const generation = ++requestGeneration;
     suggesting = message;
@@ -690,7 +955,7 @@ export function installProChat(
     preferredModel = "";
     replaceModels([]);
     focusText = null;
-    notice.checked = false;
+    clearAttachments();
     if (provider(providerSelect.value) === null) saveConversation();
     render();
     void loadModels();
@@ -706,12 +971,15 @@ export function installProChat(
     renderControls();
   });
   listen(retry, "click", () => void loadModels());
-  listen(notice, "change", renderControls);
   listen(input, "input", renderControls);
   listen(captureFocus, "click", captureSelection);
   listen(removeFocus, "click", () => {
     focusText = null;
     renderControls();
+  });
+  listen(attach, "click", () => attachmentInput.click());
+  listen(attachmentInput, "change", () => {
+    void stageFiles(Array.from(attachmentInput.files ?? []));
   });
   listen(form, "submit", (event) => {
     event.preventDefault();
@@ -758,6 +1026,7 @@ export function installProChat(
     destroy() {
       destroyed = true;
       requestGeneration += 1;
+      clearAttachments();
       disposers.splice(0).forEach((dispose) => dispose());
     },
   };

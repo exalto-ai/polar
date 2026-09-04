@@ -44,7 +44,9 @@ function markup(): string {
       <form id="pro-chat-form">
         <button id="pro-chat-focus-capture" type="button"></button>
         <div id="pro-chat-focus" hidden><span id="pro-chat-focus-text"></span><button id="pro-chat-focus-remove" type="button"></button></div>
-        <input id="pro-chat-consent" type="checkbox" />
+        <button id="pro-chat-attach" type="button"></button>
+        <input id="pro-chat-attachment-input" type="file" multiple />
+        <ul id="pro-chat-attachments" hidden></ul>
         <textarea id="pro-chat-input"></textarea>
         <button id="pro-chat-send" type="submit"></button>
       </form>
@@ -93,9 +95,6 @@ async function chooseOpenAi(bridge: ProChatBridge): Promise<void> {
     expect(document.querySelector<HTMLSelectElement>("#pro-chat-model")!.value)
       .not.toBe("");
   });
-  const consent = document.querySelector<HTMLInputElement>("#pro-chat-consent")!;
-  consent.checked = true;
-  consent.dispatchEvent(new Event("change"));
 }
 
 function compose(message: string): void {
@@ -107,6 +106,28 @@ function compose(message: string): void {
 function submitChat(): void {
   document.querySelector<HTMLFormElement>("#pro-chat-form")!
     .dispatchEvent(new Event("submit", { cancelable: true }));
+}
+
+function file(
+  name: string,
+  type: string,
+  bytes: Uint8Array,
+  declaredSize = bytes.byteLength,
+): File {
+  return {
+    name,
+    type,
+    size: declaredSize,
+    arrayBuffer: vi.fn().mockResolvedValue(
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+    ),
+  } as unknown as File;
+}
+
+function selectFiles(files: File[]): void {
+  const input = document.querySelector<HTMLInputElement>("#pro-chat-attachment-input")!;
+  Object.defineProperty(input, "files", { configurable: true, value: files });
+  input.dispatchEvent(new Event("change"));
 }
 
 function deferred<T>() {
@@ -130,7 +151,7 @@ afterEach(() => {
 });
 
 describe("built-in chat", () => {
-  it("shares the current snapshot only after the user acknowledges the notice", async () => {
+  it("shares the current snapshot with the current disclosure contract", async () => {
     let sent: SendChatRequest | null = null;
     let suggested: ChatSuggestionInput | null = null;
     const bridge: ProChatBridge = {
@@ -183,10 +204,6 @@ describe("built-in chat", () => {
     const send = document.querySelector<HTMLButtonElement>("#pro-chat-send")!;
     input.value = "Improve the ending";
     input.dispatchEvent(new Event("input"));
-    expect(send.disabled).toBe(true);
-    const consent = document.querySelector<HTMLInputElement>("#pro-chat-consent")!;
-    consent.checked = true;
-    consent.dispatchEvent(new Event("change"));
     expect(send.disabled).toBe(false);
     document.querySelector<HTMLButtonElement>("#pro-chat-focus-capture")!.click();
     expect(document.querySelector("#pro-chat-focus")?.textContent).toContain("Selected line");
@@ -200,7 +217,8 @@ describe("built-in chat", () => {
       message: "Improve the ending",
       focus_text: "Selected line",
       thinking: "provider_default",
-      disclosure_version: 1,
+      attachments: [],
+      disclosure_version: 2,
     });
     expect(sent).not.toHaveProperty("document_id");
     await vi.waitFor(() => {
@@ -337,6 +355,155 @@ describe("built-in chat", () => {
     expect(document.querySelector("#pro-chat-messages")?.textContent).toBe("");
     expect(storage.getItem("thought.pro-chat.v1.one")).toBeNull();
     expect(storage.getItem("thought.pro-chat.v1.two")).not.toBeNull();
+    controller.destroy();
+  });
+
+  it("sends validated files once, persists only summaries, and records thinking", async () => {
+    const bridge = chatBridge();
+    const controller = installChat({ bridge });
+    controller.setActive(true);
+    controller.setDocument(chatDocument());
+    await chooseOpenAi(bridge);
+    const thinking = document.querySelector<HTMLSelectElement>("#pro-chat-thinking")!;
+    thinking.value = "medium";
+    thinking.dispatchEvent(new Event("change"));
+
+    const pdf = new TextEncoder().encode("%PDF-1.7\nprivate pdf bytes");
+    const text = new TextEncoder().encode("private text contents");
+    selectFiles([
+      file("brief.pdf", "application/pdf", pdf),
+      file("notes.md", "text/markdown", text),
+    ]);
+    await vi.waitFor(() => {
+      expect(document.querySelector("#pro-chat-attachments")?.textContent)
+        .toContain("brief.pdf");
+      expect(document.querySelector("#pro-chat-attachments")?.textContent)
+        .toContain("notes.md");
+    });
+    expect(storage.getItem("thought.pro-chat.v1.private-document-id"))
+      .not.toContain("private text contents");
+
+    compose("Use these files");
+    submitChat();
+    await vi.waitFor(() => expect(bridge.send).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(bridge.send).mock.calls[0][0]).toMatchObject({
+      thinking: "medium",
+      disclosure_version: 2,
+      attachments: [
+        {
+          name: "brief.pdf",
+          media_type: "application/pdf",
+          content_base64: btoa(String.fromCharCode(...pdf)),
+        },
+        {
+          name: "notes.md",
+          media_type: "text/plain",
+          content_base64: btoa(String.fromCharCode(...text)),
+        },
+      ],
+    });
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-messages")?.textContent)
+      .toContain("Medium thinking requested"));
+    expect(document.querySelector("#pro-chat-messages")?.textContent).toContain("brief.pdf");
+    expect(document.querySelector("#pro-chat-attachments")?.textContent).toBe("");
+
+    const saved = storage.getItem("thought.pro-chat.v1.private-document-id")!;
+    expect(saved).toContain('"name":"brief.pdf"');
+    expect(saved).toContain('"size_bytes":26');
+    expect(saved).not.toContain("content_base64");
+    expect(saved).not.toContain("private pdf bytes");
+    expect(saved).not.toContain("private text contents");
+
+    compose("Follow up");
+    submitChat();
+    await vi.waitFor(() => expect(bridge.send).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(bridge.send).mock.calls[1][0].attachments).toEqual([]);
+    expect(vi.mocked(bridge.send).mock.calls[1][0].messages)
+      .toEqual([
+        { role: "user", text: "Use these files" },
+        { role: "assistant", text: "Reply" },
+      ]);
+    controller.destroy();
+  });
+
+  it("keeps the typed message and staged files when provider delivery fails", async () => {
+    const send = vi.fn()
+      .mockRejectedValueOnce(new Error("network unavailable"))
+      .mockResolvedValueOnce({
+        text: "Recovered",
+        provider: "openai",
+        requested_model: "gpt-test",
+        reported_model: null,
+        wording_revision: "revision-2",
+        complete: true,
+      });
+    const bridge = chatBridge({ send });
+    const controller = installChat({ bridge });
+    controller.setActive(true);
+    controller.setDocument(chatDocument());
+    await chooseOpenAi(bridge);
+    selectFiles([
+      file("notes.txt", "text/plain", new TextEncoder().encode("retry me")),
+    ]);
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-attachments")?.textContent)
+      .toContain("notes.txt"));
+    compose("Try once");
+    submitChat();
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-error")?.textContent)
+      .toContain("network unavailable"));
+    expect(document.querySelector<HTMLTextAreaElement>("#pro-chat-input")!.value)
+      .toBe("Try once");
+    expect(document.querySelector("#pro-chat-attachments")?.textContent)
+      .toContain("notes.txt");
+
+    submitChat();
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(send.mock.calls[1][0].attachments).toHaveLength(1);
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-attachments")?.textContent)
+      .toBe(""));
+    controller.destroy();
+  });
+
+  it("rejects unsupported, duplicate, invalid UTF-8, oversized, and excess files", async () => {
+    const bridge = chatBridge();
+    const controller = installChat({ bridge });
+    controller.setActive(true);
+    controller.setDocument(chatDocument());
+    await chooseOpenAi(bridge);
+
+    selectFiles(Array.from({ length: 6 }, (_, index) =>
+      file(`${index}.txt`, "text/plain", new Uint8Array([65]))));
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-error")?.textContent)
+      .toContain("no more than 5"));
+
+    selectFiles([
+      file("large.txt", "text/plain", new Uint8Array([65]), 512 * 1024 + 1),
+    ]);
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-error")?.textContent)
+      .toContain("512 KiB"));
+    selectFiles([
+      file("large.pdf", "application/pdf", new Uint8Array([37, 80, 68, 70, 45]),
+        10 * 1024 * 1024 + 1),
+    ]);
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-error")?.textContent)
+      .toContain("10 MiB"));
+
+    selectFiles([file("bad.txt", "text/plain", new Uint8Array([0xc3, 0x28]))]);
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-error")?.textContent)
+      .toContain("not a UTF-8"));
+    selectFiles([file("archive.zip", "application/zip", new Uint8Array([65]))]);
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-error")?.textContent)
+      .toContain("Only PDF and UTF-8"));
+    selectFiles([file("folder/notes.txt", "text/plain", new Uint8Array([65]))]);
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-error")?.textContent)
+      .toContain("cannot contain paths"));
+
+    selectFiles([file("notes.txt", "text/plain", new Uint8Array([65]))]);
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-attachments")?.textContent)
+      .toContain("notes.txt"));
+    selectFiles([file(" notes.txt ", "text/plain", new Uint8Array([66]))]);
+    await vi.waitFor(() => expect(document.querySelector("#pro-chat-error")?.textContent)
+      .toContain("already attached"));
     controller.destroy();
   });
 
@@ -603,9 +770,6 @@ describe("built-in chat", () => {
     await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>(
       "#pro-chat-model",
     )!.value).toBe("gpt-test"));
-    const consent = document.querySelector<HTMLInputElement>("#pro-chat-consent")!;
-    consent.checked = true;
-    consent.dispatchEvent(new Event("change"));
     compose("One too many");
     submitChat();
     expect(document.querySelector("#pro-chat-error")?.textContent)

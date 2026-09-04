@@ -490,16 +490,18 @@ actual request reports that failure, without a separate catalog probe or validat
 
 ### AD-23: Visible chat persists locally and cannot edit
 
-The window sends the current document projection and visible conversation to a selected built-in
-provider only after a clear sharing acknowledgement. It stores a bounded visible conversation for
-each document in the WebView's local storage and restores it when that document reopens. This is
-local convenience state, not a native transcript database, synced document state, proof, or
-provenance. New chat removes only the current document's saved conversation.
+The window shows a clear sharing disclosure, then sends the current document projection and visible
+conversation to a selected built-in provider. It stores a bounded visible conversation for each
+document in the WebView's local storage and restores it when that document reopens. This is local
+convenience state, not a native transcript database, synced document state, proof, or provenance.
+New chat removes only the current document's saved conversation.
 
 Stored history contains visible messages and the minimum response metadata needed to retry a
-reviewable suggestion safely. It never contains the composer draft, selected focus, or hidden
-reasoning. Storage corruption, denial, or quota failure leaves the live in-window chat usable and
-reports that persistence is unavailable.
+reviewable suggestion safely. It never contains the composer draft, selected focus, hidden
+reasoning, or the original attachment payload or base64. A provider response may quote or
+transform an attachment, and that visible response persists as ordinary AI chat. Storage
+corruption, denial, or quota failure leaves the live in-window chat usable and reports that
+persistence is unavailable.
 
 Provider responses remain plain visible text; they do not enter the document or attribution log by
 themselves.
@@ -521,15 +523,26 @@ than keeping a second native transcript. A modified window could alter a pending
 cannot bypass the local person’s review. Stronger provenance would require a signed provider
 response or a private transcript lifecycle, neither of which the MVP has a present need for.
 
-### AD-25 — Extra chat context is selected plain text, not files
+### AD-25: Extra chat context is selected text or request-scoped files
 
 A person may snapshot the current editor selection as visible plain-text focus for one chat
 request. The app still sends the current document, labels the selection separately, bounds it, and
 clears it after a successful response. It is context, not a durable range or provenance claim.
 
-**Cost:** the selection may be stale by Send time and loses rich formatting. Supporting files would
-require type-specific parsing, path and permission handling, staging, retention, and provider
-upload lifecycles; none is justified by this focused use case.
+A chat message may also carry up to five PDFs or UTF-8 text files. PDFs are limited to 10 MiB,
+text files to 512 KiB, and the combined decoded payload to 20 MiB. The WebView checks files for
+immediate feedback and native Rust repeats every count, name, encoding, type, and size check. Files
+are sent inline to the fixed provider endpoint for that request only. There are no temporary files,
+filesystem paths, provider file IDs, provider Files API calls, daemon writes, or durable copies of
+the original attachment payload. A visible filename and size summary may remain in local chat
+history, but neither that summary nor the file enters a proof or suggestion payload. Visible
+provider output may quote or transform an attachment and persists as ordinary AI chat.
+
+**Cost:** the selection may be stale by Send time and loses rich formatting. Files increase
+provider token use, latency, and cost, and the provider's own retention rules apply after receipt.
+Follow-up requests do not resend a file, so a person must attach it again when exact source context
+is still required. A response may quote or transform a file, but any accepted editor wording is
+attributed as reported AI output, never as verified authorship or provenance for the attached file.
 
 ### AD-26: Thinking levels are requested settings, not observed reasoning
 
