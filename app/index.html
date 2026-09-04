@@ -85,7 +85,13 @@
                 <button class="text-button" id="pro-chat-focus-remove" type="button">Remove</button>
               </div>
             </div>
-            <label class="pro-chat-consent"><input id="pro-chat-consent" type="checkbox" /> Share the current document and this chat with the selected provider.</label>
+            <div class="pro-chat-attachment-picker">
+              <button class="text-button" id="pro-chat-attach" type="button">Attach files</button>
+              <input id="pro-chat-attachment-input" type="file" accept="application/pdf,text/*,.pdf,.txt,.md,.markdown,.csv,.json,.html,.htm,.log,.xml,.yaml,.yml,.toml" multiple hidden />
+              <p>Up to 5 files and 20 MiB total. PDFs can be 10 MiB each; UTF-8 text files can be 512 KiB. File contents are not saved; filenames and sizes remain in local chat history. Files remain attached for retry after a failed request and leave the composer after success.</p>
+              <ul id="pro-chat-attachments" hidden></ul>
+            </div>
+            <p class="pro-chat-disclosure">Sends the current document, visible chat, and files attached for this request to the selected provider. API requests may incur provider charges.</p>
             <textarea id="pro-chat-input" maxlength="16384" rows="3" placeholder="Ask about the current document…"></textarea>
             <button class="ghost" id="pro-chat-send" type="submit" disabled>Send</button>
           </form>

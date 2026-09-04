@@ -5,6 +5,11 @@ export type ProviderModel = { id: string; display_name: string };
 export type ProviderModels = { provider: ProProvider; models: ProviderModel[] };
 export type ChatMessage = { role: "user" | "assistant"; text: string };
 export type ThinkingLevel = "provider_default" | "low" | "medium" | "high";
+export type ChatAttachment = {
+  name: string;
+  media_type: "application/pdf" | "text/plain";
+  content_base64: string;
+};
 
 export type SendChatRequest = {
   document_title: string;
@@ -15,7 +20,8 @@ export type SendChatRequest = {
   messages: ChatMessage[];
   message: string;
   focus_text: string | null;
-  disclosure_version: 1;
+  attachments: ChatAttachment[];
+  disclosure_version: 2;
 };
 
 export type SendChatResponse = {
