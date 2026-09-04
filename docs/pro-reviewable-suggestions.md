@@ -11,5 +11,6 @@ proposal. A response generated for older wording must be regenerated. Provider a
 remain reported claims.
 
 This reuses the editor API, daemon bearer, suggestion store, and review UI. It adds no provider
-credential, native transcript, direct-write route, selection replacement, file context, or second
-capability system.
+credential, native transcript, direct-write route, selection replacement, or second capability
+system. Only visible assistant text crosses into the suggestion request. Local chat history does
+not enter the daemon or proof.
