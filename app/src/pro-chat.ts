@@ -3,6 +3,7 @@ import type {
   ProChatBridge,
   ProviderModel,
   SendChatResponse,
+  ThinkingLevel,
 } from "./pro-chat-bridge";
 import type { ChatSuggestionInput } from "./editor-api";
 import type { ProProvider } from "./pro-provider-bridge";
@@ -46,6 +47,7 @@ type LocalMessage = ChatMessage & {
   meta?: string;
   incomplete?: boolean;
   response?: SendChatResponse;
+  thinking?: ThinkingLevel;
   suggestionRequestId?: string;
   suggested?: boolean;
 };
@@ -54,6 +56,7 @@ type PersistedResponse = Omit<SendChatResponse, "text">;
 
 type PersistedMessage = ChatMessage & {
   response?: PersistedResponse;
+  thinking?: ThinkingLevel;
   suggestionRequestId?: string;
   suggested?: true;
 };
@@ -62,6 +65,7 @@ type PersistedConversation = {
   version: typeof STORAGE_VERSION;
   provider: ProProvider | null;
   model: string;
+  thinking: ThinkingLevel;
   messages: PersistedMessage[];
 };
 
@@ -89,6 +93,30 @@ function oneLine(error: unknown): string {
 
 function provider(value: unknown): ProProvider | null {
   return value === "openai" || value === "anthropic" ? value : null;
+}
+
+function thinkingLevel(value: unknown): ThinkingLevel | null {
+  return value === "provider_default" || value === "low" || value === "medium" ||
+      value === "high"
+    ? value
+    : null;
+}
+
+function thinking(value: unknown): ThinkingLevel {
+  return thinkingLevel(value) ?? "provider_default";
+}
+
+function thinkingLabel(value: ThinkingLevel): string {
+  switch (value) {
+    case "provider_default":
+      return "Provider default";
+    case "low":
+      return "Low";
+    case "medium":
+      return "Medium";
+    case "high":
+      return "High";
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -155,8 +183,10 @@ function localMessage(value: unknown): LocalMessage | null {
     (value.role === "assistant" && savedResponse === undefined) ||
     (savedResponse !== undefined && value.role !== "assistant")
   ) return null;
+  const requestedThinking = savedResponse ? thinkingLevel(value.thinking) : null;
+  if (savedResponse && requestedThinking === null) return null;
   if (savedResponse && suggestionRequestId === undefined) return null;
-  const hasAssistantOnlyState = value.response !== undefined ||
+  const hasAssistantOnlyState = value.response !== undefined || value.thinking !== undefined ||
     value.suggestionRequestId !== undefined || value.suggested !== undefined;
   if (
     (value.role !== "assistant" && hasAssistantOnlyState) ||
@@ -164,14 +194,19 @@ function localMessage(value: unknown): LocalMessage | null {
     (value.suggested === true && suggestionRequestId === undefined)
   ) return null;
   const reportedModel = savedResponse?.reported_model ?? savedResponse?.requested_model;
+  const thinkingCopy = requestedThinking
+    ? `${thinkingLabel(requestedThinking)} thinking requested`
+    : null;
   return {
     role: value.role,
     text: value.text,
     response: savedResponse,
+    thinking: requestedThinking ?? undefined,
     suggestionRequestId,
     suggested: value.suggested === true,
     meta: savedResponse
-      ? `${PROVIDER_NAMES[savedResponse.provider]} · ${reportedModel}`
+      ? [PROVIDER_NAMES[savedResponse.provider], reportedModel, thinkingCopy]
+        .filter(Boolean).join(" · ")
       : undefined,
     incomplete: savedResponse ? !savedResponse.complete : undefined,
   };
@@ -181,7 +216,8 @@ function persistedConversation(value: unknown): RestoredConversation | null {
   if (
     !isRecord(value) || value.version !== STORAGE_VERSION ||
     !Array.isArray(value.messages) || value.messages.length > MAX_PERSISTED_MESSAGES ||
-    !withinBytes(value.model, MAX_PERSISTED_IDENTIFIER_BYTES) || value.model.includes("\0")
+    !withinBytes(value.model, MAX_PERSISTED_IDENTIFIER_BYTES) || value.model.includes("\0") ||
+    thinkingLevel(value.thinking) === null
   ) return null;
   const savedProvider = value.provider === null ? null : provider(value.provider);
   if (value.provider !== null && savedProvider === null) return null;
@@ -198,6 +234,7 @@ function persistedConversation(value: unknown): RestoredConversation | null {
     version: STORAGE_VERSION,
     provider: savedProvider,
     model: value.model,
+    thinking: value.thinking as ThinkingLevel,
     messages: savedMessages as LocalMessage[],
   };
 }
@@ -212,6 +249,7 @@ function persistedMessage(message: LocalMessage): PersistedMessage {
       wording_revision: message.response.wording_revision,
       complete: message.response.complete,
     };
+    saved.thinking = message.thinking ?? "provider_default";
   }
   if (message.suggestionRequestId) saved.suggestionRequestId = message.suggestionRequestId;
   if (message.suggested) saved.suggested = true;
@@ -229,6 +267,7 @@ export function installProChat(
   const panel = required<HTMLElement>(root, "#pro-chat");
   const providerSelect = required<HTMLSelectElement>(panel, "#pro-chat-provider");
   const modelSelect = required<HTMLSelectElement>(panel, "#pro-chat-model");
+  const thinkingSelect = required<HTMLSelectElement>(panel, "#pro-chat-thinking");
   const retry = required<HTMLButtonElement>(panel, "#pro-chat-retry");
   const storageNotice = required<HTMLElement>(panel, "#pro-chat-storage-notice");
   const notice = required<HTMLInputElement>(panel, "#pro-chat-consent");
@@ -330,6 +369,7 @@ export function installProChat(
       version: STORAGE_VERSION,
       provider: provider(providerSelect.value),
       model: modelSelect.value || preferredModel,
+      thinking: thinking(thinkingSelect.value),
       messages: messages.map(persistedMessage),
     };
     try {
@@ -418,6 +458,7 @@ export function installProChat(
     providerSelect.disabled = busy;
     captureFocus.disabled = currentDocument === null || busy;
     modelSelect.disabled = selectedProvider === null || loadingModels || busy;
+    thinkingSelect.disabled = selectedProvider === null || !hasModel || loadingModels || busy;
     retry.disabled = loadingModels || selectedProvider === null || bridge === null || busy;
     input.disabled = currentDocument === null || busy || bridge === null;
     send.disabled = currentDocument === null || selectedProvider === null || !hasModel ||
@@ -520,6 +561,7 @@ export function installProChat(
     }
 
     const model = modelSelect.value;
+    const selectedThinking = thinking(thinkingSelect.value);
     const generation = ++requestGeneration;
     const previous = messages.map(({ role, text }) => ({ role, text }));
     pendingText = message;
@@ -532,6 +574,7 @@ export function installProChat(
         document: document.snapshot(),
         provider: selectedProvider,
         model,
+        thinking: selectedThinking,
         messages: previous,
         message,
         focus_text: focusText,
@@ -546,6 +589,7 @@ export function installProChat(
           MAX_PERSISTED_ASSISTANT_MESSAGE_BYTES
       ) throw new Error("The provider returned a response that is too large to use safely.");
       const reportedModel = chatResponse.reported_model ?? chatResponse.requested_model;
+      const thinkingCopy = `${thinkingLabel(selectedThinking)} thinking requested`;
       const suggestionRequestId = createRequestId();
       if (!validSuggestionRequestId(suggestionRequestId)) {
         throw new Error("Proof of Thought could not create a safe suggestion retry identifier.");
@@ -555,9 +599,10 @@ export function installProChat(
         {
           role: "assistant",
           text: chatResponse.text,
-          meta: `${PROVIDER_NAMES[chatResponse.provider]} · ${reportedModel}`,
+          meta: `${PROVIDER_NAMES[chatResponse.provider]} · ${reportedModel} · ${thinkingCopy}`,
           incomplete: !chatResponse.complete,
           response: chatResponse,
+          thinking: selectedThinking,
           suggestionRequestId,
         },
       );
@@ -655,6 +700,11 @@ export function installProChat(
     saveConversation();
     renderControls();
   });
+  listen(thinkingSelect, "change", () => {
+    thinkingSelect.value = thinking(thinkingSelect.value);
+    saveConversation();
+    renderControls();
+  });
   listen(retry, "click", () => void loadModels());
   listen(notice, "change", renderControls);
   listen(input, "input", renderControls);
@@ -690,12 +740,14 @@ export function installProChat(
       clearTransientState();
       messages = [];
       providerSelect.value = "";
+      thinkingSelect.value = "provider_default";
       preferredModel = "";
       replaceModels([]);
       if (document) {
         const saved = readConversation(document.id);
         if (saved) {
           providerSelect.value = saved.provider ?? "";
+          thinkingSelect.value = saved.thinking;
           preferredModel = saved.model;
           messages = saved.messages;
         }

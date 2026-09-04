@@ -531,6 +531,17 @@ clears it after a successful response. It is context, not a durable range or pro
 require type-specific parsing, path and permission handling, staging, retention, and provider
 upload lifecycles; none is justified by this focused use case.
 
+### AD-26: Thinking levels are requested settings, not observed reasoning
+
+Built-in chat offers Provider default, Low, Medium, and High. OpenAI receives a non-default choice
+as `reasoning.effort`; Anthropic receives it as `output_config.effort`. The app records and displays
+the choice as requested. It neither displays hidden reasoning nor claims that a provider or model
+honored a particular amount of thinking.
+
+**Cost:** support is model-dependent and a provider may reject an unsupported combination. Higher
+levels can increase latency and cost without guaranteeing a better response. Switching levels may
+also reduce provider-side cache reuse.
+
 ## 7. Explicit non-goals for MVP
 
 Folders and hierarchy · accounts and authentication · end-to-end encryption · mobile ·
