@@ -4,12 +4,14 @@ import type { ProProvider } from "./pro-provider-bridge";
 export type ProviderModel = { id: string; display_name: string };
 export type ProviderModels = { provider: ProProvider; models: ProviderModel[] };
 export type ChatMessage = { role: "user" | "assistant"; text: string };
+export type ThinkingLevel = "provider_default" | "low" | "medium" | "high";
 
 export type SendChatRequest = {
   document_title: string;
   document: unknown;
   provider: ProProvider;
   model: string;
+  thinking: ThinkingLevel;
   messages: ChatMessage[];
   message: string;
   focus_text: string | null;

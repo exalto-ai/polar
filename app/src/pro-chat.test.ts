@@ -30,6 +30,12 @@ function markup(): string {
       <p id="pro-chat-document"></p>
       <select id="pro-chat-provider"><option value=""></option><option value="openai">OpenAI</option></select>
       <select id="pro-chat-model"></select>
+      <select id="pro-chat-thinking">
+        <option value="provider_default">Provider default</option>
+        <option value="low">Low</option>
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+      </select>
       <p id="pro-chat-error" hidden></p>
       <p id="pro-chat-storage-notice" hidden></p>
       <button id="pro-chat-retry" hidden></button>
@@ -193,6 +199,7 @@ describe("built-in chat", () => {
       document: { type: "doc", content: [] },
       message: "Improve the ending",
       focus_text: "Selected line",
+      thinking: "provider_default",
       disclosure_version: 1,
     });
     expect(sent).not.toHaveProperty("document_id");
@@ -288,7 +295,7 @@ describe("built-in chat", () => {
     controller.destroy();
   });
 
-  it("restores isolated per-document chat and model, while New chat clears one", async () => {
+  it("restores isolated per-document chat and settings, while New chat clears one", async () => {
     const bridge = chatBridge();
     const controller = installChat({ bridge });
     controller.setActive(true);
@@ -297,11 +304,17 @@ describe("built-in chat", () => {
     const model = document.querySelector<HTMLSelectElement>("#pro-chat-model")!;
     model.value = "gpt-second";
     model.dispatchEvent(new Event("change"));
+    const thinking = document.querySelector<HTMLSelectElement>("#pro-chat-thinking")!;
+    thinking.value = "high";
+    thinking.dispatchEvent(new Event("change"));
     compose("Question");
     submitChat();
     await vi.waitFor(() => {
       expect(document.querySelector("#pro-chat-messages")?.textContent).toContain("Reply");
     });
+    expect(document.querySelector("#pro-chat-messages")?.textContent)
+      .toContain("High thinking requested");
+
     controller.setDocument(chatDocument("two", "Two"));
     expect(document.querySelector("#pro-chat-messages")?.textContent).toBe("");
     expect(document.querySelector("#pro-chat-document")?.textContent).toContain("Two");
@@ -311,8 +324,11 @@ describe("built-in chat", () => {
 
     controller.setDocument(chatDocument("one", "One"));
     expect(document.querySelector("#pro-chat-messages")?.textContent).toContain("Reply");
+    expect(document.querySelector("#pro-chat-messages")?.textContent)
+      .toContain("High thinking requested");
     expect(document.querySelector<HTMLSelectElement>("#pro-chat-provider")!.value)
       .toBe("openai");
+    expect(document.querySelector<HTMLSelectElement>("#pro-chat-thinking")!.value).toBe("high");
     await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>(
       "#pro-chat-model",
     )!.value).toBe("gpt-second"));
@@ -459,6 +475,7 @@ describe("built-in chat", () => {
       version: 1,
       provider: "openai",
       model: "gpt-test",
+      thinking: "medium",
       messages: [
         { role: "user", text: "Question" },
         {
@@ -471,6 +488,7 @@ describe("built-in chat", () => {
             wording_revision: "revision-1",
             complete: true,
           },
+          thinking: "medium",
           suggestionRequestId: "suggestion-one",
         },
       ],
@@ -520,6 +538,7 @@ describe("built-in chat", () => {
           role: "assistant",
           text: "Unsafe retry ID",
           response,
+          thinking: "medium",
           suggestionRequestId: "contains spaces",
         },
       ],
@@ -529,6 +548,7 @@ describe("built-in chat", () => {
           role: "assistant",
           text: "Unsafe response metadata",
           response: { ...response, requested_model: "model\u0085name" },
+          thinking: "medium",
           suggestionRequestId: "suggestion-safe",
         },
       ],
@@ -539,6 +559,7 @@ describe("built-in chat", () => {
         version: 1,
         provider: "openai",
         model: "gpt-test",
+        thinking: "medium",
         messages,
       }));
       const controller = installChat({ bridge: chatBridge() });
@@ -565,12 +586,14 @@ describe("built-in chat", () => {
             wording_revision: `revision-${index}`,
             complete: true,
           },
+          thinking: "provider_default",
           suggestionRequestId: `suggestion-${index}`,
         });
     storage.setItem(key, JSON.stringify({
       version: 1,
       provider: "openai",
       model: "gpt-test",
+      thinking: "provider_default",
       messages,
     }));
     const bridge = chatBridge();

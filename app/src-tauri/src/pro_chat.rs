@@ -45,6 +45,27 @@ enum ChatRole {
     Assistant,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingLevel {
+    #[default]
+    ProviderDefault,
+    Low,
+    Medium,
+    High,
+}
+
+impl ThinkingLevel {
+    fn effort(self) -> Option<&'static str> {
+        match self {
+            Self::ProviderDefault => None,
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+        }
+    }
+}
+
 impl ChatRole {
     fn name(self) -> &'static str {
         match self {
@@ -68,6 +89,8 @@ pub struct SendChatRequest {
     document: thought_schema::Node,
     provider: Provider,
     model: String,
+    #[serde(default)]
+    thinking: ThinkingLevel,
     messages: Vec<ChatMessage>,
     message: String,
     #[serde(default)]
@@ -148,7 +171,9 @@ fn provider_failure(provider: Provider, status: u16) -> String {
             "{} is rate-limiting requests. Try again later.",
             provider.name()
         ),
-        400 | 413 | 422 => "The provider could not use this model or input.".into(),
+        400 | 413 | 422 => {
+            "The provider could not use this model, thinking level, or attachment.".into()
+        }
         500..=599 => format!("{} is temporarily unavailable.", provider.name()),
         _ => "The provider request failed.".into(),
     }
@@ -258,6 +283,16 @@ fn validate_message(text: &str, maximum: usize) -> Result<(), String> {
     }
 }
 
+fn configure_thinking(provider: Provider, level: ThinkingLevel, body: &mut Value) {
+    let Some(effort) = level.effort() else {
+        return;
+    };
+    match provider {
+        Provider::Openai => body["reasoning"] = json!({ "effort": effort }),
+        Provider::Anthropic => body["output_config"] = json!({ "effort": effort }),
+    }
+}
+
 fn prepare(request: &SendChatRequest) -> Result<PreparedChat, String> {
     if request.disclosure_version != DISCLOSURE_VERSION {
         return Err(
@@ -315,7 +350,7 @@ fn prepare(request: &SendChatRequest) -> Result<PreparedChat, String> {
         .map(|message| json!({ "role": message.role.name(), "content": message.text }))
         .collect::<Vec<_>>();
     messages.push(json!({ "role": "user", "content": current }));
-    let body = match request.provider {
+    let mut body = match request.provider {
         Provider::Openai => json!({
             "model": request.model,
             "instructions": SYSTEM_PROMPT,
@@ -330,6 +365,7 @@ fn prepare(request: &SendChatRequest) -> Result<PreparedChat, String> {
             "max_tokens": MAX_OUTPUT_TOKENS,
         }),
     };
+    configure_thinking(request.provider, request.thinking, &mut body);
     Ok(PreparedChat {
         body,
         wording_revision: thought_markdown::current_wording_revision(&document),
@@ -442,6 +478,7 @@ mod tests {
             ),
             provider,
             model: "model-1".into(),
+            thinking: ThinkingLevel::ProviderDefault,
             messages: vec![ChatMessage {
                 role: ChatRole::User,
                 text: "Earlier question".into(),
@@ -483,6 +520,28 @@ mod tests {
         assert!(current.contains("selected_focus"));
         assert!(current.contains("plain_text"));
         assert!(current.contains("The selected sentence"));
+    }
+
+    #[test]
+    fn thinking_levels_follow_each_provider_generation() {
+        let openai_default = prepare(&request(Provider::Openai)).unwrap();
+        assert!(openai_default.body.get("reasoning").is_none());
+
+        let anthropic_default = prepare(&request(Provider::Anthropic)).unwrap();
+        assert!(anthropic_default.body.get("output_config").is_none());
+
+        let mut openai = request(Provider::Openai);
+        openai.thinking = ThinkingLevel::Medium;
+        assert_eq!(
+            prepare(&openai).unwrap().body["reasoning"]["effort"],
+            "medium"
+        );
+
+        let mut anthropic = request(Provider::Anthropic);
+        anthropic.thinking = ThinkingLevel::High;
+        let anthropic = prepare(&anthropic).unwrap();
+        assert_eq!(anthropic.body["output_config"]["effort"], "high");
+        assert!(anthropic.body.get("thinking").is_none());
     }
 
     #[test]

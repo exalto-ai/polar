@@ -12,5 +12,5 @@ remain reported claims.
 
 This reuses the editor API, daemon bearer, suggestion store, and review UI. It adds no provider
 credential, native transcript, direct-write route, selection replacement, or second capability
-system. Only visible assistant text crosses into the suggestion request. Local chat history does
-not enter the daemon or proof.
+system. Only visible assistant text crosses into the suggestion request. Requested thinking and
+local chat history do not enter the daemon or proof.

@@ -269,6 +269,7 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .pro-chat-heading { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
 .pro-chat h3 { margin: 3px 0 7px; font-size: 14px; }
 .pro-chat-selectors { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 9px; }
+.pro-chat-selectors label:last-child { grid-column: 1 / -1; }
 .pro-chat-selectors label { display: grid; gap: 4px; color: var(--ink-soft); font-size: 11px; }
 .pro-chat select,
 .pro-chat textarea {
