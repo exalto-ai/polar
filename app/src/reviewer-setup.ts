@@ -17,15 +17,15 @@ export function reviewerClientName(client: ReviewerClient): string {
 
 export function reviewerSetupInstructions(client: ReviewerClient): string {
   if (client === "chatgpt") {
-    return "In ChatGPT desktop, open Settings → MCP servers → Add server. Use the server name below. Choose STDIO, paste the command, save, restart, then use /mcp to check it. ChatGPT on the web does not use this local setup.";
+    return "In the ChatGPT desktop app, open Settings → MCP servers → Add server. Enter the server name below, choose STDIO, paste the command, save, then select Restart. In the composer, type /mcp to verify the connection. ChatGPT web does not read this local configuration.";
   }
   if (client === "codex") {
-    return "Run the command below once in Terminal, then use /mcp in Codex to check the connection. ChatGPT desktop shares this local configuration on the same Mac.";
+    return "Run the command below once in Terminal, then use /mcp in Codex to check the connection. The ChatGPT desktop app on this Mac uses the same MCP configuration.";
   }
   if (client === "claude-code") {
     return "Run the command below once in Terminal, then use /mcp in Claude Code to check the connection.";
   }
-  return "In Claude Desktop, open Settings → Developer → Edit Config. Merge the server entry below into mcpServers, save the file, then fully quit and reopen Claude Desktop. To check it, click + in a chat → Connectors, or look in Developer settings.";
+  return "In Claude Desktop, open Developer settings and edit claude_desktop_config.json. Merge the server entry below into mcpServers, save the file, then fully quit and reopen Claude Desktop. To check it, click + in a chat → Connectors, or look in Developer settings.";
 }
 
 /** The setup text contains a connection ID, never its credential. */

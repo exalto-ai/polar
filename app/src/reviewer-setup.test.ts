@@ -22,8 +22,9 @@ describe("reviewer setup", () => {
   it("explains where ChatGPT desktop accepts its stdio command", () => {
     const instructions = reviewerSetupInstructions("chatgpt");
     expect(instructions).toContain("Settings → MCP servers → Add server");
-    expect(instructions).toContain("Choose STDIO");
-    expect(instructions).toContain("ChatGPT on the web does not use this local setup");
+    expect(instructions).toContain("choose STDIO");
+    expect(instructions).toContain("select Restart");
+    expect(instructions).toContain("ChatGPT web does not read this local configuration");
     expect(reviewerSetupCommand("chatgpt", "/path/to/shim", "abc123")).toBe(
       "/path/to/shim --connection abc123",
     );
@@ -50,7 +51,7 @@ describe("reviewer setup", () => {
       },
     });
     expect(reviewerSetupInstructions("claude-desktop")).toContain(
-      "Settings → Developer → Edit Config",
+      "claude_desktop_config.json",
     );
     expect(reviewerSetupCopyLabel("claude-desktop")).toBe("Copy JSON");
     expect(reviewerSetupServerName("abc123")).toBe("thought-abc123");
