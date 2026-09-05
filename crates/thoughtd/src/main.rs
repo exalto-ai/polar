@@ -21,10 +21,32 @@ use thoughtd::{discovery, logging};
 use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use std::sync::Arc;
 use thought_mcp::Workspace;
+
+#[cfg(debug_assertions)]
+fn reviewer_sessions(
+    reviewers: Arc<ConnectionRegistry>,
+) -> thoughtd::mcp_sessions::ReviewerSessionManager {
+    let timeout = std::env::var("THOUGHT_TEST_MCP_IDLE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis);
+    match timeout {
+        Some(timeout) => thoughtd::mcp_sessions::ReviewerSessionManager::with_shorter_idle_timeout(
+            reviewers, timeout,
+        ),
+        None => thoughtd::mcp_sessions::ReviewerSessionManager::new(reviewers),
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn reviewer_sessions(
+    reviewers: Arc<ConnectionRegistry>,
+) -> thoughtd::mcp_sessions::ReviewerSessionManager {
+    thoughtd::mcp_sessions::ReviewerSessionManager::new(reviewers)
+}
 
 #[cfg(unix)]
 async fn shutdown_signal() {
@@ -96,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 service_reviewers.clone(),
             ))
         },
-        Arc::new(LocalSessionManager::default()),
+        Arc::new(reviewer_sessions(reviewers.clone())),
         StreamableHttpServerConfig::default()
             .with_max_request_body_bytes(thoughtd::MAX_MCP_REQUEST_BODY_BYTES),
     );

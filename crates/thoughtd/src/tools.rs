@@ -31,6 +31,11 @@ const REVIEWER_TOOLS: &[&str] = &[
     "block_provenance",
     "document_lineage",
     "search",
+    "request_direct_edit",
+    "replace_block",
+    "insert_blocks",
+    "replace_text",
+    "delete_block",
 ];
 
 /// Every tool failure passes through here, so this is the one place that can
@@ -53,6 +58,14 @@ fn principal(parts: &Parts) -> Result<AuthenticatedPrincipal, ErrorData> {
         .get::<AuthenticatedPrincipal>()
         .cloned()
         .ok_or_else(|| ErrorData::invalid_request("missing authenticated connection", None))
+}
+
+fn mcp_session_id(parts: &Parts) -> Option<&str> {
+    parts
+        .headers
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
 }
 
 /// Every write names its caller. There is no anonymous edit path, because an
@@ -248,6 +261,13 @@ pub struct SuggestParams {
     pub caller: Caller,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RequestDirectEditParams {
+    pub doc_id: String,
+    #[serde(flatten)]
+    pub caller: Caller,
+}
+
 #[tool_router]
 impl Thought {
     pub fn new(workspace: Arc<Workspace>, reviewers: Arc<ConnectionRegistry>) -> Self {
@@ -266,7 +286,7 @@ impl Thought {
         let principal = principal(parts)?;
         let authorized = self
             .reviewers
-            .authorize(&principal, operation, document_id)
+            .authorize_session(&principal, operation, document_id, mcp_session_id(parts))
             .map_err(denied)?;
         Ok((principal, authorized))
     }
@@ -373,6 +393,55 @@ impl Thought {
     }
 
     #[tool(
+        description = "Ask the user for direct editing of one document for this MCP session. Suggestions remain the default. Approval is limited to this daemon-issued session and document, ends with the session, and never permits create or trash actions; keep using suggest_change while pending."
+    )]
+    fn request_direct_edit(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<RequestDirectEditParams>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        let session_id = mcp_session_id(&parts).ok_or_else(|| {
+            ErrorData::invalid_request(
+                "this client transport does not provide a session identity; keep using suggestions",
+                None,
+            )
+        })?;
+        let (principal, authorized) =
+            self.authorize(&parts, ReviewerOperation::Read, Some(&p.doc_id))?;
+        if authorized.connection().is_none() {
+            return Err(ErrorData::invalid_request(
+                "the native editor does not need a direct-edit grant",
+                None,
+            ));
+        }
+        self.workspace.read_document(&p.doc_id).map_err(failed)?;
+        let outcome = self
+            .reviewers
+            .request_direct_edit(
+                &principal,
+                &p.doc_id,
+                session_id,
+                p.caller.model.as_deref(),
+                thoughtd::connections::now_ms(),
+            )
+            .map_err(denied)?;
+        let message = match &outcome {
+            thoughtd::direct_edit::DirectEditRequestOutcome::Pending { .. } => {
+                "Waiting for the user. Keep using suggest_change unless they approve direct editing."
+            }
+            thoughtd::direct_edit::DirectEditRequestOutcome::Active { .. } => {
+                "Direct editing is active for this document until this MCP session ends. It does not apply to create or trash actions."
+            }
+            thoughtd::direct_edit::DirectEditRequestOutcome::Denied { .. } => {
+                "The user kept suggestions. Continue with suggest_change."
+            }
+        };
+        let mut value = serde_json::to_value(outcome).map_err(failed)?;
+        value["message"] = message.into();
+        Ok(Json(value))
+    }
+
+    #[tool(
         description = "Who has worked on a document — humans and agents, with edit counts \
                        and when they last wrote."
     )]
@@ -456,7 +525,9 @@ impl Thought {
         Ok(Json(serde_json::to_value(view).map_err(failed)?))
     }
 
-    #[tool(description = "Replace one block's content with markdown.")]
+    #[tool(
+        description = "Replace one block's content with markdown. Configured reviewers should use suggest_change by default and may call this only after the user grants direct editing for this document and MCP session."
+    )]
     fn replace_block(
         &self,
         Extension(parts): Extension<Parts>,
@@ -479,7 +550,9 @@ impl Thought {
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
     }
 
-    #[tool(description = "Insert new blocks after a block, or at the start or end.")]
+    #[tool(
+        description = "Insert new blocks after a block, or at the start or end. Configured reviewers need a user-approved direct-edit grant for this document and MCP session."
+    )]
     fn insert_blocks(
         &self,
         Extension(parts): Extension<Parts>,
@@ -508,7 +581,7 @@ impl Thought {
     }
 
     #[tool(
-        description = "Find and replace within one block. `find` matches the block's markdown \
+        description = "Find and replace within one block after a user-approved direct-edit grant for this document and MCP session. `find` matches the block's markdown \
                        (what read_document returned), so include any emphasis syntax. Omit \
                        `occurrence` to replace every match, or pass a 1-based index."
     )]
@@ -557,7 +630,9 @@ impl Thought {
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
     }
 
-    #[tool(description = "Delete a block.")]
+    #[tool(
+        description = "Delete a block. Configured reviewers need a user-approved direct-edit grant for this document and MCP session."
+    )]
     fn delete_block(
         &self,
         Extension(parts): Extension<Parts>,

@@ -44,6 +44,14 @@
           <button class="icon-button" id="ai-sidebar-close" type="button" aria-label="Close AI support">×</button>
         </header>
 
+        <section class="direct-edit-active" id="direct-edit-active" aria-labelledby="direct-edit-active-title" aria-live="polite" hidden>
+          <span class="eyebrow">Direct access</span>
+          <h3 id="direct-edit-active-title">Direct editing on</h3>
+          <p>These AI connections can edit immediately while they remain open. Direct edits do not have Accept or Reject. Suggestions still do.</p>
+          <p class="reviewer-error" id="direct-edit-active-error" role="alert" hidden></p>
+          <ul id="direct-edit-grant-list"></ul>
+        </section>
+
         <nav class="ai-mode-switcher" aria-label="AI support mode">
           <button type="button" data-ai-mode="connected">Connected app</button>
           <button type="button" data-ai-mode="builtin">Built-in AI</button>
@@ -71,6 +79,7 @@
               <button class="ghost" id="reviewer-add" type="button">Add reviewer</button>
             </div>
           </div>
+          <p class="ai-sidebar-note">Last used can include a quiet connection check. It does not mean the AI edited this document.</p>
           <p id="reviewer-error" class="reviewer-error" role="alert" hidden></p>
           <p id="reviewer-empty" class="ai-sidebar-note">No connected reviewers yet.</p>
           <ul id="reviewer-list" class="reviewer-list"></ul>
@@ -253,6 +262,21 @@
           <summary>How AI labels work</summary>
           <p><strong>Reported</strong> means Proof of Thought saw AI wording arrive through a local tool connection or built-in chat. Connected app and model names come from that client. Built-in chat records the selected provider and model, but neither path authenticates provider or model identity in the current build. The label never says the content is correct.</p>
         </details>
+      </section>
+    </div>
+
+    <div class="direct-edit-backdrop" id="direct-edit-prompt" hidden>
+      <section class="direct-edit-prompt" role="alertdialog" aria-modal="true" aria-labelledby="direct-edit-prompt-title" aria-describedby="direct-edit-prompt-description direct-edit-prompt-default" tabindex="-1">
+        <span class="eyebrow">Direct editing request</span>
+        <h2 id="direct-edit-prompt-title"></h2>
+        <p class="direct-edit-prompt-meta" id="direct-edit-prompt-meta"></p>
+        <p id="direct-edit-prompt-description">This connection wants to edit this document directly while it remains open. Its app, model, and identity are reported, not verified.</p>
+        <p id="direct-edit-prompt-default">Keep suggestions leaves the current workflow unchanged: every proposed change appears with Accept and Reject.</p>
+        <p class="reviewer-error" id="direct-edit-prompt-error" role="alert" hidden></p>
+        <div class="direct-edit-actions">
+          <button class="direct-edit-keep" id="direct-edit-keep-suggestions" type="button">Keep suggestions</button>
+          <button id="direct-edit-allow" type="button">Allow direct editing</button>
+        </div>
       </section>
     </div>
 

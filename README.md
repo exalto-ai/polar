@@ -58,7 +58,7 @@ the editor you are already using, and each new window is visibly cascaded from i
 authoritative. Export is an explicit one-time action and never establishes a mirrored file.
 
 The daemon can also be run on its own. Add reviewers from the AI support sidebar. Each saved
-connection gets its own read-only credential and current-document or all-document scope:
+connection gets its own credential and current-document or all-document scope:
 
 ```bash
 cargo run -p thoughtd
@@ -71,8 +71,14 @@ published daemon or starts one when discovery is stale. Process-lifetime locks d
 daemon may publish and open SQLite; file presence and PIDs do not.
 
 The sidebar provides setup for ChatGPT desktop, Codex, Claude Desktop, and Claude Code. Connected
-reviewers see only read and suggestion tools. Their last-used time and reported model are status
-hints, not verified identity or live presence.
+reviewers read and suggest by default. A reviewer can request direct editing for one document,
+which the user must approve in the native editor. That access lasts while the configured AI
+connection remains open, including idle periods, and has no countdown. A normal close revokes it
+promptly. If the client disappears unexpectedly, daemon cleanup revokes it within roughly five
+minutes of the last activity. An alive but hung client can retain access while its stdio connection
+stays open, so the app keeps manual Revoke visible. Create, trash, and restore remain unavailable.
+Last-used time may include the bridge's standard MCP keepalive. It is not a document edit, model
+action, verified identity, or verified live presence.
 
 ## Shape
 

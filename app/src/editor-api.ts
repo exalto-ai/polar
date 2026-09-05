@@ -1,4 +1,10 @@
 import type { DocumentView } from "./mcp";
+import type {
+  DirectEditAccess,
+  DirectEditApi,
+  DirectEditDenial,
+  DirectEditGrant,
+} from "./direct-edit-access";
 import type { ProProvider } from "./pro-provider-bridge";
 import type {
   ReviewerApi,
@@ -22,7 +28,7 @@ export type ChatSuggestionInput = {
   after: SuggestionPosition;
 };
 
-export class EditorApi implements ReviewerApi {
+export class EditorApi implements ReviewerApi, DirectEditApi {
   private readonly baseUrl: string;
 
   constructor(
@@ -89,6 +95,40 @@ export class EditorApi implements ReviewerApi {
     );
   }
 
+  listDirectEditAccess(): Promise<DirectEditAccess> {
+    return this.request("GET", "/editor/direct-edit-access");
+  }
+
+  approveDirectEdit(documentId: string, requestId: string): Promise<DirectEditGrant> {
+    return this.item(
+      "grant",
+      this.request(
+        "POST",
+        `/editor/documents/${encodeURIComponent(documentId)}/direct-edit-requests/${encodeURIComponent(requestId)}/approve`,
+      ),
+    );
+  }
+
+  denyDirectEdit(documentId: string, requestId: string): Promise<DirectEditDenial> {
+    return this.item(
+      "denial",
+      this.request(
+        "POST",
+        `/editor/documents/${encodeURIComponent(documentId)}/direct-edit-requests/${encodeURIComponent(requestId)}/deny`,
+      ),
+    );
+  }
+
+  revokeDirectEdit(documentId: string, grantId: string): Promise<DirectEditGrant> {
+    return this.item(
+      "grant",
+      this.request(
+        "DELETE",
+        `/editor/documents/${encodeURIComponent(documentId)}/direct-edit-grants/${encodeURIComponent(grantId)}`,
+      ),
+    );
+  }
+
   async listReviewerConnections(): Promise<ReviewerConnection[]> {
     const value = await this.request<{ connections: ReviewerConnection[] }>(
       "GET",
@@ -140,6 +180,10 @@ export class EditorApi implements ReviewerApi {
     request: Promise<{ connection: ReviewerConnection }>,
   ): Promise<ReviewerConnection> {
     return (await request).connection;
+  }
+
+  private async item<T>(key: string, request: Promise<Record<string, T>>): Promise<T> {
+    return (await request)[key];
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {

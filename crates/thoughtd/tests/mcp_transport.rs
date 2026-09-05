@@ -6,20 +6,30 @@
 mod harness;
 
 use harness::Daemon;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use thought_mcp::{ReviewerAccess, ReviewerClient, Workspace};
 use thoughtd::connections::{ConnectionRegistry, CredentialFiles};
 use thoughtd::discovery::{self, Daemon as PublishedDaemon};
 
-fn configure_reviewer(home: &std::path::Path) -> String {
+struct ReviewerFixture {
+    connection_id: String,
+    doc_id: String,
+    block_id: String,
+    version: String,
+}
+
+fn configure_reviewer(home: &std::path::Path) -> ReviewerFixture {
     let workspace = Arc::new(Workspace::open(home.join("thought.db")).unwrap());
+    let document = workspace
+        .create_document("Direct edit", &thought_mcp::ActorRef::editor())
+        .unwrap();
     let registry = ConnectionRegistry::new(
-        workspace,
+        workspace.clone(),
         CredentialFiles::new(home.join("reviewer-credentials")),
     );
-    registry
+    let connection_id = registry
         .create(
             ReviewerClient::Codex,
             "Transport reviewer".into(),
@@ -27,7 +37,31 @@ fn configure_reviewer(home: &std::path::Path) -> String {
             10,
         )
         .unwrap()
-        .id
+        .id;
+    ReviewerFixture {
+        connection_id,
+        doc_id: document.doc_id,
+        block_id: document.blocks[0].block_id.clone(),
+        version: document.version,
+    }
+}
+
+fn read_stdio_response(stdout: &mut BufReader<std::process::ChildStdout>) -> serde_json::Value {
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("shim replied");
+    serde_json::from_str(&line).expect("json-rpc line")
+}
+
+fn send_stdio_message(stdin: &mut std::process::ChildStdin, body: serde_json::Value) {
+    writeln!(stdin, "{body}").expect("write to shim");
+    stdin.flush().expect("flush shim input");
+}
+
+fn tool_json(response: &serde_json::Value) -> serde_json::Value {
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool text");
+    serde_json::from_str(text).expect("tool json")
 }
 
 #[test]
@@ -241,14 +275,14 @@ fn the_stdio_shim_replaces_stale_current_discovery() {
 #[test]
 fn the_stdio_shim_starts_a_daemon_and_proxies_to_it() {
     let home = tempfile::tempdir().expect("temp dir");
-    let connection_id = configure_reviewer(home.path());
+    let fixture = configure_reviewer(home.path());
     assert!(
         !home.path().join("daemon.json").exists(),
         "test must begin with no daemon published"
     );
 
     let mut shim = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
-        .args(["--connection", &connection_id])
+        .args(["--connection", &fixture.connection_id])
         .env("THOUGHT_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -271,9 +305,7 @@ fn the_stdio_shim_starts_a_daemon_and_proxies_to_it() {
                    "clientInfo": {"name": "shim-test", "version": "1"}}
     }));
 
-    let mut line = String::new();
-    stdout.read_line(&mut line).expect("shim replied");
-    let response: serde_json::Value = serde_json::from_str(&line).expect("json-rpc line");
+    let response = read_stdio_response(&mut stdout);
     assert_eq!(response["id"], 1);
     assert!(
         response["result"]["capabilities"].get("tools").is_some(),
@@ -286,9 +318,7 @@ fn the_stdio_shim_starts_a_daemon_and_proxies_to_it() {
     }));
     send(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
 
-    line.clear();
-    stdout.read_line(&mut line).expect("shim replied");
-    let response: serde_json::Value = serde_json::from_str(&line).expect("json-rpc line");
+    let response = read_stdio_response(&mut stdout);
     assert_eq!(response["id"], 2, "a notification leaked a response line");
     let tools: Vec<String> = response["result"]["tools"]
         .as_array()
@@ -305,37 +335,369 @@ fn the_stdio_shim_starts_a_daemon_and_proxies_to_it() {
         "block_provenance",
         "document_lineage",
         "search",
+        "request_direct_edit",
+        "replace_block",
+        "insert_blocks",
+        "replace_text",
+        "delete_block",
     ] {
         assert!(
             tools.contains(&expected.to_string()),
             "reviewer is missing {expected}: {tools:?}"
         );
     }
-    for forbidden in [
-        "create_document",
-        "replace_block",
-        "insert_blocks",
-        "replace_text",
-        "set_document_deleted",
-        "delete_block",
-    ] {
+    for forbidden in ["create_document", "set_document_deleted"] {
         assert!(
             !tools.contains(&forbidden.to_string()),
             "reviewer was offered forbidden tool {forbidden}: {tools:?}"
         );
     }
 
-    // The shim started a daemon that published itself under THOUGHT_HOME.
+    send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "request_direct_edit", "arguments": {
+            "doc_id": fixture.doc_id, "agent": "reviewer", "model": "reported-model"
+        }}
+    }));
+    let requested = read_stdio_response(&mut stdout);
+    let requested = tool_json(&requested);
+    assert_eq!(requested["status"], "pending");
+    assert_eq!(requested["request"]["document_title"], "Direct edit");
+    let request_id = requested["request"]["request_id"].as_str().unwrap();
+
+    send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "replace_block", "arguments": {
+            "doc_id": fixture.doc_id, "block_id": fixture.block_id,
+            "markdown": "Not approved", "version": fixture.version,
+            "agent": "reviewer", "model": "reported-model"
+        }}
+    }));
+    let denied_edit = read_stdio_response(&mut stdout);
+    assert!(
+        denied_edit["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("active user-approved grant"),
+        "unexpected pre-approval response: {denied_edit}"
+    );
+
     let published = home.path().join("daemon.json");
+    let discovery: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&published).unwrap()).unwrap();
+    let editor_url = discovery["url"].as_str().unwrap().replace(
+        "/mcp",
+        &format!(
+            "/editor/documents/{}/direct-edit-requests/{request_id}/approve",
+            fixture.doc_id
+        ),
+    );
+    ureq::post(&editor_url)
+        .header(
+            "Authorization",
+            &format!("Bearer {}", discovery["token"].as_str().unwrap()),
+        )
+        .send_empty()
+        .expect("editor approved direct edit");
+
+    send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+        "params": {"name": "replace_block", "arguments": {
+            "doc_id": fixture.doc_id, "block_id": fixture.block_id,
+            "markdown": "Approved direct edit", "version": fixture.version,
+            "agent": "reviewer", "model": "reported-model"
+        }}
+    }));
+    let approved_edit = read_stdio_response(&mut stdout);
+    assert!(
+        approved_edit.get("result").is_some(),
+        "approved edit failed: {approved_edit}"
+    );
+
+    send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+        "params": {"name": "read_document", "arguments": {"doc_id": fixture.doc_id}}
+    }));
+    let read = tool_json(&read_stdio_response(&mut stdout));
+    assert_eq!(read["markdown"], "Approved direct edit");
+
+    // The shim started a daemon that published itself under THOUGHT_HOME.
     assert!(published.exists(), "shim did not start a daemon");
 
-    let _ = shim.kill();
-    let _ = shim.wait();
+    let access_url = discovery["url"]
+        .as_str()
+        .unwrap()
+        .replace("/mcp", "/editor/direct-edit-access");
+    let mut access = ureq::get(&access_url)
+        .header(
+            "Authorization",
+            &format!("Bearer {}", discovery["token"].as_str().unwrap()),
+        )
+        .call()
+        .expect("editor read direct edit access");
+    let access: serde_json::Value = access.body_mut().read_json().unwrap();
+    assert_eq!(access["grants"].as_array().unwrap().len(), 1);
+    assert_eq!(access["grants"][0]["document_title"], "Direct edit");
+    assert!(access["grants"][0].get("expires_at").is_none());
+
+    // Normal client shutdown closes stdin. The shim translates EOF to an
+    // authenticated MCP DELETE, and the daemon removes session authority
+    // before the shim exits.
+    drop(stdin);
+    assert!(shim.wait().expect("wait for shim").success());
+
+    let mut access = ureq::get(&access_url)
+        .header(
+            "Authorization",
+            &format!("Bearer {}", discovery["token"].as_str().unwrap()),
+        )
+        .call()
+        .expect("editor read direct edit access after EOF");
+    let access: serde_json::Value = access.body_mut().read_json().unwrap();
+    assert!(access["grants"].as_array().unwrap().is_empty());
+    assert!(access["requests"].as_array().unwrap().is_empty());
+
     if let Ok(body) = std::fs::read_to_string(&published)
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
         && let Some(pid) = json["pid"].as_u64()
     {
         // The shim's daemon outlives the shim by design; clean it up.
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+}
+
+#[test]
+fn the_stdio_shim_recovers_after_idle_session_cleanup_without_restoring_edit_access() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let fixture = configure_reviewer(home.path());
+    let mut shim = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
+        .args(["--connection", &fixture.connection_id])
+        .env("THOUGHT_HOME", home.path())
+        .env("THOUGHT_TEST_MCP_IDLE_MS", "150")
+        .env_remove("THOUGHT_TEST_MCP_KEEPALIVE_MS")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn shim");
+    let mut stdin = shim.stdin.take().expect("piped stdin");
+    let mut stdout = BufReader::new(shim.stdout.take().expect("piped stdout"));
+
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "idle-recovery-test", "version": "1"}}
+        }),
+    );
+    assert_eq!(read_stdio_response(&mut stdout)["id"], 1);
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
+        }),
+    );
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "request_direct_edit", "arguments": {
+                "doc_id": fixture.doc_id, "agent": "reviewer", "model": "reported-model"
+            }}
+        }),
+    );
+    let requested = tool_json(&read_stdio_response(&mut stdout));
+    let request_id = requested["request"]["request_id"].as_str().unwrap();
+
+    let published = home.path().join("daemon.json");
+    let discovery: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&published).unwrap()).unwrap();
+    let editor_token = discovery["token"].as_str().unwrap();
+    let approve_url = discovery["url"].as_str().unwrap().replace(
+        "/mcp",
+        &format!(
+            "/editor/documents/{}/direct-edit-requests/{request_id}/approve",
+            fixture.doc_id
+        ),
+    );
+    ureq::post(&approve_url)
+        .header("Authorization", &format!("Bearer {editor_token}"))
+        .send_empty()
+        .expect("editor approved direct edit");
+
+    let access_url = discovery["url"]
+        .as_str()
+        .unwrap()
+        .replace("/mcp", "/editor/direct-edit-access");
+    let access_is_empty = || {
+        let mut response = ureq::get(&access_url)
+            .header("Authorization", &format!("Bearer {editor_token}"))
+            .call()
+            .expect("editor read direct edit access");
+        let access: serde_json::Value = response.body_mut().read_json().unwrap();
+        access["grants"].as_array().unwrap().is_empty()
+    };
+    assert!(!access_is_empty(), "approval did not create a grant");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !access_is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        access_is_empty(),
+        "idle transport cleanup did not revoke its grant"
+    );
+
+    // The shim still holds the terminated session ID. A read transparently
+    // replays the handshake on a fresh session instead of failing forever.
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "read_document", "arguments": {"doc_id": fixture.doc_id}}
+        }),
+    );
+    let read = tool_json(&read_stdio_response(&mut stdout));
+    assert_eq!(read["doc_id"], fixture.doc_id);
+
+    // Reinitialization gets a different daemon-issued session ID, so it must
+    // not inherit direct-edit authority from the closed session.
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "replace_block", "arguments": {
+                "doc_id": fixture.doc_id, "block_id": fixture.block_id,
+                "markdown": "Must be approved again", "version": fixture.version,
+                "agent": "reviewer", "model": "reported-model"
+            }}
+        }),
+    );
+    let denied = read_stdio_response(&mut stdout);
+    assert!(
+        denied["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("active user-approved grant"),
+        "replacement session inherited edit access: {denied}"
+    );
+
+    drop(stdin);
+    assert!(shim.wait().expect("wait for shim").success());
+    if let Some(pid) = discovery["pid"].as_u64() {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+}
+
+#[test]
+fn the_stdio_shim_keepalive_preserves_the_same_session_grant_while_the_client_is_open() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let fixture = configure_reviewer(home.path());
+    let mut shim = Command::new(env!("CARGO_BIN_EXE_thought-mcp-stdio"))
+        .args(["--connection", &fixture.connection_id])
+        .env("THOUGHT_HOME", home.path())
+        .env("THOUGHT_TEST_MCP_IDLE_MS", "800")
+        .env("THOUGHT_TEST_MCP_KEEPALIVE_MS", "50")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn shim");
+    let mut stdin = shim.stdin.take().expect("piped stdin");
+    let mut stdout = BufReader::new(shim.stdout.take().expect("piped stdout"));
+
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "keepalive-test", "version": "1"}}
+        }),
+    );
+    assert_eq!(read_stdio_response(&mut stdout)["id"], 1);
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
+        }),
+    );
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "request_direct_edit", "arguments": {
+                "doc_id": fixture.doc_id, "agent": "reviewer", "model": "reported-model"
+            }}
+        }),
+    );
+    let requested = tool_json(&read_stdio_response(&mut stdout));
+    let request_id = requested["request"]["request_id"].as_str().unwrap();
+
+    let published = home.path().join("daemon.json");
+    let discovery: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&published).unwrap()).unwrap();
+    let editor_token = discovery["token"].as_str().unwrap();
+    let approve_url = discovery["url"].as_str().unwrap().replace(
+        "/mcp",
+        &format!(
+            "/editor/documents/{}/direct-edit-requests/{request_id}/approve",
+            fixture.doc_id
+        ),
+    );
+    ureq::post(&approve_url)
+        .header("Authorization", &format!("Bearer {editor_token}"))
+        .send_empty()
+        .expect("editor approved direct edit");
+
+    // This is more than twice the daemon's shortened idle threshold. Only
+    // standard MCP ping traffic from the still-open stdio bridge can preserve
+    // this exact session and its grant across the quiet period.
+    std::thread::sleep(std::time::Duration::from_millis(1_800));
+    send_stdio_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "replace_block", "arguments": {
+                "doc_id": fixture.doc_id, "block_id": fixture.block_id,
+                "markdown": "The live session kept its grant", "version": fixture.version,
+                "agent": "reviewer", "model": "reported-model"
+            }}
+        }),
+    );
+    let edited = read_stdio_response(&mut stdout);
+    assert!(
+        edited.get("result").is_some(),
+        "live session lost its direct-edit grant: {edited}"
+    );
+
+    let access_url = discovery["url"]
+        .as_str()
+        .unwrap()
+        .replace("/mcp", "/editor/direct-edit-access");
+    let active_grants = || {
+        let mut response = ureq::get(&access_url)
+            .header("Authorization", &format!("Bearer {editor_token}"))
+            .call()
+            .expect("editor read direct edit access");
+        let access: serde_json::Value = response.body_mut().read_json().unwrap();
+        access["grants"].as_array().unwrap().len()
+    };
+    assert_eq!(active_grants(), 1);
+
+    // An abrupt process exit cannot send DELETE, but it does stop the pings.
+    // rmcp's unchanged idle cleanup then closes this session and revokes its
+    // grant within the shortened test threshold.
+    shim.kill().expect("kill shim");
+    drop(stdin);
+    let _ = shim.wait().expect("wait for killed shim");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while active_grants() != 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(active_grants(), 0, "crashed shim left its grant active");
+
+    if let Some(pid) = discovery["pid"].as_u64() {
         let _ = Command::new("kill").arg(pid.to_string()).status();
     }
 }

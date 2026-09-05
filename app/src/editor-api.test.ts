@@ -91,4 +91,45 @@ describe("editor document lifecycle", () => {
       }),
     );
   });
+
+  it("lists and decides direct-edit access through editor-only routes", async () => {
+    const grant = {
+      grant_id: "grant/one",
+      connection_id: "connection-one",
+      document_id: "doc/one",
+      document_title: "Draft",
+      display_label: "Reviewer",
+      client: "codex",
+      reported_model: null,
+      granted_at: 20,
+    };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ requests: [], grants: [] }))
+      .mockResolvedValueOnce(Response.json({ grant }))
+      .mockResolvedValueOnce(Response.json({
+        denial: { request_id: "request/one", retry_at: 30 },
+      }))
+      .mockResolvedValueOnce(Response.json({ grant }));
+    vi.stubGlobal("fetch", fetch);
+    const documents = new EditorDocuments("http://127.0.0.1:1234/mcp", "secret");
+
+    await documents.listDirectEditAccess();
+    await documents.approveDirectEdit("doc/one", "request/one");
+    await documents.denyDirectEdit("doc/one", "request/one");
+    await documents.revokeDirectEdit("doc/one", "grant/one");
+
+    expect(fetch.mock.calls.map(([url]) => url.toString())).toEqual([
+      "http://127.0.0.1:1234/editor/direct-edit-access",
+      "http://127.0.0.1:1234/editor/documents/doc%2Fone/direct-edit-requests/request%2Fone/approve",
+      "http://127.0.0.1:1234/editor/documents/doc%2Fone/direct-edit-requests/request%2Fone/deny",
+      "http://127.0.0.1:1234/editor/documents/doc%2Fone/direct-edit-grants/grant%2Fone",
+    ]);
+    expect(fetch.mock.calls.map(([, init]) => init?.method)).toEqual([
+      "GET",
+      "POST",
+      "POST",
+      "DELETE",
+    ]);
+  });
 });

@@ -98,6 +98,23 @@ pub fn routes(workspace: Arc<Workspace>, reviewers: Arc<ConnectionRegistry>) -> 
             "/editor/documents/{doc_id}/suggestions/{suggestion_id}/reject",
             post(reject_suggestion),
         )
+        .route("/editor/direct-edit-access", get(all_direct_edit_access))
+        .route(
+            "/editor/documents/{doc_id}/direct-edit-access",
+            get(direct_edit_access),
+        )
+        .route(
+            "/editor/documents/{doc_id}/direct-edit-requests/{request_id}/approve",
+            post(approve_direct_edit),
+        )
+        .route(
+            "/editor/documents/{doc_id}/direct-edit-requests/{request_id}/deny",
+            post(deny_direct_edit),
+        )
+        .route(
+            "/editor/documents/{doc_id}/direct-edit-grants/{grant_id}",
+            axum::routing::delete(revoke_direct_edit),
+        )
         .route(
             "/editor/reviewer-connections",
             get(list_reviewers).post(create_reviewer),
@@ -270,6 +287,63 @@ async fn reject_suggestion(
         .reject_suggestion(&doc_id, &suggestion_id, &ActorRef::editor())
         .map_err(failed)?;
     Ok(Json(serde_json::to_value(outcome).map_err(failed)?))
+}
+
+async fn all_direct_edit_access(
+    State(state): State<EditorState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.reviewers.all_direct_edit_access().map_err(failed)?)
+            .map_err(failed)?,
+    ))
+}
+
+async fn direct_edit_access(
+    State(state): State<EditorState>,
+    Path(doc_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(
+            state
+                .reviewers
+                .direct_edit_access(&doc_id)
+                .map_err(failed)?,
+        )
+        .map_err(failed)?,
+    ))
+}
+
+async fn approve_direct_edit(
+    State(state): State<EditorState>,
+    Path((doc_id, request_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let grant = state
+        .reviewers
+        .approve_direct_edit(&doc_id, &request_id, now_ms())
+        .map_err(failed)?;
+    Ok(Json(serde_json::json!({ "grant": grant })))
+}
+
+async fn deny_direct_edit(
+    State(state): State<EditorState>,
+    Path((doc_id, request_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let denial = state
+        .reviewers
+        .deny_direct_edit(&doc_id, &request_id)
+        .map_err(failed)?;
+    Ok(Json(serde_json::json!({ "denial": denial })))
+}
+
+async fn revoke_direct_edit(
+    State(state): State<EditorState>,
+    Path((doc_id, grant_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let grant = state
+        .reviewers
+        .revoke_direct_edit(&doc_id, &grant_id)
+        .map_err(failed)?;
+    Ok(Json(serde_json::json!({ "grant": grant })))
 }
 
 async fn list_reviewers(
