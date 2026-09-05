@@ -13,6 +13,10 @@ export const AI_SUPPORT_PATH_STORAGE_KEY = "thought.ai-support-path.v1";
 
 export type AiSupportPath = "connected" | "builtin" | "basic";
 
+function isAiSupportPath(value: unknown): value is AiSupportPath {
+  return value === "connected" || value === "builtin" || value === "basic";
+}
+
 type StoredPreference = {
   version: 1;
   path: AiSupportPath;
@@ -73,11 +77,7 @@ export function readAiSupportPath(storage: Storage | null): AiSupportPath | null
     if (!raw) return null;
     const value = JSON.parse(raw) as Partial<StoredPreference>;
     if (value.version !== 1) return null;
-    return value.path === "connected" ||
-      value.path === "builtin" ||
-      value.path === "basic"
-      ? value.path
-      : null;
+    return isAiSupportPath(value.path) ? value.path : null;
   } catch {
     return null;
   }
@@ -303,9 +303,7 @@ export function installAiSupport(
   });
   for (const button of pathButtons) {
     const value = button.dataset.aiMode;
-    if (value !== "connected" && value !== "builtin" && value !== "basic") {
-      continue;
-    }
+    if (!isAiSupportPath(value)) continue;
     listen(button, "click", () => choosePath(value, onboarding.contains(button)));
   }
   listen(window, "storage", (event) => {
