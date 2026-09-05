@@ -22,6 +22,17 @@ pub struct Thought {
     reviewers: Arc<ConnectionRegistry>,
 }
 
+const REVIEWER_TOOLS: &[&str] = &[
+    "list_documents",
+    "read_document",
+    "list_suggestions",
+    "suggest_change",
+    "document_actors",
+    "block_provenance",
+    "document_lineage",
+    "search",
+];
+
 /// Every tool failure passes through here, so this is the one place that can
 /// notice them. Without it a failing tool is a JSON-RPC error the agent sees and
 /// the daemon has no memory of, which is exactly the case someone reports later
@@ -237,7 +248,7 @@ pub struct SuggestParams {
     pub caller: Caller,
 }
 
-#[tool_router(server_handler)]
+#[tool_router]
 impl Thought {
     pub fn new(workspace: Arc<Workspace>, reviewers: Arc<ConnectionRegistry>) -> Self {
         Thought {
@@ -566,5 +577,35 @@ impl Thought {
             )
             .map_err(failed)?;
         Ok(Json(serde_json::to_value(out).map_err(failed)?))
+    }
+}
+
+#[rmcp::tool_handler(router = Self::tool_router())]
+impl rmcp::ServerHandler for Thought {
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
+        let is_internal = context
+            .extensions
+            .get::<Parts>()
+            .and_then(|parts| parts.extensions.get::<AuthenticatedPrincipal>())
+            .is_some_and(|principal| matches!(principal, AuthenticatedPrincipal::Internal));
+        let mut tools = Self::tool_router().list_all();
+        if !is_internal {
+            tools.retain(|tool| REVIEWER_TOOLS.contains(&tool.name.as_ref()));
+        }
+        let supports_cache_hints = context
+            .protocol_version()
+            .is_some_and(|version| version >= rmcp::model::ProtocolVersion::V_2026_07_28);
+        Ok(rmcp::model::ListToolsResult {
+            result_type: Some(rmcp::model::ResultType::COMPLETE),
+            tools,
+            meta: None,
+            next_cursor: None,
+            ttl_ms: supports_cache_hints.then_some(0),
+            cache_scope: supports_cache_hints.then_some(rmcp::model::CacheScope::Private),
+        })
     }
 }

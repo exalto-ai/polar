@@ -16,11 +16,10 @@ describe("AI support path copy", () => {
     expect(markup).not.toContain("Authenticated exchanges support deeper traces");
   });
 
-  it("offers only setup paths that work in this PR", () => {
+  it("offers the four supported local setup paths", () => {
     expect(markup).toContain("ChatGPT desktop");
     expect(markup).toContain(">Codex<");
     expect(markup).toContain("Claude Code");
-    expect(markup).toContain("Claude Desktop setup comes next");
-    expect(markup).not.toContain('value="claude-desktop"');
+    expect(markup).toContain('value="claude-desktop"');
   });
 });

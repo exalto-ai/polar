@@ -481,16 +481,25 @@ The native app keeps the platform bearer from `daemon.json`. Each configured rev
 different 256-bit credential, stored in an owner-only native file with only its hash in SQLite.
 The copyable setup command contains a stable connection ID, never the credential. Every MCP tool
 rechecks that connection and its current-document or all-document scope. Reviewer credentials
-authorize reads and replicated suggestions, never direct content mutation.
+authorize reads and replicated suggestions, never direct content mutation. Tool discovery is
+filtered by the authenticated principal, so reviewer clients are offered only read and suggestion
+tools. The authorization check remains in every call as the enforcement boundary.
+
+The connection screen shows the last time a credential was used and any model name the client
+reported. This is historical activity, not live presence, and neither field verifies the app,
+provider, or model. ChatGPT desktop, Codex, Claude Desktop, and Claude Code each get setup text for
+their own configuration format. Claude Desktop receives JSON to merge into its existing config;
+the other clients receive one copyable command.
 
 This authenticates one configured local Proof of Thought ingress. It does not authenticate the
 calling app, provider, model, person, or conversation; those remain reported claims under AD-6.
 It is also not an OS sandbox: software already running as the same user can read owner files.
 
-**Cost:** credentials need native files and reset/revoke handling. Revocation stops subsequent
-tool checks; an operation already past authorization may finish. We accept that narrow race rather
-than adding session binding, leases, heartbeat processes, a lifecycle ledger, or signing-specific
-Keychain ACL machinery.
+**Cost:** credentials need native files and reset/revoke handling. The principal-specific tool
+list cannot use a shared public cache, and historical activity cannot promise a client is still
+connected. Revocation stops subsequent tool checks; an operation already past authorization may
+finish. We accept that narrow race rather than adding heartbeat processes, a lifecycle ledger, or
+signing-specific Keychain ACL machinery.
 
 ### AD-22 — Provider keys stay native; validation happens on use
 

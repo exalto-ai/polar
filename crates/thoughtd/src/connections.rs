@@ -429,6 +429,10 @@ mod tests {
             )
             .unwrap();
         let previous = credentials.read(&connection.id).unwrap();
+        let previous_principal = registry.authenticate(&previous, 15).unwrap().unwrap();
+        registry
+            .note_reported_model(&previous_principal, Some("reported-model"))
+            .unwrap();
         let reset = registry
             .reset(&connection.id, connection.revision, 20)
             .unwrap();
@@ -438,6 +442,8 @@ mod tests {
         assert!(registry.authenticate(&previous, 30).unwrap().is_none());
         assert!(registry.authenticate(&replacement, 30).unwrap().is_some());
         assert_eq!(reset.revision, connection.revision + 1);
+        assert_eq!(reset.last_seen_at, None);
+        assert_eq!(reset.reported_model, None);
     }
 
     #[cfg(unix)]

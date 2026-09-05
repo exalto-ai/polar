@@ -33,6 +33,7 @@ beforeEach(() => {
       <button data-ai-mode="basic"></button>
       <section id="ai-connect-panel" hidden>
         <button id="reviewer-add"></button>
+        <button id="reviewer-refresh"></button>
         <p id="reviewer-error" hidden></p>
         <p id="reviewer-empty"></p>
         <ul id="reviewer-list"></ul>
@@ -46,6 +47,7 @@ beforeEach(() => {
         </form>
         <section id="reviewer-setup" hidden>
           <p id="reviewer-setup-text"></p>
+          <p id="reviewer-setup-name"></p>
           <pre id="reviewer-setup-command"></pre>
           <button id="reviewer-copy"></button>
           <button id="reviewer-setup-done"></button>

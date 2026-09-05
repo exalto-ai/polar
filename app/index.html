@@ -55,18 +55,21 @@
           <div class="ai-mode-intro">
             <span class="eyebrow">Recommended</span>
             <h3>Use an AI app you already have</h3>
-            <p>Connect ChatGPT desktop, Codex, or Claude Code. The reviewer can read this document and propose precise changes without copy and paste.</p>
+            <p>Connect ChatGPT desktop, Codex, Claude Desktop, or Claude Code. The reviewer can read this document and propose precise changes without copy and paste.</p>
             <div class="suggestion-example" aria-label="Connected reviewer workflow">
               <span>Reviewer suggestion</span>
               <strong>Review each change in the document</strong>
               <div><span>Accept</span><span>Reject</span></div>
             </div>
-            <p class="ai-sidebar-note">Suggestions do not change your wording until you accept them. Proof of Thought records the app and model as reported by the connected tool, not as provider-verified identity. Connecting adds no separate API charge. Claude Desktop setup comes next.</p>
+            <p class="ai-sidebar-note">Suggestions do not change your wording until you accept them. Proof of Thought records the app and model as reported by the connected tool, not as provider-verified identity. Connecting adds no separate API charge.</p>
           </div>
 
           <div class="reviewer-heading">
             <span class="eyebrow">Saved connections</span>
-            <button class="ghost" id="reviewer-add" type="button">Add reviewer</button>
+            <div class="reviewer-heading-actions">
+              <button id="reviewer-refresh" type="button">Check status</button>
+              <button class="ghost" id="reviewer-add" type="button">Add reviewer</button>
+            </div>
           </div>
           <p id="reviewer-error" class="reviewer-error" role="alert" hidden></p>
           <p id="reviewer-empty" class="ai-sidebar-note">No connected reviewers yet.</p>
@@ -78,6 +81,7 @@
               <select id="reviewer-client">
                 <option value="chatgpt">ChatGPT desktop</option>
                 <option value="codex">Codex</option>
+                <option value="claude-desktop">Claude Desktop</option>
                 <option value="claude-code">Claude Code</option>
               </select>
             </label>
@@ -101,6 +105,7 @@
           <section id="reviewer-setup" class="reviewer-setup" hidden>
             <h3>Connect reviewer</h3>
             <p id="reviewer-setup-text" class="ai-sidebar-note"></p>
+            <p id="reviewer-setup-name" class="reviewer-setup-name"></p>
             <pre id="reviewer-setup-command"></pre>
             <div class="reviewer-actions">
               <button class="ghost" id="reviewer-copy" type="button">Copy setup</button>
