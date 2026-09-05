@@ -1,10 +1,10 @@
 # Proof of Thought — repository security review
 
-**Date:** 2026-09-05 (second pass, same day)
+**Date:** 2026-09-05 (third pass, same day)
 **Reviewed commit:** `f9218a707c1f7111aa003d5f849738c9f2403598` (`Complete connected reviewer setup (#71)`)
 **Scope:** the full tree as shipped: `thoughtd`, MCP, store, schema/markdown, Tauri window, native provider chat, GitHub workflows, and the documented relay/share design. `app/src-tauri` and `prototypes/` are outside the Cargo workspace; they were still reviewed as attack surface.
 
-This is a read-only review. No production code was changed. A second pass focused on classic cyber threats: credential theft, proxy/SSRF, CSWSH, CRDT bombs, unauthenticated presence, and confused-deputy HTTP clients.
+This is a read-only review. No production code was changed. A third pass treated the daemon, shim, CRDT, store, and window as a hostile local attacker would: mutex poison, SQLite `LIMIT` wrapping, host-global loopback, trash/FTS, WebSocket lag, and confused-deputy HTTP (redirects as well as proxies).
 
 ---
 
@@ -30,6 +30,8 @@ The important problems are elsewhere:
 5. **The reviewer stdio shim sends loopback Bearer traffic through `HTTP_PROXY`.** Discovery probes already disable proxies; the shim does not. A configured proxy (or a poisoned environment) can steal reviewer secrets and document bodies.
 
 Relay sharing (`thought://join/<doc_id>#<secret>`) is **specified, not implemented**. Several of the worst “wrong participant” failures are therefore still latent — but the live `/sync` codec is already missing the `share_id` field the spec depends on.
+
+The third pass still found **no unauthenticated remote RCE**. It did find ways a **weaker principal already on the box** (another OS user, a configured reviewer, or a bearer-holding `/sync` peer) can brick every document, search trash, or desync the window — and it confirmed that discovery’s hardened ureq agent is **not** what `thought-mcp-stdio` uses.
 
 ---
 
@@ -189,9 +191,10 @@ fn apply_suggestion_patch(doc: &Document, patch: &SuggestionPatch) -> Result<(),
 
 A local process that can read `daemon.json` (same user, backup tool, XSS in the webview — see H5) opens `ws://127.0.0.1:<port>/sync` with `thought.token.<bearer>` and:
 
-- `Subscribe` + empty state vector → **full CRDT** (content, meta/tombstone, every suggestion).
-- `Update` for any known `doc_id` → merge as `human:editor`, including suggestion-map forgery and `deleted_at`.
+- `Subscribe` + empty **or malformed** state vector → **full CRDT** (content, meta/tombstone, every suggestion). `diff_since` does `StateVector::decode_v1(...).unwrap_or_default()`, so garbage is treated as “peer has nothing.”
+- `Update` for **any** known `doc_id`, **including documents this socket never subscribed to** → merge as `human:editor`, including suggestion-map forgery and `deleted_at`. Subscribe is only required for awareness fan-out, not for mutation.
 - No need to speak MCP; no reviewer scope applies.
+- `deleted_at` is a Yjs LWW **map entry** (CRDT clocks, not the integer value). A peer can tombstone a document; the owner’s restore is a later `remove`, which should win if it is actually later. The integer `i64::MAX` does **not** by itself pin the tombstone forever. The integrity bug is unvalidated merge + editor attribution, not a magical timestamp.
 
 **Attack scenario (M3, if this codec is reused)**
 
@@ -228,9 +231,9 @@ async function openDestination(href: string): Promise<void> {
     await openUrl(href);
 ```
 
-No second allowlist. Tauri capabilities grant `opener:default`. Relative paths and arbitrary schemes (`http://127.0.0.1:<port>/...`, `file:`, `smb:`, `data:`) that survive into the CRDT will be offered as “Open”.
+No second allowlist. Tauri capabilities grant `opener:default` (any URL the OS will handle). Relative paths and arbitrary schemes (`http://127.0.0.1:<port>/...`, `file:`, `smb:`, `data:`, `ms-msdt:`, `vscode:`) that survive into the CRDT will be offered as “Open”.
 
-`normalize()` **passes through** any `scheme:` string, so even the UI path would accept `http://127.0.0.1:9229/` if TipTap considers it a valid URI.
+`normalize()` **passes through** any `scheme:` string (`/^[a-z][a-z0-9+.-]*:/i`), and also keeps `/`, `./`, `../`, `#`, and `?` unchanged, so even the UI path would accept `http://127.0.0.1:9229/` if TipTap considers it a valid URI. TipTap’s field path is what blocks `javascript:`; it is **not** a scheme allowlist for `file:` / `data:`.
 
 **Attack scenario**
 
@@ -300,9 +303,11 @@ Gaps:
 
 `daemon.json` is `0600` with `create_new`. Reviewer-credential directory is `0700` / files `0600`. The support directory, `thought.db`, WAL/SHM sidecars (`PRAGMA journal_mode=WAL`), and `thoughtd-*.log` inherit umask (typically `0755` / `0644`).
 
+Loopback is **not a user isolation boundary**. `TcpListener::bind("127.0.0.1:0")` is reachable by every account on the host. The only cross-user control is file mode on `daemon.json` / the store. If the database is world-readable, another local user does not even need the bearer: they open `thought.db` directly.
+
 **Attack scenario**
 
-On a shared Linux machine (`~/.local/share/thought`), another local account reads `thought.db` / `-wal` and the last week of logs. The bearer file is `0600`, but **the private writing is in the database**, not in `daemon.json`.
+On a shared Linux machine (`~/.local/share/thought` under a `755` home), another local account reads `thought.db` / `-wal` and the last week of logs. The bearer file is `0600`, but **the private writing is in the database**, not in `daemon.json`. The same neighbor can also SYN-flood or open unbounded HTTP/WebSocket connections to the published port (M18); without the token they cannot read via the API, but they can knock the daemon over.
 
 Tool failures are logged at `warn` with the full error string (`crates/thoughtd/src/tools.rs` `failed()`), which can include markdown validation fragments and find/replace text.
 
@@ -331,7 +336,7 @@ fn send_once(...) -> Result<Option<String>, ureq::Error> {
 
 `daemon.url` is `http://127.0.0.1:<port>/mcp`. ureq does **not** document an automatic loopback bypass; `NO_PROXY` is the only documented exemption.
 
-The discovery client, by contrast, builds a dedicated agent with `.proxy(None)`:
+The discovery client, by contrast, builds a dedicated agent with `.proxy(None)` **and** `.max_redirects(0)`:
 
 ```172:181:crates/thoughtd/src/discovery.rs
 fn local_agent() -> ureq::Agent {
@@ -341,22 +346,26 @@ fn local_agent() -> ureq::Agent {
         .max_redirects(0)
 ```
 
-Built-in chat (`app/src-tauri/src/pro_chat.rs` `agent()`) also uses `config_builder` **without** `proxy(None)`, so provider requests (with the Keychain API key in `Authorization` / `x-api-key`) follow the same env proxy if that builder still inherits defaults.
+The shim uses `ureq::post` on the **default** agent. That agent honors env proxies **and follows redirects** (ureq’s default max is 10). Discovery already decided both of those were unsafe for loopback Bearer traffic; the shim did not copy the decision.
+
+Stdin lines and `response.body_mut().read_to_string()` are also unbounded, so a confused-deputy or a wedged daemon can OOM the shim process independently of the 16 MiB MCP cap on the daemon.
+
+Built-in chat (`app/src-tauri/src/pro_chat.rs` `agent()`) sets `max_redirects(0)` and `https_only(true)` but **not** `proxy(None)`, so provider requests (with the Keychain API key in `Authorization` / `x-api-key`) still follow `HTTP_PROXY` / `HTTPS_PROXY`.
 
 **Attack scenario**
 
 1. `HTTP_PROXY=http://attacker.example:8080` is set in the environment that launches ChatGPT desktop / Codex / Claude (corporate proxy, VPN helper, or malware). `NO_PROXY` does not list `127.0.0.1`.
 2. The user pastes the Proof of Thought setup command. The shim POSTs `Authorization: Bearer <reviewer-secret>` and every `read_document` / `suggest_change` body to the proxy as an absolute `http://127.0.0.1` URL.
-3. The proxy learns the 256-bit reviewer credential and the private documents. It may also fail the connection (it would dial *its* localhost), which looks like “MCP is broken” rather than theft.
+3. The proxy learns the 256-bit reviewer credential and the private documents. It can also **302** the request to an off-box URL; the default agent will replay the Bearer header there. It may instead fail the connection (it would dial *its* localhost), which looks like “MCP is broken” rather than theft.
 4. Same-user malware that can only set env — not read `~/.local/share/thought/reviewer-credentials/` if modes were correct — still steals the secret off the wire.
 
 This is **not** AD-21 “can read owner files.” It is a confused-deputy HTTP client sending secrets off-box.
 
 **Fix direction**
 
-- Use the same `local_agent()` (proxy disabled, no redirects, loopback URL still required) for every shim → daemon request.
+- Use the same `local_agent()` (proxy disabled, **no redirects**, loopback URL still required) for every shim → daemon request. Cap request/response size.
 - Set `proxy(None)` on the pro-chat agent, or pin `NO_PROXY=127.0.0.1,localhost` and still disable env proxy for Keychain-backed calls unless the user has opted into a system proxy for providers.
-- Add a regression test: with `HTTP_PROXY` pointing at a sink, the shim still talks directly to 127.0.0.1 and the sink never sees `Authorization`.
+- Add a regression test: with `HTTP_PROXY` pointing at a sink, the shim still talks directly to 127.0.0.1 and the sink never sees `Authorization`. A second test: a 302 from a loopback stub must not be followed.
 
 ---
 
@@ -568,6 +577,114 @@ The window puts `user.color` into `element.style.setProperty("--who", ...)` (`ap
 
 ---
 
+### M14. Trashing a document does not revoke reviewers and does not drop FTS
+
+**Severity:** Medium (owner mental model vs actual confidentiality). High if the product copy ever implies trash hides writing from agents.
+**Status:** Bug relative to a reasonable owner expectation; consistent with AD-14 (tombstone replicates, document still exists)
+
+`set_document_deleted` only writes `meta.deleted_at`. `ReviewerConnection::allows_document` checks connection status and scope, **not** the tombstone. A `current`-scope reviewer keeps `read_document` / `list_suggestions` / `suggest_change` on a trashed doc. `list_documents` with `trashed: true` is in `REVIEWER_TOOLS`.
+
+Every commit, including trash/restore, **reinserts the full markdown into `doc_fts`**:
+
+```503:507:crates/thought-store/src/lib.rs
+        transaction.execute("DELETE FROM doc_fts WHERE doc_id = ?1", [update.doc_id])?;
+        transaction.execute(
+            "INSERT INTO doc_fts (doc_id, title, body) VALUES (?1, ?2, ?3)",
+            params![update.doc_id, update.title, update.markdown],
+        )?;
+```
+
+`search` / `search_document` query `doc_fts` with **no** `documents.deleted_at IS NULL` join. An `all`-scope reviewer who never opens the trash UI still gets snippets of deleted bodies. Live-document search for the owner can also surface trash.
+
+**Attack scenario**
+
+Owner grants a reviewer `all`, later trashes a draft they no longer want that agent to see, and does not revoke the connection. The reviewer calls `search` or `list_documents` with `trashed: true`.
+
+**Fix direction:** treat trash as a scope check (or document that it is not); omit tombstoned rows from FTS, or filter `deleted_at` in `search`; do not advertise `trashed: true` to reviewers unless that is an explicit grant.
+
+---
+
+### M15. `search` `LIMIT` is `limit as i64`; `usize::MAX` becomes `-1` (unlimited)
+
+**Severity:** Medium (reviewer / internal DoS, full-corpus dump)
+**Status:** Bug. The JSON `limit` field is already an unbounded `usize` (M3); this makes “huge” mean “no cap.”
+
+```786:792:crates/thought-store/src/lib.rs
+        let rows = stmt
+            .query_map(params![query, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+```
+
+On 64-bit, `18446744073709551615_usize as i64 == -1`. SQLite treats a negative `LIMIT` as **no limit**. `SearchParams.limit` deserializes any JSON integer that fits in `usize`. A reviewer with `all` scope can therefore pull every FTS row in one tool call (and M14 means that includes trash). `list_documents_scoped` already loads the whole catalog with `list_documents(usize::MAX)` then truncates in RAM.
+
+`replace_text` empty `find` **is** rejected (`if find.is_empty()` in `workspace.rs`). That particular classic DoS is closed.
+
+**Fix direction:** clamp `limit` to a small `i64` (e.g. 1..=200) **before** the cast; never pass a negative SQL `LIMIT`.
+
+---
+
+### M16. One panic poisons the workspace mutex and bricks every document until restart
+
+**Severity:** Medium (availability of the whole writing surface). High after M3 if a peer can induce the panic.
+**Status:** Bug / robustness gap
+
+All document IO shares one `Mutex<Inner>`:
+
+```337:340:crates/thought-mcp/src/workspace.rs
+    fn with<T>(&self, f: impl FnOnce(&mut Inner) -> T) -> T {
+        let (result, pending) = {
+            let mut inner = self.inner.lock().expect("workspace mutex poisoned");
+```
+
+`std::sync::Mutex` is poisoned on panic. The next MCP call, editor keystroke, or `/sync` frame hits `expect` and the daemon is done. The same pattern exists on `observer` and `sync` channel maps.
+
+Panic sources under that lock include:
+
+- `content_revision` → `serde_json::to_vec(&tree).expect(...)` (called from `list_suggestions`, so a **reviewer** can hit it)
+- `commit_candidate` / `document_lineage` → `.expect("document hydration installs lineage")`
+- `replace_text` → `rest.find(find).expect("counted above")` (empty find is now guarded; overlapping-match disagreement would still abort)
+
+`Document::suggestions()` maps `decode_record(...).map(Option::unwrap)`. `decode_record` currently never returns `Ok(None)`, so this is a latent footgun rather than a live panic: a future `Ok(None)` skip-corrupt-entry change would panic instead of skipping.
+
+**Fix direction:** `parking_lot::Mutex` (no poison) or recover with `into_inner()`; replace `expect` on serialization with `map_err`; skip undecodable suggestion entries; do not hold the workspace lock across unbounded Yjs apply (M3 / M12).
+
+---
+
+### M17. A lagged `/sync` subscriber silently drops CRDT broadcasts and never resyncs
+
+**Severity:** Medium (integrity of the open window vs MCP / other peers)
+**Status:** Bug
+
+Fan-out is `broadcast::channel(256)`. `next_broadcast` treats **any** `RecvError` — including `Lagged(n)` — as terminal for that wait:
+
+```332:343:crates/thoughtd/src/sync.rs
+        match result {
+            Ok((from, frame)) if from != peer => return Some(frame),
+            Ok(_) => { /* skip echo */ }
+            Err(_) => return None,
+        }
+```
+
+After lag, the connection keeps running and applies later frames without the missed Yjs updates. MCP edits that fired while the window was busy (large document, debugger, sleep) can vanish from the editor until a full reconnect/subscribe. Yjs will not reconstruct skipped updates from later diffs on the same socket.
+
+**Fix direction:** on `Lagged`, force the peer to re-`Subscribe` (send a resync `Sync` from the current state vector) rather than continuing; consider a per-connection reliable queue for committed broadcasts.
+
+---
+
+### M18. No connection, request-rate, or WebSocket-message caps on a host-global port
+
+**Severity:** Medium (local DoS from another OS user or a runaway client)
+**Status:** Missing control
+
+Auth is bearer, but the TCP listener accepts everyone on the machine. There is no cap on concurrent connections, WebSocket message size (tokio/tungstenite default is tens of MiB if any), or `/sync` frames per second. `apply_peer_update` **clones the entire document CRDT** (`encode_state` + apply on a candidate) **while holding the process-wide workspace mutex**. One 16–64 MiB Yjs frame stalls every MCP tool and every other document.
+
+`Frame::Update` does this even when the socket never sent `Subscribe` for that `doc_id` (H3).
+
+**Fix direction:** cap connections; cap binary WS messages in the same ballpark as `MAX_MCP_REQUEST_BODY_BYTES` (or smaller); reject `Update` for unsubscribed docs; apply Yjs off the global lock or with a budget.
+
+---
+
 ### L1. Non-constant-time platform-bearer compare
 
 `value == expected` in MCP and `/sync` middleware. 256-bit secret over loopback: practical timing extraction is unrealistic. Reviewer auth hashes then looks up — better.
@@ -654,6 +771,11 @@ These controls were checked and should be treated as invariants:
 | Store SQL is parameterized | `thought-store` |
 | Home/store process locks; fail-closed discovery upgrades | `discovery.rs`, `lib.rs` ensure_daemon |
 | Frontend suggestion/explanation/title rendering uses `textContent` | `suggestions.ts`, `main.ts` |
+| `replace_text` / `suggest_change` reject empty `find` | `workspace.rs` |
+| Reviewer MCP suggestion ids are `{connection_id}:{request_id}` | `propose_suggestion` — cannot clobber another connection’s MCP row (CRDT `/sync` still can — H3) |
+| `list_tools` hides write tools from reviewers | `Thought::list_tools` |
+| Workspace observer runs **outside** the document mutex | `Workspace::with` |
+| Create-reviewer HTTP JSON omits the secret | `connections.rs` serialization test |
 
 ---
 
@@ -669,6 +791,8 @@ The live codec in `crates/thoughtd/src/sync.rs` is explicitly “the relay proto
 | Per-share isolation | One bearer sees all docs |
 | Awareness ephemeral | True |
 | Actor on `UPDATE` | Forced `human:editor`; no wire actor |
+| `UPDATE` requires Subscribe | **No** — any authed socket mutates any `doc_id` |
+| Lagged peer | Missed broadcasts dropped; no resync (M17) |
 | E2E | None, honestly documented |
 
 Do not describe the future relay as private. Do not add an “encrypted” flag that the protocol does not implement (AD-7).
@@ -680,29 +804,34 @@ Do not describe the future relay as private. Do not add an “encrypted” flag 
 **Do now (wrong participant / integrity / credential theft):**
 
 1. Filter reviewer `list_suggestions` (and likely lineage/provenance/actors) to the caller’s connection — **H1**.
-2. Disable env proxies on `thought-mcp-stdio` (reuse `local_agent()`); add an `HTTP_PROXY` leak test — **H7**.
+2. Disable env proxies **and redirects** on `thought-mcp-stdio` (reuse `local_agent()`); add `HTTP_PROXY` and 302 leak tests — **H7**.
 3. Fix `AGENTS.md` so it matches AD-15 — **H2**.
 4. Allowlist link schemes at parse, schema, and `openUrl` — **H4**.
-5. `chmod 0700` `THOUGHT_HOME` and `0600` the DB/logs — **H6**.
-6. Cap `/sync` frames; do not create channels for unknown docs; cap XML depth — **M3 / M12**.
+5. `chmod 0700` `THOUGHT_HOME` and `0600` the DB/WAL/logs — **H6**.
+6. Cap `/sync` frames; do not create channels for unknown docs; cap XML depth; reject `Update` without Subscribe — **M3 / M12 / M18 / H3**.
 7. Gate `claude.yml` the same way as the review workflow — **M10**.
 8. Add a transport test: reviewer `replace_block` is denied — **M8**.
 9. Re-validate suggestion patch nodes on accept; ignore `suggestions` keys on generic `Update` — **H3**.
+10. Stop treating trash as hidden from reviewers; drop or filter FTS for tombstones — **M14**.
+11. Clamp search/list `limit` to a small positive `i64` before SQLite — **M15**.
 
 **Before any share/relay work:**
 
-10. Mandatory `share_id` on Subscribe; never authorize by `doc_id` alone — **H3 / M9**.
-11. Schema-validate (or map-filter) peer Yjs updates; stop writing suggestions through generic `Update` — **H3**.
-12. Treat wire actor descriptors as reported; keep secrets out of argv/logs — **M6 / M9**.
-13. Relay URL allowlist (`wss:` / `https:` only, no private/link-local unless explicitly loopback) — **M9**.
+12. Mandatory `share_id` on Subscribe; never authorize by `doc_id` alone — **H3 / M9**.
+13. Schema-validate (or map-filter) peer Yjs updates; stop writing suggestions through generic `Update` — **H3**.
+14. Treat wire actor descriptors as reported; keep secrets out of argv/logs — **M6 / M9**.
+15. Relay URL allowlist (`wss:` / `https:` only, no private/link-local unless explicitly loopback) — **M9**.
+16. Resync on broadcast lag; do not continue with holes — **M17**.
 
 **Defense in depth:**
 
-14. Drop `withGlobalTauri`; tighten CSP; keep the bearer out of JS if possible — **H5**.
-15. Check WebSocket `Origin`; filter awareness client ids — **M11 / M13**.
-16. Phrase-quote FTS queries — **M5**.
-17. Narrow CORS origins — **M4**.
-18. `proxy(None)` on provider chat unless a proxy is an explicit product choice — **H7**.
+17. Drop `withGlobalTauri`; tighten CSP; keep the bearer out of JS if possible — **H5**.
+18. Check WebSocket `Origin`; filter awareness client ids — **M11 / M13**.
+19. Phrase-quote FTS queries — **M5**.
+20. Narrow CORS origins — **M4**.
+21. `proxy(None)` on provider chat unless a proxy is an explicit product choice — **H7**.
+22. Stop panicking under the workspace mutex (`into_inner` / `parking_lot`, fallible JSON) — **M16**.
+23. Cap concurrent loopback connections and WS message size — **M18**.
 
 ---
 
@@ -720,7 +849,9 @@ Reviewed as a hostile reader of the trust boundaries in `AGENTS.md` / `docs/arch
 
 Exploratory agents mapped surfaces; every High/Medium finding was re-read in source at the cited lines.
 
-The second pass re-checked: ureq proxy defaults vs `discovery::local_agent`, stdio shim request construction, WebSocket vs CORS, suggestion accept vs schema, Yjs `read_children` recursion, awareness fanout, provider TLS/redirects/attachment magic bytes, Tauri opener/CSP, and CI association gates. Ordinary unit tests were not re-run; this review did not change runtime code.
+The second pass re-checked: ureq proxy defaults vs `discovery::local_agent`, stdio shim request construction, WebSocket vs CORS, suggestion accept vs schema, Yjs `read_children` recursion, awareness fanout, provider TLS/redirects/attachment magic bytes, Tauri opener/CSP, and CI association gates.
+
+The third pass re-checked, as an on-box attacker: `Workspace::with` mutex poison and `expect` under the lock; SQLite `LIMIT ? as i64` wrapping; FTS vs `deleted_at`; reviewer scope after trash; `/sync` Update without Subscribe; `diff_since` on a malformed state vector; broadcast `Lagged`; shim `ureq::post` vs `local_agent()` (proxy **and** redirects); host-global `127.0.0.1` vs file modes; empty `find`; suggestion map key vs `connection_id`. Ordinary unit tests were not re-run; this review did not change runtime code.
 
 ---
 
